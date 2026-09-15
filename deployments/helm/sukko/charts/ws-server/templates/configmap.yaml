@@ -1,0 +1,16 @@
+{{- if .Values.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ws-server.fullname" . }}-config
+  labels:
+    {{- include "ws-server.labels" . | nindent 4 }}
+data:
+  # Computed connection limits (cluster-wide / replicaCount = per-pod)
+  WS_MAX_CONNECTIONS: {{ div (.Values.connectionLimits.clusterMaxConnections | default 100000) (.Values.replicaCount | default 1) | quote }}
+  WS_MAX_GOROUTINES: {{ add (mul (div (.Values.connectionLimits.clusterMaxConnections | default 100000) (.Values.replicaCount | default 1)) 10) 5000 | quote }}
+
+  {{- range $key, $val := .Values.extraEnv }}
+  {{ $key }}: {{ $val | quote }}
+  {{- end }}
+{{- end }}

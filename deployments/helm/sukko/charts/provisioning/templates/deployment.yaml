@@ -1,0 +1,264 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "provisioning.fullname" . }}
+  labels:
+    {{- include "provisioning.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "provisioning.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "provisioning.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- if not (or .Values.database.url .Values.database.existingSecret) }}
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ .Release.Name }}-postgresql 5432; do echo "waiting for postgres..."; sleep 2; done']
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+        {{- end }}
+        {{- if .Values.valkey.enabled }}
+        - name: wait-for-valkey
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ .Release.Name }}-valkey 6379; do echo "waiting for valkey..."; sleep 2; done']
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+        {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{- if .Values.global.imageRegistry }}{{ .Values.global.imageRegistry }}/{{- end }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort | default 9090 }}
+              protocol: TCP
+            {{- if .Values.webhooks.enabled }}
+            - name: grpc-webhook
+              containerPort: {{ .Values.service.webhookWorkerGRPCPort | default 9091 }}
+              protocol: TCP
+            {{- end }}
+          env:
+            # Pod identity (Downward API — stable pod name for analytics)
+            - name: SUKKO_POD_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+            # Analytics (opt-in; provisioning also runs SSE handler and partition manager)
+            {{- if .Values.analytics.enabled }}
+            - name: ANALYTICS_ENABLED
+              value: "true"
+            {{- if .Values.analytics.secrets.existingSecret }}
+            - name: ANALYTICS_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.analytics.secrets.existingSecret | quote }}
+                  key: {{ .Values.analytics.secrets.dbURLKey | default "analytics-db-url" | quote }}
+            {{- end }}
+            {{- end }}
+
+            # Deployment identity
+            {{- if .Values.environment }}
+            - name: ENVIRONMENT
+              value: {{ .Values.environment | quote }}
+            {{- end }}
+            # Explicit Kafka topic namespace — provisioning always builds topic-name strings; required, no default.
+            {{- if .Values.topicNamespace }}
+            - name: KAFKA_TOPIC_NAMESPACE
+              value: {{ .Values.topicNamespace | quote }}
+            {{- end }}
+            {{- if .Values.validNamespaces }}
+            - name: VALID_NAMESPACES
+              value: {{ .Values.validNamespaces | quote }}
+            {{- end }}
+
+            # License key (Pro/Enterprise editions)
+            {{- with ((.Values.global).license) }}
+            {{- if .existingSecret }}
+            - name: SUKKO_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret }}
+                  key: {{ .existingSecretKey | default "license-key" }}
+            {{- end }}
+            {{- end }}
+
+            # PostgreSQL connection
+            - name: DATABASE_URL
+              {{- if .Values.database.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.existingSecretKey | default "database-url" }}
+              {{- else if .Values.database.url }}
+              value: {{ .Values.database.url | quote }}
+              {{- else }}
+              value: {{ printf "postgres://sukko:sukko@%s-postgresql:5432/sukko?sslmode=disable" .Release.Name | quote }}
+              {{- end }}
+
+            # gRPC port (only when overridden from Go default of 9090)
+            {{- if and .Values.service.grpcPort (ne (int .Values.service.grpcPort) 9090) }}
+            - name: GRPC_PORT
+              value: {{ .Values.service.grpcPort | quote }}
+            {{- end }}
+
+            # Webhook-worker gRPC port (only when overridden from Go default of 9091)
+            {{- if and .Values.webhooks.enabled .Values.service.webhookWorkerGRPCPort (ne (int .Values.service.webhookWorkerGRPCPort) 9091) }}
+            - name: WEBHOOK_WORKER_GRPC_PORT
+              value: {{ .Values.service.webhookWorkerGRPCPort | quote }}
+            {{- end }}
+
+            {{- if .Values.webhooks.enabled }}
+            {{- if not .Values.webhooks.secrets.existingSecret }}
+            {{- fail "webhooks.secrets.existingSecret must be set when webhooks.enabled=true (required for WEBHOOK_INTERNAL_TOKEN and CREDENTIALS_ENCRYPTION_KEY)" }}
+            {{- end }}
+            # WEBHOOK_WORKER_GRPC_ADDR — address provisioning dials to call the worker's
+            # TestDeliver RPC (reverse direction: provisioning → worker internal gRPC server).
+            # No Go envDefault; validated at startup — startup fails if empty on Pro/Enterprise.
+            - name: WEBHOOK_WORKER_GRPC_ADDR
+              value: {{ printf "%s-webhook-worker:%d" .Release.Name (int .Values.webhooks.workerInternalGRPCPort | default 9095) | quote }}
+
+            # WEBHOOK_INTERNAL_TOKEN — shared secret for provisioning ↔ webhook-worker gRPC auth.
+            # Must reference the same Secret as the webhook-worker chart (§IX: never plaintext).
+            # existingSecret is guaranteed non-empty here — the {{- fail }} above guards it.
+            - name: WEBHOOK_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.webhooks.secrets.existingSecret | quote }}
+                  key: {{ .Values.webhooks.secrets.internalTokenKey | default "internal-token" | quote }}
+            # CREDENTIALS_ENCRYPTION_KEY — AES-256 key for encrypting/decrypting webhook secrets.
+            # Must match the value configured in the webhook-worker.
+            - name: CREDENTIALS_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.webhooks.secrets.existingSecret | quote }}
+                  key: {{ .Values.webhooks.secrets.credentialsEncryptionKeyKey | default "credentials-encryption-key" | quote }}
+            {{- end }}
+
+            # Kafka brokers for DLQ and migration tools
+            # Auto-wires to in-cluster Redpanda; override via kafka.brokers.
+            - name: PROVISIONING_KAFKA_BROKERS
+              value: {{ .Values.kafka.brokers | default (printf "%s-redpanda:9092" .Release.Name) | quote }}
+
+            # Connections registry Valkey client — required for Pro+ (ConnectionsAPI feature).
+            # Gated on valkey.enabled so Community deployments without Valkey do not fail at startup.
+            {{- if .Values.valkey.enabled }}
+            - name: PROVISIONING_VALKEY_ADDRS
+              value: {{ .Values.valkey.addrs | default (printf "%s-valkey:6379" .Release.Name) | quote }}
+            {{- if .Values.valkey.existingSecret }}
+            - name: PROVISIONING_VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.valkey.existingSecret | quote }}
+                  key: {{ .Values.valkey.existingSecretKey | default "valkey-password" | quote }}
+            {{- else if .Values.valkey.password }}
+            - name: PROVISIONING_VALKEY_PASSWORD
+              value: {{ .Values.valkey.password | quote }}
+            {{- end }}
+            {{- if .Values.valkey.tls.enabled }}
+            - name: PROVISIONING_VALKEY_TLS_ENABLED
+              value: "true"
+            {{- if .Values.valkey.tls.insecureSkipVerify }}
+            - name: PROVISIONING_VALKEY_TLS_INSECURE
+              value: "true"
+            {{- end }}
+            {{- if .Values.valkey.tls.caPath }}
+            - name: PROVISIONING_VALKEY_TLS_CA_PATH
+              value: {{ .Values.valkey.tls.caPath | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+
+            # Admin bootstrap key (one-time first admin registration)
+            {{- if .Values.adminBootstrapKey }}
+            - name: ADMIN_BOOTSTRAP_KEY
+              value: {{ .Values.adminBootstrapKey | quote }}
+            {{- end }}
+
+            # Admin UI session-cookie configuration
+            {{- if .Values.adminUI.enabled }}
+            {{- if and (not .Values.adminUI.existingSecret) (not .Values.adminUI.adminToken) }}
+            {{- fail "adminUI.existingSecret or adminUI.adminToken must be set when adminUI.enabled=true (ADMIN_TOKEN is required)" }}
+            {{- end }}
+            - name: ADMIN_UI_ENABLED
+              value: "true"
+            {{- if .Values.adminUI.existingSecret }}
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.adminUI.existingSecret | quote }}
+                  key: {{ .Values.adminUI.existingSecretKey | default "admin-token" | quote }}
+            {{- else if .Values.adminUI.adminToken }}
+            - name: ADMIN_TOKEN
+              value: {{ .Values.adminUI.adminToken | quote }}
+            {{- end }}
+            {{- if .Values.adminUI.sessionTTL }}
+            - name: ADMIN_SESSION_TTL
+              value: {{ .Values.adminUI.sessionTTL | quote }}
+            {{- end }}
+            {{- if .Values.adminUI.wsServerHealthURL }}
+            - name: WS_SERVER_HEALTH_URL
+              value: {{ .Values.adminUI.wsServerHealthURL | quote }}
+            {{- end }}
+            {{- if .Values.adminUI.gatewayHealthURL }}
+            - name: GATEWAY_HEALTH_URL
+              value: {{ .Values.adminUI.gatewayHealthURL | quote }}
+            {{- end }}
+            {{- end }}
+
+            # Extra env overrides from values
+            {{- range $key, $val := .Values.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

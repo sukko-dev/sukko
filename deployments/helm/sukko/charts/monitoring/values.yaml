@@ -1,0 +1,172 @@
+# Default values for monitoring subchart
+
+enabled: true
+
+# Prometheus
+prometheus:
+  enabled: true
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  port: 9090
+  retention: "7d"
+  scrapeInterval: "15s"
+  service:
+    type: ClusterIP  # Use NodePort for external access
+    nodePort: 30090  # Only used when type is NodePort
+  image:
+    repository: prom/prometheus
+    tag: v2.47.0
+    pullPolicy: IfNotPresent
+
+# Grafana
+grafana:
+  enabled: true
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "250m"
+      memory: "512Mi"
+  port: 3000
+  adminUser: admin
+  # adminPassword set via secret
+  service:
+    type: ClusterIP  # Use NodePort for external access
+    nodePort: 30300  # Only used when type is NodePort
+  image:
+    repository: grafana/grafana
+    tag: 10.2.0
+    pullPolicy: IfNotPresent
+
+# Loki
+loki:
+  enabled: true
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  port: 3100
+  retention: "168h"
+  image:
+    repository: grafana/loki
+    tag: 2.9.2
+    pullPolicy: IfNotPresent
+
+# Promtail
+promtail:
+  enabled: true
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+  image:
+    repository: grafana/promtail
+    tag: 2.9.2
+    pullPolicy: IfNotPresent
+
+# AlertManager
+alertmanager:
+  enabled: false
+  image:
+    repository: prom/alertmanager
+    tag: v0.27.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+  port: 9093
+  receivers:
+    slack:
+      enabled: false
+      webhookUrl: ""
+      channel: "#alerts"
+    pagerduty:
+      enabled: false
+      serviceKey: ""
+    opsgenie:
+      enabled: false
+      apiKey: ""
+    email:
+      enabled: false
+      to: ""
+      from: ""
+      smarthost: ""
+    webhook:
+      enabled: false
+      url: ""
+
+# Tempo (trace storage)
+tempo:
+  enabled: false
+  image:
+    repository: grafana/tempo
+    tag: 2.3.1
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "512Mi"
+  port: 3200
+  retention: "168h"
+
+# OTEL Collector
+otelCollector:
+  enabled: false
+  image:
+    repository: otel/opentelemetry-collector-contrib
+    tag: 0.96.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+  port: 4317
+
+# Pyroscope (continuous profiling)
+pyroscope:
+  enabled: false
+  image:
+    repository: grafana/pyroscope
+    tag: 1.4.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "512Mi"
+  port: 4040
+
+# Custom alert rules (appended to defaults when alertmanager.enabled)
+customAlertRules: []
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

@@ -1,0 +1,47 @@
+# E2E-only Compose override for the KAFKA message backend.
+#
+# The base docker-compose.yml intentionally leaves the tester's KAFKA_BROKERS unset so the
+# kafka-ingest suite SKIPS in the operator quick-start (direct/Community). This override — applied
+# by the E2E kafka-backend cells (`task e2e:cell BACKEND=kafka`) and `task e2e:kafka-ingest` —
+# points the tester at the in-network Redpanda broker AND gives it the admin key so it can drive
+# provisioning (channel/routing rules). It is NOT part of the operator compose and is never synced
+# to sukko-cli.
+#
+# The admin keypair (.admin.key) is generated per-run via `cmd/gen-admin-key`; its public half is
+# wired to provisioning as ADMIN_BOOTSTRAP_KEY. All of this hand-rolled wiring is slated for removal
+# once the devstack command (issue #144) lands.
+services:
+  sukko-tester:
+    volumes:
+      # Raw 64-byte Ed25519 admin private key (matches provisioning's ADMIN_BOOTSTRAP_KEY, kid bootstrap-0).
+      - ./taskfiles/e2e/.admin.key:/etc/sukko/admin.key:ro
+    environment:
+      # Direct-to-Kafka publish target for the kafka-ingest suite (compose-internal address,
+      # resolvable from the tester container). Presence flips the suite from skip to run.
+      KAFKA_BROKERS: "redpanda:9092"
+      # Admin JWT signing key so the tester can create channel/routing rules on provisioning.
+      TESTER_ADMIN_KEY_FILE: "/etc/sukko/admin.key"
+
+  ws-server:
+    environment:
+      # History delivery proof (validate:history): the Go default is false (operators
+      # must size Valkey memory first — see MsgHistoryValkeyMemoryWarning). The e2e
+      # stack opts in so the Community/Pro kafka cells can prove the ADR-0009
+      # history data path end to end.
+      WS_HISTORY_ENABLED: "true"
+      # Speed up the delivery-liveness warmup: a publish to a just-provisioned tenant topic stalls
+      # up to kgo's 5s MetadataMinAge default before the producer re-fetches metadata. 1s keeps each
+      # kafka suite's warmup short. (Production keeps the 5s Go default.)
+      KAFKA_METADATA_MIN_AGE: "1s"
+
+  provisioning:
+    environment:
+      # The kafka-backend battery cells (Pro/kafka, Enterprise/kafka) drive the full green
+      # suite set — far more than the default 60 req/min per IP from a single host. Raise the
+      # limit so the e2e isn't throttled by a production-facing security control (§IX) that is
+      # meaningless for a single-IP test harness. (Harmless for the 2-suite kafka-ingest task.)
+      API_RATE_LIMIT_PER_MIN: "100000"
+      # Same rationale for the dedicated per-IP revoke limiter (independent of
+      # API_RATE_LIMIT_PER_MIN): the token-revocation suite issues many revokes from one host,
+      # so raise it well above the 30/min production default.
+      PROVISIONING_TOKEN_REVOCATION_RATE_LIMIT_PER_MIN: "100000"

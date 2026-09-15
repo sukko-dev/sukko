@@ -1,0 +1,75 @@
+# =============================================================================
+# Provenance — commit identity + AI-attribution gate
+# =============================================================================
+# Enforces on every commit in the range: author AND committer email must be
+# @sukko.dev (GitHub's merge machinery, noreply@github.com, is allowed as
+# committer only), and no AI-attribution markers in commit messages or added
+# diff lines (scripts/check-provenance/ai-markers.txt).
+#
+# Runs on PRs (the useful gate — a violation found post-merge can only be
+# fixed by rewriting history) and on pushes to main (backstop for direct
+# pushes). Cheap (seconds), unlike the main CI gate.
+#
+# Make this a REQUIRED status check in the main branch ruleset (operator step).
+
+name: Provenance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provenance-${{ github.ref }}
+  # Cancel superseded PR runs, but never cancel a push-to-main run: its
+  # before..after range is unique to that push and a cancelled run would leave
+  # those commits unvalidated.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Commit provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Full history — the check walks a commit range, and shallow clones
+          # can't resolve the base.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: scripts/check-provenance/go.mod
+          # The module has zero dependencies (no go.sum) — caching would fail.
+          cache: false
+
+      - name: Determine commit range
+        id: range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "range=${PR_BASE_SHA}..${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          elif git cat-file -e "$PUSH_BEFORE" 2>/dev/null; then
+            echo "range=${PUSH_BEFORE}..${PUSH_AFTER}" >> "$GITHUB_OUTPUT"
+          elif git rev-parse -q --verify "${PUSH_AFTER}^" >/dev/null; then
+            # Force-push or branch creation: 'before' doesn't exist locally —
+            # fall back to checking just the pushed head commit.
+            echo "range=${PUSH_AFTER}~1..${PUSH_AFTER}" >> "$GITHUB_OUTPUT"
+          else
+            # Root commit — it has no parent to diff against, so '~1' is not a
+            # valid revision. Its entire ancestry is the commit itself.
+            echo "range=${PUSH_AFTER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check commit provenance
+        working-directory: scripts/check-provenance
+        run: go run . --range '${{ steps.range.outputs.range }}' --repo "$GITHUB_WORKSPACE"

@@ -1,0 +1,150 @@
+# E2E-only Compose override for the Valkey SENTINEL HA topology.
+#
+# Layered THIRD, on top of the direct backend override, by the Sentinel grid cell:
+#   docker compose -f docker-compose.yml \
+#     -f taskfiles/e2e/direct.override.yml \
+#     -f taskfiles/e2e/valkey-sentinel.override.yml --profile sentinel
+#
+# ALL-IP TOPOLOGY (fix/sentinel-failover-static-ip). The master, replica, and three sentinels form a
+# self-contained cluster island on a dedicated pinned network (`sentinel-net`, subnet
+# E2E_SENTINEL_SUBNET_CIDR). The master and replica carry STATIC IPs (E2E_SENTINEL_MASTER_IP /
+# E2E_SENTINEL_REPLICA_IP), and the sentinels monitor the master BY IP with resolve-hostnames /
+# announce-hostnames OFF. This is the whole point of the cell: a pinned IP survives the master
+# container's death, whereas a Docker DNS name stops resolving the instant the container dies — which
+# stalls +odown and trips the sentinels into TILT, so failover never happens (the regression this
+# guards). See ws/docs/e2e-testing.md ("Sentinel HA cell").
+#
+# This override DOES extend the base `valkey` service — it attaches it to `sentinel-net` with a static
+# IP (it is still reused as the initial MASTER and the SIGKILL target for the P2 failover phase; it has
+# no restart policy, so a kill leaves it dead). Network homing: the Valkey cluster nodes live on
+# `sentinel-net` ONLY; `ws-server` is the sole DUAL-HOMED bridge (default + sentinel-net) so the app
+# mesh (gateway→ws-server, ws-server→provisioning) is preserved while ws-server can still reach the
+# sentinels and the promoted master's pinned IP. Sentinels are single-homed for a deterministic
+# self-announce IP (they share one config, so cannot be given distinct announce-ips).
+#
+# All add-on services carry `profiles: ["sentinel"]` so they start ONLY for this cell
+# (`--profile sentinel`), never for `sukko up` or the other grid cells.
+
+# The pinned network. Its `ipam` subnet literal mirrors E2E_SENTINEL_SUBNET_CIDR in stack.sh
+# (lockstep-checked by sentinel_guard_test.sh). 10.89.0.0/24 sits outside Docker's default address
+# pools (172.16.0.0/12 + 192.168.0.0/16) so it cannot "Pool overlaps" at boot.
+networks:
+  sentinel-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24
+
+# Shared definition for the three sentinel processes (§XV: define once, reference thrice).
+x-valkey-sentinel: &valkey-sentinel
+  image: valkey/valkey:7.2-alpine
+  profiles: ["sentinel"]
+  # Single-homed on the pinned network → one interface, one IP, so each sentinel self-announces its
+  # sole pinned-net IP deterministically (announce-hostnames is off and the shared config cannot carry
+  # three distinct announce-ips).
+  networks:
+    - sentinel-net
+  configs:
+    - source: valkey-sentinel-conf
+      target: /etc/sentinel/sentinel.conf
+  # valkey-sentinel rewrites its config at runtime (it appends discovered replica/known-sentinel
+  # state), but a compose `configs:` mount is read-only — so copy it to a writable path first.
+  command: sh -c 'cp /etc/sentinel/sentinel.conf /data/sentinel.conf && exec valkey-sentinel /data/sentinel.conf'
+  depends_on:
+    valkey:
+      condition: service_healthy
+    valkey-replica:
+      condition: service_healthy
+  healthcheck:
+    # Healthy only once the sentinel actually knows the master (non-empty master-addr) — this
+    # gates the boot so ws-server does not start against a not-yet-formed sentinel quorum
+    # (Edge case "Boot ordering"). `$$` escapes compose's `$` interpolation.
+    test: ["CMD-SHELL", "test -n \"$$(valkey-cli -p 26379 sentinel get-master-addr-by-name mymaster)\""]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+services:
+  # ─── Base master pinned onto sentinel-net ─────────────────────────────
+  # Extends the base `valkey` service (initial master + SIGKILL target) with a static IP on the pinned
+  # network. Pinned-net ONLY (cluster island) — nothing on `default` dials it in this cell.
+  valkey:
+    networks:
+      sentinel-net:
+        ipv4_address: 10.89.0.10
+  # ─── Replica of the base `valkey` master ──────────────────────────────
+  valkey-replica:
+    image: valkey/valkey:7.2-alpine
+    profiles: ["sentinel"]
+    # All-IP replication: dial the master by its pinned IP and announce SELF by pinned IP, so the
+    # sentinels track the future promoted master purely by IP (no hostname in the failover path).
+    command: valkey-server --replicaof 10.89.0.10 6379 --replica-announce-ip 10.89.0.11
+    networks:
+      sentinel-net:
+        ipv4_address: 10.89.0.11
+    depends_on:
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+  # ─── Three sentinels (quorum 2) monitoring `mymaster` ─────────────────
+  valkey-sentinel-1:
+    <<: *valkey-sentinel
+  valkey-sentinel-2:
+    <<: *valkey-sentinel
+  valkey-sentinel-3:
+    <<: *valkey-sentinel
+  # ─── Re-point booted Valkey clients at the sentinels ──────────────────
+  ws-server:
+    # The SOLE dual-homed bridge: `default` keeps the app mesh (gateway→ws-server, ws-server→
+    # provisioning) intact; `sentinel-net` lets ws-server reach the sentinels and the promoted
+    # master's pinned IP. List syntax REQUIRED for this service (bare-key MESSAGE_BACKEND passthrough
+    # — see base docker-compose.yml).
+    networks:
+      - default
+      - sentinel-net
+    environment:
+      # Sentinel endpoints on the sentinel port (26379), NOT the data port. len(addrs)>1 plus the
+      # Go-default VALKEY_MASTER_NAME=mymaster makes UseValkeySentinel pick the Sentinel branch.
+      # VALKEY_MASTER_NAME is deliberately NOT set here — its Go envDefault is already "mymaster"
+      # (§I forbids duplicating a Go default).
+      - VALKEY_ADDRS=valkey-sentinel-1:26379,valkey-sentinel-2:26379,valkey-sentinel-3:26379
+    depends_on:
+      # Deterministic cold boot: ws-server waits until all three sentinels know the master.
+      valkey-sentinel-1:
+        condition: service_healthy
+      valkey-sentinel-2:
+        condition: service_healthy
+      valkey-sentinel-3:
+        condition: service_healthy
+  provisioning:
+    # Map syntax (matches the base provisioning service). On Community, provisioning builds NO Valkey
+    # client (connections/webhook clients are Pro-gated), so it never dials these endpoints. It stays
+    # on `default` only, so with the sentinels pinned-net-only these hostnames are deliberately NOT
+    # resolvable from provisioning — intended and inert (no booted service is pointed at a data node;
+    # Scenario 2 AC-1), not exercised coverage. PROVISIONING_VALKEY_MASTER_NAME has NO Go default.
+    environment:
+      PROVISIONING_VALKEY_ADDRS: "valkey-sentinel-1:26379,valkey-sentinel-2:26379,valkey-sentinel-3:26379"
+      PROVISIONING_VALKEY_MASTER_NAME: "mymaster"
+# Inlined sentinel.conf shared by all three sentinels. Every timing/structural knob is pinned
+# and commented (§I); the ms values MUST equal the E2E_SENTINEL_* constants in stack.sh
+# (lockstep-checked by sentinel_guard_test.sh).
+configs:
+  valkey-sentinel-conf:
+    content: |
+      port 26379
+      # All-IP identity: keep BOTH hostname flags OFF so no sentinel ever re-resolves a container
+      # hostname. A dead master's DNS name would fail to resolve and stall failover (the bug this
+      # cell guards); a pinned IP cannot resolve away. This pair is lockstep-guarded in stack.sh.
+      sentinel resolve-hostnames no
+      sentinel announce-hostnames no
+      # Monitor the base `valkey` master by its PINNED IP (== E2E_SENTINEL_MASTER_IP); quorum = 2 of 3.
+      sentinel monitor mymaster 10.89.0.10 6379 2
+      # Declare the master down after 5000ms unreachable (== E2E_SENTINEL_DOWN_AFTER_MS).
+      sentinel down-after-milliseconds mymaster 5000
+      # Abort/retry a failover that has not completed within 10000ms (== E2E_SENTINEL_FAILOVER_TIMEOUT_MS).
+      sentinel failover-timeout mymaster 10000
+      # Reconfigure one replica at a time during failover (only one replica here anyway).
+      sentinel parallel-syncs mymaster 1

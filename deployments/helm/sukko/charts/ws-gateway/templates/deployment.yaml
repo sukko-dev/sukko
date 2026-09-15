@@ -1,0 +1,149 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ws-gateway.fullname" . }}
+  labels:
+    {{- include "ws-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ws-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "ws-gateway.selectorLabels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-ws-server
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ .Release.Name }}-ws-server 3001; do echo "waiting for ws-server..."; sleep 2; done']
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+        - name: wait-for-provisioning
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ .Release.Name }}-provisioning-grpc 9090; do echo "waiting for provisioning gRPC..."; sleep 2; done']
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{- if .Values.global.imageRegistry }}{{ .Values.global.imageRegistry }}/{{- end }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            # Pod identity (Downward API — stable pod name for analytics)
+            - name: SUKKO_POD_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+            # Analytics (opt-in; only injected when analytics.enabled=true)
+            {{- if .Values.analytics.enabled }}
+            - name: ANALYTICS_ENABLED
+              value: "true"
+            {{- if .Values.analytics.secrets.existingSecret }}
+            - name: ANALYTICS_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.analytics.secrets.existingSecret | quote }}
+                  key: {{ .Values.analytics.secrets.dbURLKey | default "analytics-db-url" | quote }}
+            {{- end }}
+            {{- end }}
+
+            # Deployment identity (only injected when overriding Go envDefault)
+            {{- if .Values.environment }}
+            - name: ENVIRONMENT
+              value: {{ .Values.environment | quote }}
+            {{- end }}
+
+            # License key (Pro/Enterprise editions)
+            {{- with ((.Values.global).license) }}
+            {{- if .existingSecret }}
+            - name: SUKKO_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret }}
+                  key: {{ .existingSecretKey | default "license-key" }}
+            {{- end }}
+            {{- end }}
+
+            # Auto-wired service addresses (Kubernetes service discovery)
+            - name: GATEWAY_BACKEND_URL
+              value: {{ .Values.backendURL | default (printf "ws://%s-ws-server:3001/ws" .Release.Name) | quote }}
+            - name: PROVISIONING_GRPC_ADDR
+              value: {{ .Values.provisioningGRPCAddr | default (printf "%s-provisioning-grpc:9090" .Release.Name) | quote }}
+            - name: SERVER_GRPC_ADDR
+              value: {{ printf "%s-ws-server:3006" .Release.Name | quote }}
+            - name: PUSH_GRPC_ADDR
+              value: {{ printf "%s-push-service:3008" .Release.Name | quote }}
+            {{- if .Values.global.pushEnabled }}
+            # Push surface opt-in — set by the umbrella chart when the
+            # push-service subchart is enabled (routes 404 without it).
+            - name: GATEWAY_PUSH_ENABLED
+              value: "true"
+            {{- end }}
+
+            # Extra env overrides from values
+            # Rate limiting and tenant connection limits use Go envDefault values.
+            # Override via extraEnv when needed (e.g., extraEnv: { GATEWAY_PUBLISH_BURST: "200" }).
+            {{- range $key, $val := .Values.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+
+            # Internal secret (gateway → ws-server mutual auth).
+            # MUST reference the SAME Kubernetes Secret as ws-server so both services share the same value.
+            {{- if ((.Values.global).internalSecret).secretName }}
+            - name: WS_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.global.internalSecret.secretName | quote }}
+                  key: {{ .Values.global.internalSecret.secretKey | default "internal-secret" | quote }}
+            {{- end }}
+
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

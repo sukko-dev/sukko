@@ -1,0 +1,46 @@
+{{if .Connections}}
+<div class="space-y-3">
+  <div class="flex items-center justify-between">
+    <span class="text-sm text-gray-500">{{len .Connections}} connections</span>
+    <button
+      hx-delete="/admin/tenants/{{.TenantSlug}}/connections"
+      hx-confirm="Disconnect all connections for this tenant?"
+      hx-target="#connections-container"
+      class="rounded-md bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100">
+      Disconnect all
+    </button>
+  </div>
+  <div class="overflow-hidden rounded-lg border border-gray-200">
+    <table class="min-w-full divide-y divide-gray-200 text-xs">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-3 py-2 text-left font-medium text-gray-500">Connection ID</th>
+          <th class="px-3 py-2 text-left font-medium text-gray-500">IP</th>
+          <th class="px-3 py-2 text-left font-medium text-gray-500">Connected</th>
+          <th class="px-3 py-2 text-left font-medium text-gray-500">Subscriptions</th>
+          <th class="px-3 py-2"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        {{range .Connections}}
+        <tr>
+          <td class="px-3 py-2 font-mono text-gray-700">{{.ID}}</td>
+          <td class="px-3 py-2 text-gray-500">{{.RemoteAddr}}</td>
+          <td class="px-3 py-2 text-gray-400">{{.ConnectedAt}}</td>
+          <td class="px-3 py-2 text-gray-500">{{len .Subscriptions}}</td>
+          <td class="px-3 py-2">
+            <button
+              hx-delete="/admin/tenants/{{$.TenantSlug}}/connections/{{.ID}}"
+              hx-target="closest tr"
+              hx-swap="outerHTML"
+              class="text-red-500 hover:text-red-700">Disconnect</button>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{else}}
+<p class="py-6 text-center text-sm text-gray-400">No active connections</p>
+{{end}}

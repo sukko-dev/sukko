@@ -1,0 +1,19 @@
+{
+  "name": "sukko-adminui-static",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build tooling for Sukko Admin UI static assets. Not used at Go build time.",
+  "scripts": {
+    "build:codemirror": "node build.mjs"
+  },
+  "devDependencies": {
+    "@codemirror/autocomplete": "^6.0.0",
+    "@codemirror/commands": "^6.0.0",
+    "@codemirror/lang-json": "^6.0.0",
+    "@codemirror/lint": "^6.0.0",
+    "@codemirror/state": "^6.0.0",
+    "@codemirror/theme-one-dark": "^6.0.0",
+    "@codemirror/view": "^6.0.0",
+    "esbuild": "^0.20.0"
+  }
+}

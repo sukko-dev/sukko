@@ -1,0 +1,119 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "redpanda.fullname" . }}
+  labels:
+    {{- include "redpanda.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "redpanda.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "redpanda.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "redpanda.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redpanda
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - rpk
+            - redpanda
+            - start
+            - --smp=1
+            - --memory={{ .Values.memory | default "512M" }}
+            - --reserve-memory=0M
+            - --overprovisioned
+            - --node-id=0
+            - --check=false
+            {{- if and .Values.externalAccess.enabled .Values.externalAccess.advertisedHost }}
+            # External access: dual listeners for internal and external clients
+            - --kafka-addr=internal://0.0.0.0:{{ .Values.kafkaPort }},external://0.0.0.0:{{ .Values.externalAccess.containerPort }}
+            - --advertise-kafka-addr=internal://{{ include "redpanda.fullname" . }}:{{ .Values.kafkaPort }},external://{{ .Values.externalAccess.advertisedHost }}:{{ .Values.kafkaPort }}
+            {{- else }}
+            # Internal only: single listener
+            - --kafka-addr=0.0.0.0:{{ .Values.kafkaPort }}
+            - --advertise-kafka-addr={{ include "redpanda.fullname" . }}:{{ .Values.kafkaPort }}
+            {{- end }}
+            - --pandaproxy-addr=0.0.0.0:{{ .Values.pandaproxyPort }}
+            - --advertise-pandaproxy-addr={{ include "redpanda.fullname" . }}:{{ .Values.pandaproxyPort }}
+            - --schema-registry-addr=0.0.0.0:{{ .Values.schemaRegistryPort }}
+          ports:
+            - name: kafka
+              containerPort: {{ .Values.kafkaPort }}
+              protocol: TCP
+            {{- if and .Values.externalAccess.enabled .Values.externalAccess.advertisedHost }}
+            - name: kafka-external
+              containerPort: {{ .Values.externalAccess.containerPort }}
+              protocol: TCP
+            {{- end }}
+            - name: admin
+              containerPort: {{ .Values.adminPort }}
+              protocol: TCP
+            - name: pandaproxy
+              containerPort: {{ .Values.pandaproxyPort }}
+              protocol: TCP
+            - name: schema
+              containerPort: {{ .Values.schemaRegistryPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /v1/status/ready
+              port: admin
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /v1/status/ready
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/redpanda/data
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.storage.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.storage.storageClass }}
+        storageClassName: {{ .Values.storage.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}
+  {{- else }}
+      volumes:
+        - name: data
+          emptyDir: {}
+  {{- end }}
+{{- end }}

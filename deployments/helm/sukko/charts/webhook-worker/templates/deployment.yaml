@@ -1,0 +1,142 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "webhook-worker.fullname" . }}
+  labels:
+    {{- include "webhook-worker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "webhook-worker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "webhook-worker.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "webhook-worker.fullname" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-valkey
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ .Values.valkey.addrs | default (printf "%s-valkey" .Release.Name) | splitList ":" | first }} {{ .Values.valkey.addrs | default (printf "%s-valkey:6379" .Release.Name) | splitList ":" | last }}; do echo "waiting for valkey..."; sleep 2; done']
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{- if .Values.global.imageRegistry }}{{ .Values.global.imageRegistry }}/{{- end }}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.httpPort }}
+              protocol: TCP
+            - name: grpc-internal
+              containerPort: {{ .Values.service.internalGrpcPort }}
+              protocol: TCP
+          env:
+            {{- if not .Values.secrets.existingSecret }}
+            {{- fail "secrets.existingSecret must be set when webhook-worker is enabled — create a Kubernetes Secret with 'internal-token' and 'credentials-encryption-key' keys" }}
+            {{- end }}
+            # --- Secrets (§IX: injected via secretKeyRef, never plaintext) ---
+            # WEBHOOK_INTERNAL_TOKEN — shared secret for worker ↔ provisioning gRPC auth.
+            - name: WEBHOOK_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "webhook-worker.secretName" . }}
+                  key: {{ .Values.secrets.internalTokenKey | default "internal-token" }}
+            # CREDENTIALS_ENCRYPTION_KEY — AES-256 key for decrypting webhook secrets.
+            # Must match the value configured in the provisioning service.
+            - name: CREDENTIALS_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "webhook-worker.secretName" . }}
+                  key: {{ .Values.secrets.credentialsEncryptionKeyKey | default "credentials-encryption-key" }}
+
+            # --- Required address wiring ---
+            # WEBHOOK_WORKER_PROVISIONING_GRPC_ADDR — provisioning gRPC for the worker to dial.
+            # No Go envDefault; Helm must inject this value (startup fails if empty).
+            # Port 9091 = provisioning's dedicated webhook gRPC listener (WEBHOOK_WORKER_GRPC_PORT).
+            # This is DIFFERENT from the worker's own internalGrpcPort (9095).
+            - name: WEBHOOK_WORKER_PROVISIONING_GRPC_ADDR
+              value: {{ .Values.provisioning.grpcAddr | default (printf "%s-provisioning:9091" .Release.Name) | quote }}
+
+            # WEBHOOK_WORKER_VALKEY_ADDRS — broadcast bus + cache invalidation PSUBSCRIBE.
+            # No Go envDefault; Helm must inject this value.
+            - name: WEBHOOK_WORKER_VALKEY_ADDRS
+              value: {{ .Values.valkey.addrs | default (printf "%s-valkey:6379" .Release.Name) | quote }}
+
+            {{- if .Values.valkey.existingSecret }}
+            - name: WEBHOOK_WORKER_VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.valkey.existingSecret | quote }}
+                  key: {{ .Values.valkey.existingSecretKey | default "valkey-password" | quote }}
+            {{- else if .Values.valkey.password }}
+            - name: WEBHOOK_WORKER_VALKEY_PASSWORD
+              value: {{ .Values.valkey.password | quote }}
+            {{- end }}
+
+            # --- Ports (only injected when non-default, §I: Helm must not duplicate Go defaults) ---
+            {{- if and .Values.service.httpPort (ne (int .Values.service.httpPort) 8083) }}
+            - name: WEBHOOK_HTTP_PORT
+              value: {{ .Values.service.httpPort | quote }}
+            {{- end }}
+            {{- if and .Values.service.internalGrpcPort (ne (int .Values.service.internalGrpcPort) 9095) }}
+            - name: WEBHOOK_WORKER_INTERNAL_GRPC_PORT
+              value: {{ .Values.service.internalGrpcPort | quote }}
+            {{- end }}
+
+            # License key (Pro/Enterprise editions)
+            {{- with ((.Values.global).license) }}
+            {{- if .existingSecret }}
+            - name: SUKKO_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret }}
+                  key: {{ .existingSecretKey | default "license-key" }}
+            {{- end }}
+            {{- end }}
+
+            # Extra env overrides (§I: Go envDefault is the source of truth for all other settings)
+            {{- range $key, $val := .Values.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

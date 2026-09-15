@@ -1,0 +1,112 @@
+{{- if and .Values.enabled .Values.prometheus.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "monitoring.fullname" . }}-prometheus-config
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.prometheus.scrapeInterval }}
+      evaluation_interval: {{ .Values.prometheus.scrapeInterval }}
+
+    {{- if .Values.alertmanager.enabled }}
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['{{ include "monitoring.fullname" . }}-alertmanager:{{ .Values.alertmanager.port }}']
+    {{- end }}
+
+    scrape_configs:
+      # Scrape ws-server metrics from ALL pods (not via Service which load-balances to one)
+      - job_name: 'ws-server'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - {{ .Release.Namespace }}
+        relabel_configs:
+          # Only scrape endpoints for ws-server service
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: {{ .Release.Name }}-ws-server
+          # Only scrape the metrics port (3001)
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+          # Use pod name as instance label for better identification
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        metrics_path: /metrics
+
+      # Scrape Redpanda metrics
+      - job_name: 'redpanda'
+        static_configs:
+          - targets: ['{{ .Release.Name }}-redpanda:9644']
+
+      # Scrape ws-gateway metrics from ALL pods (not via Service which may use different port)
+      - job_name: 'ws-gateway'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - {{ .Release.Namespace }}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: {{ .Release.Name }}-ws-gateway
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        metrics_path: /metrics
+
+      # Scrape provisioning metrics
+      - job_name: 'provisioning'
+        static_configs:
+          - targets: ['{{ .Release.Name }}-provisioning:8080']
+        metrics_path: /metrics
+
+      # Scrape webhook-worker metrics from ALL pods
+      - job_name: 'webhook-worker'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - {{ .Release.Namespace }}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: {{ .Release.Name }}-webhook-worker
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        metrics_path: /metrics
+
+      # Scrape push-service metrics via static config (push-service is single-replica by design;
+      # endpoint discovery is used for multi-pod services like ws-server and webhook-worker).
+      # Port 3009 matches PUSH_HTTP_PORT envDefault in ws/internal/push/config.go.
+      - job_name: 'push-service'
+        static_configs:
+          - targets: ['{{ .Release.Name }}-push-service:3009']
+        metrics_path: /metrics
+
+      # Prometheus self-monitoring
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+{{- end }}

@@ -1,0 +1,342 @@
+# =============================================================================
+# CI — Lint, Test, Helm Lint, E2E editions×backends grid
+# =============================================================================
+# Runs the fast gate (vet, tests, lints, guard fixtures) on every PR — the repo
+# is public, so Actions minutes are free and pre-merge is the useful time to
+# fail. The heavy Docker jobs (e2e grid, kafka-ingest, push delivery) stay off
+# PRs for feedback-time, not cost: they run on every push to main (post-merge
+# verification — smoke grid cells + kafka-ingest + push data-path round-trips),
+# nightly on a schedule (the FULL grid), and manually via the GitHub Actions UI
+# ("Run workflow" button) or CLI: gh workflow run ci.yml --ref <branch>
+
+name: CI
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly — runs the FULL editions×backends grid (all anchor cells). Pushes to
+    # main run only the smoke cells (see e2e-grid-setup).
+    - cron: "0 3 * * *"
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Test — go vet + go test -race
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ws
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ws/go.mod
+          cache: true
+
+      # ws/.ci-test-tags is the committed CI arming switch (empty in the placeholder era;
+      # the KMS delivery PR writes "sukko_realkey" to arm the anti-circularity suite).
+      # It is a data file, not a workflow edit, because the delivery GitHub App has
+      # contents+PR write but not `workflows` permission (spec R-03).
+      - name: Vet
+        run: go vet -tags "$(cat .ci-test-tags)" ./...
+
+      - name: Run tests
+        run: go test -race -count=1 -timeout=10m -tags "$(cat .ci-test-tags)" ./...
+
+  # ---------------------------------------------------------------------------
+  # Lint — golangci-lint + verify auto-fixable issues
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ws
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ws/go.mod
+
+      # Match the test job's build tags (ws/.ci-test-tags) so the armed realkey files
+      # are linted too (empty → default build in the placeholder era).
+      - name: Compute build tags
+        id: buildtags
+        run: |
+          TAGS="$(cat .ci-test-tags)"
+          if [ -n "$TAGS" ]; then
+            echo "args=--build-tags $TAGS" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
+        with:
+          version: v2.12.2
+          working-directory: ws
+          args: ${{ steps.buildtags.outputs.args }}
+
+      - name: Verify auto-fixable issues are resolved
+        run: |
+          golangci-lint run --fix ./... || true
+          gofmt -s -w .
+          go fix ./... || true
+          go mod tidy
+          if [ -n "$(git diff)" ]; then
+            echo "::error::Code has auto-fixable issues. Run '/lint' locally and commit the changes."
+            git diff --stat
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Compose Transform Tests — isolated module under scripts/compose-transform/
+  # not covered by the ws/ test job above.
+  # ---------------------------------------------------------------------------
+  compose-transform-test:
+    name: Compose Transform Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: scripts/compose-transform/go.mod
+          cache: true
+
+      - name: Test
+        working-directory: scripts/compose-transform
+        run: go test -race ./...
+
+  # ---------------------------------------------------------------------------
+  # Helm Lint — validate Helm chart values
+  # ---------------------------------------------------------------------------
+  helm-lint:
+    name: Helm Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+
+      - name: Lint GKE values
+        run: helm lint deployments/helm/sukko -f deployments/helm/sukko/values/gke/demo.yaml
+
+  # ---------------------------------------------------------------------------
+  # kafka-ingest E2E — Kafka round-trip (Pro license exercises the routing-rules produce path)
+  # ---------------------------------------------------------------------------
+  # Boots the full stack in MESSAGE_BACKEND=kafka mode (built from source) with a
+  # Pro license and runs (1) the kafka-ingest round-trip — publish directly to
+  # Redpanda, assert a gateway-subscribed client receives it — and (2) the
+  # rest-publish suite (kafka mode), the regression guard for the #179 gateway
+  # REST → producer → Kafka PRODUCE path. The task's report assertions fail closed
+  # on skip/error — a green run cannot be vacuous. (Web Push delivery, which needs
+  # an Enterprise license, runs in its own e2e-push-validate job below.)
+  e2e-kafka-ingest:
+    name: kafka-ingest round-trip
+    # Heavy Docker job — post-merge/nightly/dispatch only, not PRs (see header).
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout sukko
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Checkout sukko-cli (test driver)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: sukko-dev/cli
+          path: .sukko-cli
+          ref: main
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ws/go.mod
+          cache: true
+
+      - name: Fail fast if Docker is unavailable
+        # This regression MUST fail (not silently skip) without Docker.
+        run: docker version
+
+      - name: Install Task
+        run: go install github.com/go-task/task/v3/cmd/task@v3.44.0
+
+      - name: Build sukko CLI (driver)
+        working-directory: .sukko-cli
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          go build -o "$HOME/.local/bin/sukko" .
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run kafka-ingest E2E
+        run: task e2e:kafka-ingest
+
+  # ---------------------------------------------------------------------------
+  # E2E anti-vacuous guard fixtures — no Docker, ~2s
+  # ---------------------------------------------------------------------------
+  # Fast fail-closed gate: runs the guard fixture tests (battery_guard_test.sh for the
+  # generic per-suite verdict, guard_test.sh for the push delivery guard) BEFORE any
+  # stack boots. A guard that silently drops an assertion is caught here, cheaply, so a
+  # regressed guard can never let a vacuous-green cell through.
+  e2e-guard-fixtures:
+    name: e2e guard fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout sukko
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Run guard fixture tests
+        run: |
+          bash taskfiles/e2e/battery_guard_test.sh
+          bash taskfiles/e2e/guard_test.sh
+          bash taskfiles/e2e/sentinel_guard_test.sh
+
+  # ---------------------------------------------------------------------------
+  # Grid matrix setup — smoke on push, full grid on schedule/dispatch
+  # ---------------------------------------------------------------------------
+  # Emits the list of anchor cells to run. Push to main runs only the smoke cells
+  # (one per backend); the nightly schedule and manual dispatch run the full grid.
+  # Later specs add cells by editing ONE of these two lists.
+  e2e-grid-setup:
+    name: e2e grid setup
+    # Heavy Docker path — post-merge/nightly/dispatch only, not PRs (see header).
+    # Skipping setup skips the whole e2e-grid matrix via `needs`.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cells: ${{ steps.cells.outputs.cells }}
+    steps:
+      - id: cells
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Smoke: one positive cell per backend. community-kafka is the cheap boot+gate-surface
+            # cell (ADR-0009 proof; ingest-path delivery is follow-up). community-direct also carries edition-limits.
+            echo 'cells=["community-direct","pro-kafka","community-kafka"]' >> "$GITHUB_OUTPUT"
+          else
+            # Full grid (nightly schedule + manual dispatch): every edition×backend cell —
+            # positive (incl. community-kafka — ADR-0009 boot+gate proof; ingest-path delivery is follow-up), degradation (expired-direct), and the
+            # Valkey Sentinel HA topology cell (community-direct-sentinel). Smoke (push) stays lean:
+            # the sentinel cell adds 4 containers (1 replica + 3 sentinels) + a chaos phase, so it runs nightly/dispatch only.
+            echo 'cells=["community-direct","pro-kafka","enterprise-kafka","pro-direct","enterprise-direct","expired-direct","community-kafka","community-direct-sentinel"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # E2E editions×backends grid — the anchor cells
+  # ---------------------------------------------------------------------------
+  # One job per cell (positive edition×backend cells and the expired-direct degradation cell),
+  # each booting a build-from-source stack via the single cell runner (task e2e:cell:<cell>) and
+  # running the validate battery hermetically with the anti-vacuous guard. fail-fast: false so
+  # one red cell does not cancel the others. This subsumes the former direct-mode validate battery
+  # job (now the Community/direct cell); kafka-ingest (kafka-ingest + rest-publish suites) and push
+  # (push suite) keep their own jobs below — they are not grid cells.
+  e2e-grid:
+    name: "grid: ${{ matrix.cell }}"
+    needs: [e2e-guard-fixtures, e2e-grid-setup]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: ${{ fromJSON(needs.e2e-grid-setup.outputs.cells) }}
+    steps:
+      - name: Checkout sukko
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Checkout sukko-cli (test driver)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: sukko-dev/cli
+          path: .sukko-cli
+          ref: main
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ws/go.mod
+          cache: true
+
+      - name: Fail fast if Docker is unavailable
+        # A grid cell MUST fail (not silently skip) without Docker.
+        run: docker version
+
+      - name: Install Task
+        run: go install github.com/go-task/task/v3/cmd/task@v3.44.0
+
+      - name: Build sukko CLI (driver)
+        working-directory: .sukko-cli
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          go build -o "$HOME/.local/bin/sukko" .
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run grid cell
+        run: task e2e:cell:${{ matrix.cell }}
+
+  # ---------------------------------------------------------------------------
+  # Push (Web Push) delivery E2E — kafka-mode, Enterprise-licensed
+  # ---------------------------------------------------------------------------
+  # Boots push-service in a kafka-mode Enterprise stack (built from source) and
+  # runs the tester's `push` suite, asserting a real WebPush notification arrives
+  # at the tester's in-process mock receiver. push requires MESSAGE_BACKEND=kafka
+  # + an Enterprise license, so it cannot run in the direct-mode validate battery.
+  # Fail-closed: the job fails if the `push delivery` check is absent/not-pass, any
+  # check skips, or the report status != pass (see push_validate_guard).
+  e2e-push-validate:
+    name: push delivery
+    # Heavy Docker job — post-merge/nightly/dispatch only, not PRs (see header).
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout sukko
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Checkout sukko-cli (test driver)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: sukko-dev/cli
+          path: .sukko-cli
+          ref: main
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ws/go.mod
+          cache: true
+
+      - name: Fail fast if Docker is unavailable
+        # This regression MUST fail (not silently skip) without Docker.
+        run: docker version
+
+      - name: Install Task
+        run: go install github.com/go-task/task/v3/cmd/task@v3.44.0
+
+      - name: Build sukko CLI (driver)
+        working-directory: .sukko-cli
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          go build -o "$HOME/.local/bin/sukko" .
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run push-validate E2E
+        run: task e2e:push-validate

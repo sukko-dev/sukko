@@ -1,0 +1,125 @@
+# Default values for push-service subchart
+# Go envDefault values are the source of truth for application config.
+# Override any setting via extraEnv.
+
+global:
+  imageRegistry: ""
+
+# Push Service is disabled by default. It requires:
+#   - A Pro license or higher (push to provisioning via `sukko license push <key>`; Web Push; FCM/APNs delivery requires Enterprise)
+#   - A kafka or redpanda message backend (ws-server.messageBackend: kafka|redpanda)
+#
+# Enabling with a direct backend will start push-service but it will fail
+# to consume messages. Verify ws-server.messageBackend before enabling.
+#
+# To enable after pushing a Pro or Enterprise license:
+#   helm upgrade sukko deployments/helm/sukko \
+#     -f deployments/helm/sukko/values/<env>.yaml \
+#     --set push-service.enabled=true
+#
+# Note: helm upgrade --reuse-values preserves the previous enabled state.
+# To explicitly disable on an existing install: --set push-service.enabled=false
+enabled: false
+
+replicaCount: 1
+
+image:
+  repository: sukko-push
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Deployment identity — drives logging, metrics namespacing.
+# Free-form string; Sukko convention: local, dev, stg, prod
+# environment: local
+
+# Message Backend: "direct" or "kafka"
+# messageBackend: kafka  # uncomment to override Go default
+
+# PostgreSQL connection
+database:
+  # Existing secret containing the database URL
+  existingSecret: ""
+  existingSecretKey: "database-url"
+  # Direct URL (used when existingSecret is empty; auto-wired to in-cluster PostgreSQL if blank)
+  url: ""
+
+# Dry run mode — log push notifications instead of sending
+# dryRun: false
+
+# Worker pool size for push delivery
+# workerPoolSize: 10
+
+# --- Infrastructure Connections ---
+# Empty values auto-wire to in-cluster services via release name.
+kafka:
+  # brokers: ""  # Auto: {{ .Release.Name }}-redpanda:9092
+  sasl:
+    enabled: false
+    # mechanism: scram-sha-256
+    # username: ""
+    existingSecret: ""
+    existingSecretKey: "kafka-sasl-password"
+  tls:
+    enabled: false
+
+# Override any Go envDefault. See /health endpoint for current values.
+# Example: { LOG_LEVEL: "debug" }
+extraEnv: {}
+
+# --- Kubernetes Resources ---
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3009
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 3009
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 6
+
+service:
+  type: ClusterIP
+  grpcPort: 3008
+  httpPort: 3009
+
+
+analytics:
+  enabled: false
+  secrets:
+    existingSecret: ""
+    dbURLKey: "analytics-db-url"
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

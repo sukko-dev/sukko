@@ -1,0 +1,39 @@
+apiVersion: v2
+name: sukko
+description: Sukko WebSocket Infrastructure - High-performance market data streaming
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+dependencies:
+  - name: ws-gateway
+    version: "1.0.0"
+    condition: ws-gateway.enabled
+  - name: ws-server
+    version: "1.0.0"
+    condition: ws-server.enabled
+  - name: provisioning
+    version: "1.0.0"
+    condition: provisioning.enabled
+  - name: postgresql
+    version: "1.0.0"
+    condition: postgresql.enabled
+  # NOTE: auth-service removed - sukko-api now issues JWT tokens directly
+  - name: redpanda
+    version: "1.0.0"
+    condition: redpanda.enabled
+  - name: valkey
+    version: "1.0.0"
+    condition: valkey.enabled
+  - name: push-service
+    version: "0.1.0"
+    condition: push-service.enabled
+  - name: monitoring
+    version: "1.0.0"
+    condition: monitoring.enabled
+  - name: webhook-worker
+    version: "1.0.0"
+    condition: webhook-worker.enabled
+
+maintainers:
+  - name: Sukko Team

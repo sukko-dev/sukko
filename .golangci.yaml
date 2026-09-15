@@ -1,0 +1,266 @@
+# golangci-lint configuration (v2)
+# https://golangci-lint.run/usage/configuration/
+# Run: golangci-lint run ./...
+
+version: "2"
+
+run:
+  # Timeout for analysis
+  timeout: 5m
+  # Include test files
+  tests: true
+  # Go version - matches go.mod
+  go: "1.26"
+
+linters:
+  # Start with no default linters, enable only what we need
+  default: none
+  enable:
+    # Default linters
+    - errcheck # Check for unchecked errors
+    - govet # Go vet checks
+    - ineffassign # Detects ineffectual assignments
+    - staticcheck # Staticcheck suite (includes gosimple, stylecheck)
+    - unused # Check for unused code
+
+    # Additional recommended linters
+    - bodyclose # Check HTTP response body is closed
+    - contextcheck # Check context.Context is passed correctly
+    - durationcheck # Check duration multiplications
+    - errorlint # Find code that will cause issues with Go 1.13+ error wrapping
+    - exhaustive # Check exhaustiveness of enum switch statements
+    - gocritic # Opinionated linter with many checks
+    - gosec # Security checks (Constitution IX)
+    - misspell # Check for spelling mistakes
+    - nilerr # Check for err != nil but returns nil
+    - noctx # Check for http requests without context
+    - prealloc # Find slice declarations that could be preallocated
+    - predeclared # Check for shadowing predeclared identifiers
+    - revive # Fast, configurable linter
+    - rowserrcheck # Check sql.Rows.Err is called
+    - sqlclosecheck # Check sql.Rows and sql.Stmt are closed
+    - paralleltest # Detects missing t.Parallel() (excluded on *_shared_test.go)
+    - unconvert # Remove unnecessary conversions
+    - unparam # Report unused function parameters
+    - wastedassign # Find wasted assignment statements
+
+    # Constitution-aligned linters
+    - wrapcheck # Enforce error wrapping at package boundaries (Constitution III)
+    - forbidigo # Ban fmt.Println, log.Printf — zerolog only (Constitution V)
+    - nolintlint # Require justification for //nolint directives (Constitution IX)
+    - protogetter # Protobuf getter best practices (Constitution XII)
+
+    # Go modernization linters
+    - copyloopvar # Detects places where loop variables are copied
+    - intrange # Suggests use of integer range syntax (Go 1.22+)
+    - perfsprint # Check for fmt.Sprintf that can be replaced with string concat
+    - usestdlibvars # Detect when http/time constants can be used
+    - modernize # Suggests modern Go features
+
+  settings:
+    errcheck:
+      # Check for errors returned from type assertions
+      check-type-assertions: true
+      # Allow explicit _ = expr (intentional error discard per Constitution III)
+      check-blank: false
+
+    exhaustive:
+      # Check switch statements over enums
+      default-signifies-exhaustive: true
+
+    # Constitution V: "No log.Printf or fmt.Println" — zerolog only
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: "use zerolog for logging (Constitution V)"
+        - pattern: ^log\.Print.*$
+          msg: "use zerolog for logging (Constitution V)"
+        - pattern: ^log\.Fatal.*$
+          msg: "use zerolog Fatal for logging (Constitution V)"
+        - pattern: ^log\.Panic.*$
+          msg: "use zerolog Panic for logging (Constitution V)"
+      analyze-types: true
+
+    # Constitution IX: "//nolint or #nosec MUST include thorough written justification"
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - hugeParam # Often not a concern in modern Go
+        - rangeValCopy # Go 1.22+ handles this
+
+    govet:
+      # Enable all analyzers
+      enable-all: true
+      disable:
+        - fieldalignment # Too noisy for most codebases
+        - shadow # Covered by predeclared
+
+    gosec:
+      excludes:
+        # G118 is a false positive when the cancel function is stored in a struct
+        # field and called later (e.g., during Shutdown/Stop). gosec cannot track
+        # the lifetime of the cancel beyond the current scope.
+        - G118
+
+    misspell:
+      locale: US
+
+    prealloc:
+      # Only suggest prealloc when there's >10% improvement
+      simple: true
+      range-loops: true
+      for-loops: true
+
+    revive:
+      # Reduce severity for some rules
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+          disabled: true # Too strict for internal packages
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+          disabled: true # Covered by unparam
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+    staticcheck:
+      # Enable all checks
+      checks: ["all", "-ST1000", "-ST1003", "-ST1016"]
+
+    unparam:
+      # Check exported functions
+      check-exported: false
+
+    # Constitution III: "All errors MUST be wrapped with context"
+    wrapcheck:
+      ignore-sigs:
+        # Allow unwrapped sentinel errors and common patterns
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+      ignore-package-globs:
+        # Generated code doesn't need wrapping
+        - google.golang.org/protobuf/*
+        - google.golang.org/grpc/status
+
+  exclusions:
+    rules:
+      # Exclude some linters from running on test files
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - unparam
+          - prealloc
+          - wrapcheck # Test errors don't need wrapping
+          - forbidigo # fmt.Println acceptable in tests for debugging
+          - noctx # Test HTTP calls don't always need context
+
+      # Exclude some staticcheck checks in test files
+      - path: _test\.go
+        text: "SA1019" # Using deprecated function (often needed in tests)
+
+      # unusedwrite false positives in test fixtures — structs need full initialization
+      - path: _test\.go
+        linters:
+          - govet
+        text: "unusedwrite"
+
+      # Exclude linters from generated protobuf code
+      - path: \.pb\.go$
+        linters:
+          - all
+
+      # Constitution VIII: t.Parallel() MUST NOT be used on shared resource tests
+      - path: _shared_test\.go
+        linters:
+          - paralleltest
+
+      # Serial tests use os.Unsetenv and must not run in parallel
+      - path: _serial_test\.go
+        linters:
+          - paralleltest
+
+      # Allow unused parameters in test helpers
+      - path: testutil/
+        linters:
+          - unparam
+          - paralleltest
+
+      # Allow init functions in main packages
+      - path: cmd/
+        linters:
+          - gochecknoinits
+
+      # G115 false positive: uintptr→int is safe on all supported 64-bit Unix platforms.
+      # This appears when calling syscall.Listen(int(file.Fd()), ...) where Fd() returns
+      # uintptr. Gosec v2.12+ no longer flags this pattern.
+      - linters: [gosec]
+        text: "G115.*uintptr"
+
+      # Exclude lll issues for long lines with go:generate
+      - linters:
+          - lll
+        source: "^//go:generate "
+
+formatters:
+  enable:
+    - gofmt # Check code formatting
+    - goimports # Check imports formatting
+  settings:
+    gofmt:
+      # Simplify code
+      simplify: true
+
+severity:
+  # Default severity for issues
+  default: warning
+  # Set specific severity for some rules
+  rules:
+    - linters:
+        - gosec
+      severity: error
+    - linters:
+        - govet
+      severity: error
+    - linters:
+        - wrapcheck # Constitution III: error wrapping is mandatory
+      severity: error
+    - linters:
+        - forbidigo # Constitution V: zerolog only
+      severity: error
+    - linters:
+        - nolintlint # Constitution IX: justification required
+      severity: error

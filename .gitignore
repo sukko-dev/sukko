@@ -1,0 +1,87 @@
+# Go binaries
+ws/gateway
+ws/server
+ws/provisioning
+ws/push
+ws/tester
+ws/cli
+ws/migrate-dlq
+ws/webhook-worker
+ws/check-config-comments
+scripts/compose-transform/compose-transform
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go coverage
+*.cover
+coverage.txt
+
+# Node.js
+node_modules/
+dist/
+.cache/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment files
+# .env
+# .env.local
+# .env.production
+# .env.*.local
+.env.debug
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker volumes
+prometheus_data/
+grafana_data/
+loki_data/
+
+# Temporary files
+*.tmp
+*.bak
+tmp/
+temp/
+
+# sessions
+
+bin
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+tfplan
+*.tfplan
+
+# Deployment configs (contain environment-specific values)
+deployments/tester/do/config.env
+deployments/tester/gce/config.env
+
+# Local-only trees. NOTE: './docs' is not a valid gitignore pattern — only the
+# subtree below is ignored, not docs/ as a whole.
+docs/gtm/
+.sukko/
+taskfiles/e2e/.admin.key
+
+# Compiled Go helper binaries — `go build` drops its output next to the source.
+/scripts/check-provenance/check-provenance
+
+
+# Unpublished working documents
+.private/

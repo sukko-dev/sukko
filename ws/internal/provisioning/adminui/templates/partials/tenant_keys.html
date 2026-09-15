@@ -1,0 +1,32 @@
+{{if .Keys}}
+<div class="overflow-hidden rounded-lg border border-gray-200">
+  <table class="min-w-full divide-y divide-gray-200 text-xs">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="px-3 py-2 text-left font-medium text-gray-500">Key ID</th>
+        <th class="px-3 py-2 text-left font-medium text-gray-500">Algorithm</th>
+        <th class="px-3 py-2 text-left font-medium text-gray-500">Created</th>
+        <th class="px-3 py-2 text-left font-medium text-gray-500">Status</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {{range .Keys}}
+      <tr>
+        <td class="px-3 py-2 font-mono text-gray-700">{{.KeyID}}</td>
+        <td class="px-3 py-2 text-gray-500">{{.Algorithm}}</td>
+        <td class="px-3 py-2 text-gray-400">{{.CreatedAt}}</td>
+        <td class="px-3 py-2">
+          {{if .Active}}
+          <span class="inline-flex items-center rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">Active</span>
+          {{else}}
+          <span class="inline-flex items-center rounded-full bg-gray-50 px-2 py-0.5 text-xs font-medium text-gray-600 ring-1 ring-inset ring-gray-500/20">Revoked</span>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<p class="py-6 text-center text-sm text-gray-400">No keys</p>
+{{end}}

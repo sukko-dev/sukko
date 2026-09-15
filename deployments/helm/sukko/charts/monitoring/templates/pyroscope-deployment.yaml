@@ -1,0 +1,37 @@
+{{- if and .Values.enabled .Values.pyroscope.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "monitoring.fullname" . }}-pyroscope
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pyroscope
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "monitoring.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: pyroscope
+  template:
+    metadata:
+      labels:
+        {{- include "monitoring.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: pyroscope
+    spec:
+      containers:
+        - name: pyroscope
+          image: "{{ .Values.pyroscope.image.repository }}:{{ .Values.pyroscope.image.tag }}"
+          imagePullPolicy: {{ .Values.pyroscope.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.pyroscope.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.pyroscope.resources | nindent 12 }}
+{{- end }}

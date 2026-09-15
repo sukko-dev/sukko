@@ -1,0 +1,260 @@
+# =============================================================================
+# Sukko WebSocket Infrastructure - Base Values
+# =============================================================================
+#
+# DEPLOYMENT MODES (zero-config defaults work out of the box):
+#
+# 1. Minimal (default):    direct + Valkey broadcast + PostgreSQL
+#    → `helm install sukko .` with postgresql.enabled: true
+#
+# ── Kafka/Redpanda message backend ──────────────────────────────────
+# Copy this block to enable Kafka ingestion via in-cluster Redpanda:
+#
+# ws-server:
+#   messageBackend: kafka
+# redpanda:
+#   enabled: true
+#
+# For external/managed Kafka, use instead:
+#
+# ws-server:
+#   messageBackend: kafka
+#   kafka:
+#     brokers: "your-kafka-host:9092"
+#
+# ── PostgreSQL provisioning database ────────────────────────────────
+# In-cluster PostgreSQL (default when postgresql.enabled: true):
+#
+# postgresql:
+#   enabled: true
+#
+# For external/managed PostgreSQL, use instead:
+#
+# provisioning:
+#   database:
+#     existingSecret: "my-db-credentials"
+#
+# Go envDefault values are the source of truth for application config.
+# Override any setting via extraEnv on each service.
+
+global:
+  namespace: sukko
+  imageRegistry: ""
+  labels:
+    app.kubernetes.io/part-of: sukko
+
+  # Push surface opt-in. Set true together with push-service.enabled so the
+  # gateway registers its /api/v1/push/* routes and connects to the push
+  # service (GATEWAY_PUSH_ENABLED). False = routes absent (404).
+  pushEnabled: false
+
+  # License key for Pro/Enterprise editions.
+  # Create the secret: kubectl create secret generic sukko-license --from-literal=license-key=eyJ...
+  # Leave empty for Community Edition (no license required).
+  license:
+    existingSecret: ""
+    existingSecretKey: "license-key"
+
+# =============================================================================
+# Kernel Tuning DaemonSet
+# =============================================================================
+kernelTuning:
+  enabled: true
+
+# =============================================================================
+# WebSocket Gateway
+# =============================================================================
+ws-gateway:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: sukko-gateway
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+  service:
+    type: LoadBalancer
+    port: 80
+    targetPort: 3000
+
+# =============================================================================
+# WebSocket Server
+# =============================================================================
+ws-server:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: sukko-server
+    tag: latest
+    pullPolicy: IfNotPresent
+  # Mode selections — Go defaults: direct + valkey (override in environment values)
+  # messageBackend: direct
+  # broadcastType: valkey
+  connectionLimits:
+    clusterMaxConnections: 100000
+  resources:
+    requests:
+      cpu: "1"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "1Gi"
+  service:
+    type: NodePort
+    port: 3001
+    nodePort: 30080
+  sessionAffinity:
+    enabled: false
+    timeoutSeconds: 10800
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+# =============================================================================
+# Provisioning API
+# =============================================================================
+provisioning:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: sukko-provisioning
+    tag: latest
+    pullPolicy: IfNotPresent
+  # PostgreSQL connection (external/managed — used when postgresql.enabled is false)
+  database:
+    url: ""
+    existingSecret: ""
+    existingSecretKey: "database-url"
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+  service:
+    type: ClusterIP
+    port: 8080
+
+# =============================================================================
+# Push Service — Pro Edition or higher (Web Push; FCM/APNs delivery requires Enterprise)
+# Disabled by default. Requires a Pro+ license + kafka/redpanda backend.
+# Enable: helm upgrade sukko deployments/helm/sukko \
+#   -f deployments/helm/sukko/values/<env>.yaml --set push-service.enabled=true
+# =============================================================================
+push-service:
+  enabled: false
+
+# =============================================================================
+# Redpanda (Kafka) — Enable for kafka message backend
+# =============================================================================
+redpanda:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: redpandadata/redpanda
+    tag: v23.3.5
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  kafkaPort: 9092
+  adminPort: 9644
+  pandaproxyPort: 8082
+  schemaRegistryPort: 8081
+  consolePort: 8080
+  storage:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  externalAccess:
+    enabled: false
+    type: LoadBalancer
+    nodePort: ""
+
+# =============================================================================
+# Valkey (Redis-compatible) — Default broadcast bus
+# =============================================================================
+valkey:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: valkey/valkey
+    tag: 7.2-alpine
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  port: 6379
+  config:
+    maxmemory: "256mb"
+    maxmemoryPolicy: "allkeys-lru"
+  auth:
+    enabled: true
+
+# =============================================================================
+# Monitoring Stack
+# =============================================================================
+monitoring:
+  enabled: true
+  prometheus:
+    enabled: true
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    port: 9090
+    nodePort: 30090
+    retention: "7d"
+    scrapeInterval: "15s"
+  grafana:
+    enabled: true
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "250m"
+        memory: "512Mi"
+    port: 3000
+    nodePort: 30300
+    adminUser: admin
+  loki:
+    enabled: true
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    port: 3100
+    retention: "168h"
+  promtail:
+    enabled: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "100m"
+        memory: "128Mi"

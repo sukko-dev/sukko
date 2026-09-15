@@ -1,0 +1,104 @@
+# Default values for webhook-worker subchart.
+# Go envDefault values are the source of truth for defaults — this file only
+# overrides when a Kubernetes-specific value differs from the Go default.
+# Pro/Enterprise editions only. Community: leave enabled: false.
+
+global:
+  imageRegistry: ""
+
+enabled: false  # Set true only for Pro/Enterprise deployments
+
+replicaCount: 1  # V1: single-pod HA via Kubernetes restart; multi-pod scaling is out of scope
+
+image:
+  repository: sukko-webhook-worker
+  pullPolicy: IfNotPresent
+  tag: ""  # Defaults to Chart.appVersion when blank
+
+service:
+  # httpPort is the HTTP server port for /health and /metrics.
+  httpPort: 8083
+  # internalGrpcPort is the worker's internal gRPC server for the TestDeliver RPC.
+  # Provisioning dials this port (WEBHOOK_WORKER_GRPC_ADDR).
+  internalGrpcPort: 9095
+
+# Valkey connection for the broadcast bus and cache invalidation PSUBSCRIBE.
+# Defaults to in-cluster Valkey. Override for external clusters.
+valkey:
+  addrs: ""  # Defaults to {{ .Release.Name }}-valkey:6379
+  # Credentials — prefer existingSecret in production (§IX).
+  existingSecret: ""       # Secret containing the Valkey password
+  existingSecretKey: ""    # Key within the secret (default: "valkey-password")
+  # password: ""           # Plaintext fallback — local/dev only
+  # TLS / Sentinel: the worker now honors WEBHOOK_WORKER_VALKEY_TLS_ENABLED / _TLS_INSECURE /
+  # _TLS_CA_PATH / _MASTER_NAME, but this chart has no first-class values for them yet — set them
+  # via `extraEnv` (and mount the CA file yourself) until first-class support lands. First-class
+  # TLS/Sentinel parity with the ws-server chart is a tracked follow-up.
+
+# Provisioning gRPC address for the worker to dial (WebhookWorkerService).
+# Defaults to {{ .Release.Name }}-provisioning:9091 — override only for non-standard setups.
+provisioning:
+  grpcAddr: ""
+
+# Secrets for sensitive credentials (§IX: must not be plaintext in values.yaml).
+# Create a Kubernetes Secret named "<release>-webhook-secrets" with these keys,
+# or reference an existingSecret.
+secrets:
+  # existingSecret: "<release>-webhook-secrets"
+  existingSecret: ""
+  internalTokenKey: "internal-token"
+  credentialsEncryptionKeyKey: "credentials-encryption-key"
+
+# Override any Go envDefault. See /config endpoint for all available settings.
+# NOTE: WEBHOOK_INTERNAL_TOKEN and CREDENTIALS_ENCRYPTION_KEY must be provided
+# via secrets.existingSecret — do not set them here.
+# WEBHOOK_WORKER_PROVISIONING_GRPC_ADDR is wired automatically from provisioning.grpcAddr.
+# WEBHOOK_WORKER_VALKEY_ADDRS is wired from valkey.addrs.
+extraEnv: {}
+
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8083
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8083
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 2
+
+# terminationGracePeriodSeconds must be >= the shutdown deadline (DeliveryTimeout + 1s = 31s).
+terminationGracePeriodSeconds: 35
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

@@ -1,0 +1,37 @@
+# Attribution markers denied in commit messages and added diff lines.
+#
+# This project does not accept machine-generated contributions or commits that
+# carry third-party tool attribution: authorship must name a person who takes
+# responsibility for the change. One marker per line; matching is
+# case-insensitive substring. Lines starting with '#' and blank lines are
+# ignored. This file is go:embed-ed into the check-provenance binary — edit
+# here, no code change needed.
+#
+# NOTE: scripts/check-provenance/ and .githooks/ are skiplisted from the content
+# scan, since they necessarily contain the strings they deny.
+Co-Authored-By: Claude
+noreply@anthropic.com
+Generated with [Claude Code]
+Generated with Claude
+Claude-Session:
+claude.ai/code
+claude.com/claude-code
+Co-Authored-By: Copilot
+copilot@github.com
+Co-Authored-By: ChatGPT
+Co-Authored-By: Cursor
+cursoragent
+🤖
+#
+# Lines prefixed `re:` compile as case-insensitive regexes.
+#
+# Identifier families from a retired issue-tracking scheme. They resolve to
+# nothing, so a citation is a dead reference: state the rationale inline, or
+# cite an ADR under docs/adr/. [a-z]? covers suffixed variants (FR-001a);
+# (?-i:) keeps matching uppercase-only — these IDs were always uppercase, and a
+# case-insensitive T\d{3} would false-positive on base64 blobs (go.sum, key
+# material):
+re:(?-i:\bFR-\d+[a-z]?\b)
+re:(?-i:\bT\d{3}[a-z]?\b)
+re:(?-i:\bSC-\d+[a-z]?\b)
+re:(?-i:\bNFR-\d+[a-z]?\b)

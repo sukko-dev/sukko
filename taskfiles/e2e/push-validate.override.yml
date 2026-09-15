@@ -1,0 +1,39 @@
+# E2E-only Compose override for the push (Web Push) delivery validate job.
+#
+# The base docker-compose.yml pins PUSH_DRY_RUN=true (push-service logs instead of
+# delivering, for the operator quick-start) and leaves the tester's
+# TESTER_PUSH_RECEIVER_HOST unset so the `push` suite's delivery check SKIPS. This
+# override — applied ONLY by `task e2e:push-validate` — flips both: push-service does a
+# real WebPush POST, and the tester runs its in-process mock receiver so the arrival can
+# be asserted. It is NOT part of the operator compose and is never synced to sukko-cli.
+#
+# The admin keypair (.admin.key) is generated per-run by `task e2e:push-validate` via
+# `cmd/gen-admin-key`; its public half is wired to provisioning as ADMIN_BOOTSTRAP_KEY.
+# All of this hand-rolled wiring is slated for removal once the devstack command
+# (issue #144) lands.
+services:
+  ws-gateway:
+    environment:
+      # The push-validate job fronts a real push service — enable the gateway's
+      # push surface (routes are 404 without it; Go envDefault is false).
+      GATEWAY_PUSH_ENABLED: "true"
+  push-service:
+    environment:
+      # Real WebPush delivery (base compose pins "true" for the quick-start; the Go
+      # envDefault is already false — this override just counteracts the compose layer).
+      # NOT CREDENTIALS_ENCRYPTION_KEY: push-service never decrypts (provisioning does,
+      # and the WatchPushConfig stream carries plaintext credential JSON) — dead here.
+      PUSH_DRY_RUN: "false"
+  sukko-tester:
+    volumes:
+      # Raw 64-byte Ed25519 admin private key (matches provisioning's ADMIN_BOOTSTRAP_KEY, kid bootstrap-0).
+      - ./taskfiles/e2e/.admin.key:/etc/sukko/admin.key:ro
+    environment:
+      # Compose service name of the mock WebPush receiver's host: presence flips the push
+      # suite's delivery check from skip to run (the receiver binds all interfaces, so
+      # compose-internal reachability needs no port mapping). TESTER_PUSH_RECEIVER_PORT is
+      # deliberately omitted — 8095 is the Go envDefault (§I: no duplication).
+      TESTER_PUSH_RECEIVER_HOST: "sukko-tester"
+      # Admin JWT signing key so the tester can create routing/channel rules on provisioning
+      # (post-#179-P1 the push suite must provision rules or its REST publishes 409).
+      TESTER_ADMIN_KEY_FILE: "/etc/sukko/admin.key"

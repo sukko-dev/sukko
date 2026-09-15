@@ -1,0 +1,61 @@
+# Default values for redpanda subchart
+
+enabled: true
+
+replicaCount: 1
+
+image:
+  repository: redpandadata/redpanda
+  tag: v23.3.5
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+
+# Ports
+kafkaPort: 9092
+adminPort: 9644
+pandaproxyPort: 8082
+schemaRegistryPort: 8081
+consolePort: 8080
+
+# Storage
+storage:
+  enabled: true
+  size: 5Gi
+  storageClass: ""
+
+# External access for sukko-api publisher
+# When enabled with advertisedHost, Redpanda uses dual listeners:
+# - internal://sukko-redpanda:9092 for in-cluster clients (ws-server)
+# - external://<advertisedHost>:<kafkaPort> for external clients (publisher VM)
+externalAccess:
+  enabled: false
+  type: LoadBalancer  # LoadBalancer or NodePort
+  nodePort: ""        # Only used if type is NodePort
+  advertisedHost: ""  # External IP or hostname (required for external producers)
+  loadBalancerIP: ""  # Static IP for LoadBalancer (from Terraform output)
+  annotations: {}
+  # External listener port inside container (maps to kafkaPort on LoadBalancer)
+  containerPort: 19092
+
+# Pod Security Context
+# Redpanda image runs as "redpanda" user (UID 101)
+# fsGroup ensures PVC is accessible by the redpanda user
+podSecurityContext:
+  fsGroup: 101
+  runAsUser: 101
+  runAsGroup: 101
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

@@ -1,0 +1,49 @@
+{{- if and .Values.enabled .Values.grafana.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "monitoring.fullname" . }}-grafana-dashboards-provider
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'sukko-dashboards'
+        orgId: 1
+        folder: 'Sukko'
+        folderUid: 'sukko'
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "monitoring.fullname" . }}-grafana-dashboards
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  sukko-overview.json: |
+    {{ .Files.Get "dashboards/sukko-overview.json" | nindent 4 }}
+  sukko-websocket.json: |
+    {{ .Files.Get "dashboards/sukko-websocket.json" | nindent 4 }}
+  sukko-pipeline.json: |
+    {{ .Files.Get "dashboards/sukko-pipeline.json" | nindent 4 }}
+  sukko-auth.json: |
+    {{ .Files.Get "dashboards/sukko-auth.json" | nindent 4 }}
+  sukko-provisioning.json: |
+    {{ .Files.Get "dashboards/sukko-provisioning.json" | nindent 4 }}
+  sukko-push.json: |
+    {{ .Files.Get "dashboards/sukko-push.json" | nindent 4 }}
+  sukko-resources.json: |
+    {{ .Files.Get "dashboards/sukko-resources.json" | nindent 4 }}
+  sukko-log-explorer.json: |
+    {{ .Files.Get "dashboards/sukko-log-explorer.json" | nindent 4 }}
+{{- end }}

@@ -1,0 +1,324 @@
+{
+  "annotations": { "list": [] },
+  "description": "Is Sukko healthy right now? Service health, throughput, capacity, and recent errors.",
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Sukko Dashboards",
+      "type": "dashboards",
+      "tags": ["sukko"],
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "external link"
+    }
+  ],
+  "panels": [
+    {
+      "type": "row", "id": 1, "title": "Service Health",
+      "gridPos": {"h":1,"w":24,"x":0,"y":0}, "collapsed": false, "panels": []
+    },
+    {
+      "type": "stat", "id": 2, "title": "ws-server",
+      "gridPos": {"h":3,"w":4,"x":0,"y":1},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"red","value":null},{"color":"green","value":1}]},
+          "mappings": [{"type":"value","options":{"0":{"text":"DOWN","color":"red","index":0},"1":{"text":"UP","color":"green","index":1}}}]
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"none","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"up{job=\"ws-server\"}","instant":true,"legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 3, "title": "ws-gateway",
+      "gridPos": {"h":3,"w":4,"x":4,"y":1},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"red","value":null},{"color":"green","value":1}]},
+          "mappings": [{"type":"value","options":{"0":{"text":"DOWN","color":"red","index":0},"1":{"text":"UP","color":"green","index":1}}}]
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"none","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"up{job=\"ws-gateway\"}","instant":true,"legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 4, "title": "provisioning",
+      "gridPos": {"h":3,"w":4,"x":8,"y":1},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"red","value":null},{"color":"green","value":1}]},
+          "mappings": [{"type":"value","options":{"0":{"text":"DOWN","color":"red","index":0},"1":{"text":"UP","color":"green","index":1}}}]
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"none","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"up{job=\"provisioning\"}","instant":true,"legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 5, "title": "push-service",
+      "gridPos": {"h":3,"w":4,"x":12,"y":1},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"red","value":null},{"color":"green","value":1}]},
+          "mappings": [{"type":"value","options":{"0":{"text":"DOWN","color":"red","index":0},"1":{"text":"UP","color":"green","index":1}}}]
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"none","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"up{job=\"push-service\"}","instant":true,"legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 6, "title": "webhook-worker",
+      "gridPos": {"h":3,"w":4,"x":16,"y":1},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"red","value":null},{"color":"green","value":1}]},
+          "mappings": [{"type":"value","options":{"0":{"text":"DOWN","color":"red","index":0},"1":{"text":"UP","color":"green","index":1}}}]
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"none","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"up{job=\"webhook-worker\"}","instant":true,"legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 7, "title": "Alerts Firing",
+      "gridPos": {"h":3,"w":4,"x":20,"y":1},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"green","value":null},{"color":"yellow","value":1},{"color":"red","value":3}]}
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"none","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"count(ALERTS{alertstate=\"firing\"}) or vector(0)","instant":true,"legendFormat":""}]
+    },
+    {
+      "type": "row", "id": 8, "title": "Key Numbers",
+      "gridPos": {"h":1,"w":24,"x":0,"y":4}, "collapsed": false, "panels": []
+    },
+    {
+      "type": "stat", "id": 9, "title": "Active Connections",
+      "gridPos": {"h":3,"w":6,"x":0,"y":5},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"fixed","fixedColor":"#5794F2"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"blue","value":null}]}
+        }
+      },
+      "options": {"colorMode":"none","graphMode":"area","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(ws_connections_active) + sum(gateway_sse_connections_active)","legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 10, "title": "Capacity %",
+      "gridPos": {"h":3,"w":6,"x":6,"y":5},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "unit": "percent",
+          "thresholds": {"mode":"absolute","steps":[{"color":"green","value":null},{"color":"yellow","value":80},{"color":"red","value":95}]}
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"area","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(ws_connections_active) / clamp_min(sum(ws_connections_max),1) * 100","legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 11, "title": "Messages/sec",
+      "gridPos": {"h":3,"w":6,"x":12,"y":5},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"fixed","fixedColor":"#5794F2"},
+          "unit": "ops",
+          "thresholds": {"mode":"absolute","steps":[{"color":"blue","value":null}]}
+        }
+      },
+      "options": {"colorMode":"none","graphMode":"area","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(rate(ws_messages_sent_total[1m]))","legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 12, "title": "Error Rate %",
+      "gridPos": {"h":3,"w":6,"x":18,"y":5},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "unit": "percent",
+          "thresholds": {"mode":"absolute","steps":[{"color":"green","value":null},{"color":"yellow","value":1},{"color":"red","value":5}]}
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"area","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(rate(ws_errors_total[5m])) / clamp_min(sum(rate(ws_messages_received_total[5m])),1) * 100","legendFormat":""}]
+    },
+    {
+      "type": "row", "id": 13, "title": "Throughput",
+      "gridPos": {"h":1,"w":24,"x":0,"y":8}, "collapsed": false, "panels": []
+    },
+    {
+      "type": "timeseries", "id": 14, "title": "Message Throughput",
+      "gridPos": {"h":8,"w":24,"x":0,"y":9},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"lineInterpolation":"smooth","fillOpacity":10,"showPoints":"never","spanNulls":true}
+        },
+        "overrides": [
+          {"matcher":{"id":"byName","options":"Kafka Ingested/s"},"properties":[{"id":"color","value":{"fixedColor":"#5794F2","mode":"fixed"}}]},
+          {"matcher":{"id":"byName","options":"Delivered/s"},"properties":[{"id":"color","value":{"fixedColor":"#73BF69","mode":"fixed"}}]},
+          {"matcher":{"id":"byName","options":"Dropped/s"},"properties":[{"id":"color","value":{"fixedColor":"#F2495C","mode":"fixed"}}]},
+          {"matcher":{"id":"byName","options":"Push Dispatched/s"},"properties":[{"id":"color","value":{"fixedColor":"#B877D9","mode":"fixed"}}]}
+        ]
+      },
+      "options": {"tooltip":{"mode":"multi","sort":"desc"},"legend":{"displayMode":"table","placement":"bottom","calcs":["mean","max","last"]}},
+      "targets": [
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(rate(ws_kafka_messages_received_total[1m]))","legendFormat":"Kafka Ingested/s"},
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(rate(ws_messages_sent_total[1m]))","legendFormat":"Delivered/s"},
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(rate(ws_dropped_broadcasts_detailed_total[1m]))","legendFormat":"Dropped/s"},
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(rate(push_jobs_dispatched_total[1m]))","legendFormat":"Push Dispatched/s"}
+      ]
+    },
+    {
+      "type": "row", "id": 15, "title": "Capacity",
+      "gridPos": {"h":1,"w":24,"x":0,"y":17}, "collapsed": false, "panels": []
+    },
+    {
+      "type": "gauge", "id": 16, "title": "Connection Capacity",
+      "gridPos": {"h":6,"w":8,"x":0,"y":18},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "thresholds": {"mode":"absolute","steps":[{"color":"green","value":null},{"color":"yellow","value":80},{"color":"red","value":95}]}
+        }
+      },
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"orientation":"auto","showThresholdLabels":false,"showThresholdMarkers":true},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(ws_connections_active) / clamp_min(sum(ws_connections_max),1) * 100","legendFormat":""}]
+    },
+    {
+      "type": "gauge", "id": 17, "title": "Kafka Consumer Lag (max)",
+      "gridPos": {"h":6,"w":8,"x":8,"y":18},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "min": 0, "max": 5000,
+          "thresholds": {"mode":"absolute","steps":[{"color":"green","value":null},{"color":"yellow","value":100},{"color":"red","value":1000}]}
+        }
+      },
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"orientation":"auto","showThresholdLabels":false,"showThresholdMarkers":true},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"max(ws_kafka_consumer_lag) or vector(0)","legendFormat":""}]
+    },
+    {
+      "type": "gauge", "id": 18, "title": "Memory Headroom %",
+      "gridPos": {"h":6,"w":8,"x":16,"y":18},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "thresholds": {"mode":"absolute","steps":[{"color":"red","value":null},{"color":"yellow","value":10},{"color":"green","value":20}]}
+        }
+      },
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"orientation":"auto","showThresholdLabels":false,"showThresholdMarkers":true},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"min(ws_capacity_headroom_percent{resource=\"memory\"}) or vector(0)","legendFormat":""}]
+    },
+    {
+      "type": "row", "id": 19, "title": "License & System",
+      "gridPos": {"h":1,"w":24,"x":0,"y":24}, "collapsed": false, "panels": []
+    },
+    {
+      "type": "stat", "id": 20, "title": "Edition",
+      "gridPos": {"h":3,"w":8,"x":0,"y":25},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"blue","value":null},{"color":"green","value":2},{"color":"purple","value":3}]},
+          "mappings": [{"type":"value","options":{"1":{"text":"Community","color":"blue","index":0},"2":{"text":"Pro","color":"green","index":1},"3":{"text":"Enterprise","color":"purple","index":2}}}]
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"none","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"provisioning_license_edition","instant":true,"legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 21, "title": "Pod Restarts (10m)",
+      "gridPos": {"h":3,"w":8,"x":8,"y":25},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"green","value":null},{"color":"yellow","value":2},{"color":"red","value":5}]}
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"none","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"sum(increase(kube_pod_container_status_restarts_total{namespace=\"${namespace}\"}[10m])) or vector(0)","instant":true,"legendFormat":""}]
+    },
+    {
+      "type": "stat", "id": 22, "title": "Kafka Health",
+      "gridPos": {"h":3,"w":8,"x":16,"y":25},
+      "datasource": {"type":"prometheus","uid":"${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode":"thresholds"},
+          "thresholds": {"mode":"absolute","steps":[{"color":"red","value":null},{"color":"green","value":1}]},
+          "mappings": [{"type":"value","options":{"0":{"text":"DOWN","color":"red","index":0},"1":{"text":"UP","color":"green","index":1}}}]
+        }
+      },
+      "options": {"colorMode":"background","graphMode":"none","justifyMode":"center","orientation":"auto","reduceOptions":{"calcs":["lastNotNull"]},"textMode":"auto"},
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},"expr":"ws_kafka_connected","instant":true,"legendFormat":""}]
+    },
+    {
+      "type": "row", "id": 23, "title": "Recent Errors",
+      "gridPos": {"h":1,"w":24,"x":0,"y":28}, "collapsed": false, "panels": []
+    },
+    {
+      "type": "logs", "id": 24, "title": "Recent Errors & Warnings",
+      "gridPos": {"h":10,"w":24,"x":0,"y":29},
+      "datasource": {"type":"loki","uid":"${loki_datasource}"},
+      "options": {"dedupStrategy":"none","enableLogDetails":true,"prettifyLogMessage":false,"showCommonLabels":false,"showLabels":true,"showTime":true,"sortOrder":"Descending","wrapLogMessage":true},
+      "targets": [{"datasource":{"type":"loki","uid":"${loki_datasource}"},"expr":"{namespace=\"${namespace}\"} | json | level=~\"error|warn\"","legendFormat":"","maxDataPoints":50}]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["sukko","overview"],
+  "templating": {
+    "list": [
+      {"name":"datasource","type":"datasource","query":"prometheus","label":"Prometheus","hide":0,"refresh":1},
+      {"name":"loki_datasource","type":"datasource","query":"loki","label":"Loki","hide":0,"refresh":1},
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": {"type":"loki","uid":"${loki_datasource}"},
+        "query": "label_values({namespace=~\"sukko.*\"},namespace)",
+        "label": "Namespace",
+        "hide": 0,
+        "refresh": 2,
+        "sort": 1,
+        "current": {"text":"sukko-demo","value":"sukko-demo"},
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "time": {"from":"now-1h","to":"now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Sukko — Platform Overview",
+  "uid": "sukko-overview",
+  "version": 1
+}

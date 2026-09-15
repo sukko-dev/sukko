@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package sukko.push.v1;
+
+option go_package = "github.com/sukko-dev/sukko/gen/proto/sukko/push/v1;pushv1";
+
+// PushService handles device registration and VAPID key retrieval.
+// Called by the gateway to forward user-facing push subscription requests.
+// Internal service-to-service communication per Constitution XII.
+service PushService {
+  // RegisterDevice stores a push subscription for a device.
+  // Gateway authenticates and validates tenant prefix before calling.
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+
+  // UnregisterDevice removes a push subscription by device ID.
+  rpc UnregisterDevice(UnregisterDeviceRequest) returns (UnregisterDeviceResponse);
+
+  // GetVAPIDKey returns the tenant's VAPID public key for Web Push.
+  // Auto-generates an ECDSA P-256 key pair on first use.
+  rpc GetVAPIDKey(GetVAPIDKeyRequest) returns (GetVAPIDKeyResponse);
+}
+
+// RegisterDeviceRequest contains device push subscription details.
+message RegisterDeviceRequest {
+  // tenant_slug identifies the tenant (from gateway auth) — client-facing routing label.
+  string tenant_slug = 1;
+
+  // principal is the user identity (from JWT claims).
+  string principal = 2;
+
+  // platform is the push platform: "web", "android", or "ios".
+  string platform = 3;
+
+  // token is the FCM registration token or APNs device token (empty for web).
+  string token = 4;
+
+  // endpoint is the Web Push endpoint URL (empty for android/ios).
+  string endpoint = 5;
+
+  // p256dh_key is the Web Push ECDH public key (empty for android/ios).
+  string p256dh_key = 6;
+
+  // auth_secret is the Web Push authentication secret (empty for android/ios).
+  string auth_secret = 7;
+
+  // channels is the list of channel patterns WITH tenant prefix.
+  // Example: ["acme.alerts.*", "acme.notifications.*"]
+  repeated string channels = 8;
+
+  // jti is the JWT ID from the token used during registration (for per-token revocation).
+  string jti = 9;
+
+  // token_iat is the JWT issued-at timestamp (Unix seconds) for per-user revocation comparison.
+  int64 token_iat = 10;
+}
+
+// RegisterDeviceResponse confirms device registration.
+message RegisterDeviceResponse {
+  // device_id is the unique identifier for the registered subscription.
+  int64 device_id = 1;
+}
+
+// UnregisterDeviceRequest identifies the subscription to remove.
+message UnregisterDeviceRequest {
+  // tenant_slug identifies the tenant (from gateway auth) — client-facing routing label.
+  string tenant_slug = 1;
+
+  // device_id is the subscription ID returned by RegisterDevice.
+  int64 device_id = 2;
+}
+
+// UnregisterDeviceResponse confirms subscription removal.
+message UnregisterDeviceResponse {
+  // success is true if the subscription was found and deleted.
+  bool success = 1;
+}
+
+// GetVAPIDKeyRequest identifies the tenant for VAPID key lookup.
+message GetVAPIDKeyRequest {
+  // tenant_slug identifies the tenant (from gateway auth) — client-facing routing label.
+  string tenant_slug = 1;
+}
+
+// GetVAPIDKeyResponse contains the tenant's VAPID public key.
+message GetVAPIDKeyResponse {
+  // public_key is the VAPID ECDSA P-256 public key in uncompressed form (base64url).
+  string public_key = 1;
+}

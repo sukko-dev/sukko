@@ -1,0 +1,588 @@
+asyncapi: "2.6.0"
+info:
+  title: Sukko Event-Driven API
+  version: "1.0.0"
+  description: |
+    Describes the event-driven protocols used by Sukko for real-time data
+    delivery: WebSocket bidirectional messaging, SSE streaming, and push
+    notification payloads.
+
+    ## Authentication
+
+    All channels require authentication via JWT Bearer token or API key.
+    WebSocket and SSE connections authenticate on the initial HTTP upgrade/request.
+
+servers:
+  gateway:
+    url: wss://{host}/ws
+    protocol: wss
+    description: WebSocket endpoint on ws-gateway.
+  sse:
+    url: https://{host}/sse?channels={channels}
+    protocol: https
+    description: SSE endpoint on ws-gateway (Pro edition).
+  push:
+    url: N/A
+    protocol: https
+    description: |
+      Push notifications are delivered out-of-band via platform providers
+      (Web Push, FCM, APNs). There is no client-facing server URL; the push
+      service dispatches to provider endpoints registered during device
+      subscription.
+
+channels:
+  /ws:
+    description: |
+      Bidirectional WebSocket channel for real-time messaging. Clients send
+      subscribe/unsubscribe/publish commands; the server sends message events,
+      acknowledgments, and errors.
+
+      ## Connection Flow
+
+      1. Client opens `wss://{gateway}/ws` with `Authorization: Bearer <jwt>`
+         or `?token=<jwt>` query parameter.
+      2. Gateway authenticates, acquires a tenant connection slot, and proxies
+         to ws-server.
+      3. Client sends `subscribe` to join channels.
+      4. Server sends `subscription_ack` confirming joined channels.
+      5. Server pushes `message` events as data arrives.
+      6. Client sends `heartbeat`; server replies with `pong`.
+      7. On disconnect, client reconnects with `reconnect` message carrying
+         the last known state for resume.
+    publish:
+      description: Messages sent by the client to the server.
+      message:
+        oneOf:
+          - $ref: "#/components/messages/Subscribe"
+          - $ref: "#/components/messages/Unsubscribe"
+          - $ref: "#/components/messages/ClientPublish"
+          - $ref: "#/components/messages/Heartbeat"
+          - $ref: "#/components/messages/Reconnect"
+    subscribe:
+      description: Messages sent by the server to the client.
+      message:
+        oneOf:
+          - $ref: "#/components/messages/Message"
+          - $ref: "#/components/messages/SubscriptionAck"
+          - $ref: "#/components/messages/UnsubscriptionAck"
+          - $ref: "#/components/messages/ReconnectAck"
+          - $ref: "#/components/messages/PublishAck"
+          - $ref: "#/components/messages/Pong"
+          - $ref: "#/components/messages/Error"
+          - $ref: "#/components/messages/SubscribeError"
+          - $ref: "#/components/messages/UnsubscribeError"
+          - $ref: "#/components/messages/ReconnectError"
+          - $ref: "#/components/messages/PublishError"
+
+  /sse:
+    description: |
+      Server-Sent Events stream for receive-only real-time messaging (Pro edition).
+
+      ## SSE Event Format
+
+      Each message is delivered as a standard SSE event:
+      ```
+      id: 42
+      event: message
+      data: {"channel":"acme.prices","data":{"symbol":"BTC","price":42000}}
+      ```
+
+      - `id` — Monotonic sequence number. Send as `Last-Event-ID` header on
+        reconnect to resume from this point.
+      - `event` — Always `message` for data events.
+      - `data` — JSON envelope containing the channel and payload.
+
+      ## Keepalive
+
+      The server periodically sends SSE comments to prevent proxy timeouts:
+      ```
+      : keepalive
+      ```
+      These are not events and must be ignored by the client.
+
+      ## Reconnection
+
+      On disconnect, the client should reconnect with the `Last-Event-ID` header
+      set to the last received `id` value. The SSE spec's built-in retry mechanism
+      handles automatic reconnection; the server respects `Last-Event-ID` for
+      resumption.
+    subscribe:
+      description: SSE events pushed to the client.
+      message:
+        $ref: "#/components/messages/SSEMessage"
+
+  push-notification:
+    description: |
+      Push notification payloads delivered to devices via platform providers.
+      These are not WebSocket messages; they are sent out-of-band through
+      Web Push, FCM, or APNs (Enterprise edition).
+
+      The push service consumes messages from the same Kafka pipeline as
+      WebSocket delivery, matches against subscribed channels, and dispatches
+      per-platform payloads.
+    subscribe:
+      description: Push notification payloads per platform.
+      message:
+        oneOf:
+          - $ref: "#/components/messages/WebPushPayload"
+          - $ref: "#/components/messages/FCMPayload"
+          - $ref: "#/components/messages/APNsPayload"
+
+components:
+  messages:
+    # ── Client → Server (WebSocket) ──────────────────────────────────────
+
+    Subscribe:
+      name: subscribe
+      title: Subscribe to channels
+      summary: Client requests to join one or more channels.
+      payload:
+        $ref: "#/components/schemas/SubscribeMessage"
+
+    Unsubscribe:
+      name: unsubscribe
+      title: Unsubscribe from channels
+      summary: Client requests to leave one or more channels.
+      payload:
+        $ref: "#/components/schemas/UnsubscribeMessage"
+
+    ClientPublish:
+      name: publish
+      title: Publish a message
+      summary: Client publishes a message to a channel via WebSocket.
+      payload:
+        $ref: "#/components/schemas/ClientPublishMessage"
+
+    Heartbeat:
+      name: heartbeat
+      title: Heartbeat ping
+      summary: Client sends a heartbeat; server responds with pong.
+      payload:
+        $ref: "#/components/schemas/HeartbeatMessage"
+
+    Reconnect:
+      name: reconnect
+      title: Reconnect with state
+      summary: |
+        Client reconnects after a disconnect, providing last known state for
+        seamless resumption.
+      payload:
+        $ref: "#/components/schemas/ReconnectMessage"
+
+    # ── Server → Client (WebSocket) ──────────────────────────────────────
+
+    Message:
+      name: message
+      title: Data message
+      summary: Server delivers a message from a subscribed channel.
+      payload:
+        $ref: "#/components/schemas/ServerMessage"
+
+    SubscriptionAck:
+      name: subscription_ack
+      title: Subscription acknowledgment
+      summary: Server confirms successful channel subscription.
+      payload:
+        $ref: "#/components/schemas/AckMessage"
+
+    UnsubscriptionAck:
+      name: unsubscription_ack
+      title: Unsubscription acknowledgment
+      summary: Server confirms successful channel unsubscription.
+      payload:
+        $ref: "#/components/schemas/AckMessage"
+
+    ReconnectAck:
+      name: reconnect_ack
+      title: Reconnect acknowledgment
+      summary: Server confirms successful reconnection with restored state.
+      payload:
+        $ref: "#/components/schemas/AckMessage"
+
+    PublishAck:
+      name: publish_ack
+      title: Publish acknowledgment
+      summary: Server confirms message was accepted for delivery.
+      payload:
+        $ref: "#/components/schemas/AckMessage"
+
+    Pong:
+      name: pong
+      title: Pong response
+      summary: Server response to client heartbeat.
+      payload:
+        $ref: "#/components/schemas/PongMessage"
+
+    Error:
+      name: error
+      title: Error
+      summary: Server reports a general error.
+      payload:
+        $ref: "#/components/schemas/ErrorMessage"
+
+    SubscribeError:
+      name: subscribe_error
+      title: Subscribe error
+      summary: Server reports a subscription failure.
+      payload:
+        $ref: "#/components/schemas/ErrorMessage"
+
+    UnsubscribeError:
+      name: unsubscribe_error
+      title: Unsubscribe error
+      summary: Server reports an unsubscription failure.
+      payload:
+        $ref: "#/components/schemas/ErrorMessage"
+
+    ReconnectError:
+      name: reconnect_error
+      title: Reconnect error
+      summary: Server reports a reconnection failure.
+      payload:
+        $ref: "#/components/schemas/ErrorMessage"
+
+    PublishError:
+      name: publish_error
+      title: Publish error
+      summary: Server reports a publish failure.
+      payload:
+        $ref: "#/components/schemas/ErrorMessage"
+
+    # ── SSE ──────────────────────────────────────────────────────────────
+
+    SSEMessage:
+      name: sse_message
+      title: SSE data event
+      summary: |
+        A data message delivered as an SSE event. The `id` field is the
+        sequence number for `Last-Event-ID` resumption.
+      payload:
+        $ref: "#/components/schemas/SSEEvent"
+
+    # ── Push Notification Payloads ───────────────────────────────────────
+
+    WebPushPayload:
+      name: web_push
+      title: Web Push notification payload
+      summary: |
+        JSON payload encrypted and sent to the browser push endpoint via
+        RFC 8291 (Web Push). The service worker decrypts and displays it.
+      payload:
+        $ref: "#/components/schemas/WebPushNotification"
+
+    FCMPayload:
+      name: fcm
+      title: FCM notification payload
+      summary: |
+        Payload sent to Firebase Cloud Messaging HTTP v1 API. Contains both
+        notification display fields and a data payload with the raw message.
+      payload:
+        $ref: "#/components/schemas/FCMNotification"
+
+    APNsPayload:
+      name: apns
+      title: APNs notification payload
+      summary: |
+        Payload sent to Apple Push Notification service via HTTP/2. Uses the
+        standard `aps` alert dictionary.
+      payload:
+        $ref: "#/components/schemas/APNsNotification"
+
+  schemas:
+    # ── WebSocket Protocol Schemas ───────────────────────────────────────
+
+    SubscribeMessage:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          const: subscribe
+        data:
+          type: object
+          required: [channels]
+          properties:
+            channels:
+              type: array
+              items:
+                type: string
+              description: Channels to subscribe to.
+              example: ["acme.prices", "acme.trades"]
+      example:
+        type: subscribe
+        data:
+          channels: ["acme.prices", "acme.trades"]
+
+    UnsubscribeMessage:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          const: unsubscribe
+        data:
+          type: object
+          required: [channels]
+          properties:
+            channels:
+              type: array
+              items:
+                type: string
+              description: Channels to unsubscribe from.
+      example:
+        type: unsubscribe
+        data:
+          channels: ["acme.trades"]
+
+    ClientPublishMessage:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          const: publish
+        data:
+          type: object
+          required: [channel, data]
+          properties:
+            channel:
+              type: string
+              description: Target channel.
+            data:
+              description: Arbitrary JSON payload.
+      example:
+        type: publish
+        data:
+          channel: "acme.orders"
+          data: {"action": "buy", "symbol": "BTC"}
+
+    HeartbeatMessage:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: heartbeat
+      example:
+        type: heartbeat
+
+    ReconnectMessage:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: reconnect
+        data:
+          type: object
+          description: Client-provided state for session resumption.
+      example:
+        type: reconnect
+
+    ServerMessage:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          const: message
+        data:
+          type: object
+          properties:
+            channel:
+              type: string
+              description: Source channel.
+            data:
+              description: Message payload (arbitrary JSON).
+      example:
+        type: message
+        data:
+          channel: "acme.prices"
+          data: {"symbol": "BTC", "price": 42000}
+
+    AckMessage:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          description: One of subscription_ack, unsubscription_ack, reconnect_ack, publish_ack.
+        data:
+          type: object
+          description: Optional acknowledgment details.
+
+    PongMessage:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: pong
+      example:
+        type: pong
+
+    ErrorMessage:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          description: One of error, subscribe_error, unsubscribe_error, reconnect_error, publish_error.
+        data:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code.
+            message:
+              type: string
+              description: Human-readable error description.
+            channel:
+              type: string
+              description: Channel related to the error (if applicable).
+      example:
+        type: subscribe_error
+        data:
+          code: CHANNEL_NOT_ALLOWED
+          message: "channel not authorized for this principal"
+          channel: "other.secret"
+
+    # ── SSE Schemas ──────────────────────────────────────────────────────
+
+    SSEEvent:
+      type: object
+      description: |
+        Represents an SSE event as received by the client. The wire format is:
+        ```
+        id: {sequence}
+        event: message
+        data: {json_payload}
+        ```
+      properties:
+        id:
+          type: integer
+          description: Monotonic sequence number for Last-Event-ID resumption.
+          example: 42
+        event:
+          type: string
+          const: message
+          description: SSE event type (always "message" for data events).
+        data:
+          type: object
+          description: JSON envelope with channel and payload.
+          properties:
+            channel:
+              type: string
+              example: "acme.prices"
+            data:
+              description: Message payload.
+
+    # ── Push Notification Schemas ────────────────────────────────────────
+
+    WebPushNotification:
+      type: object
+      description: |
+        JSON payload delivered to the browser's service worker via Web Push
+        (RFC 8291 encrypted). The service worker decrypts and calls
+        `self.registration.showNotification(...)`.
+      properties:
+        title:
+          type: string
+          description: Notification title.
+          example: "Price Alert"
+        body:
+          type: string
+          description: Notification body text. Contains the raw message data as a string.
+          example: "{\"symbol\":\"BTC\",\"price\":42000}"
+        icon:
+          type: string
+          description: URL of the notification icon.
+          example: "https://example.com/icon.png"
+        url:
+          type: string
+          description: URL to open when the notification is clicked.
+          example: "https://app.example.com/alerts"
+      example:
+        title: "Price Alert"
+        body: "{\"symbol\":\"BTC\",\"price\":42000}"
+        icon: "https://example.com/icon.png"
+        url: "https://app.example.com/alerts"
+
+    FCMNotification:
+      type: object
+      description: |
+        Payload sent to the FCM HTTP v1 API. Includes a `notification` block
+        for display and a `data` block with the raw channel message. The FCM
+        SDK on the device renders the notification and makes data available
+        to the app.
+      properties:
+        message:
+          type: object
+          properties:
+            token:
+              type: string
+              description: FCM registration token for the target device.
+            notification:
+              type: object
+              properties:
+                title:
+                  type: string
+                  description: Notification title.
+                body:
+                  type: string
+                  description: Notification body text.
+            data:
+              type: object
+              additionalProperties:
+                type: string
+              description: Custom key-value data payload.
+            android:
+              type: object
+              properties:
+                priority:
+                  type: string
+                  enum: [normal, high]
+                ttl:
+                  type: string
+                  description: TTL as a duration string (e.g., "86400s").
+      example:
+        message:
+          token: "fcm-token-abc"
+          notification:
+            title: "Price Alert"
+            body: "{\"symbol\":\"BTC\",\"price\":42000}"
+          data:
+            channel: "acme.prices"
+            url: "https://app.example.com/alerts"
+
+    APNsNotification:
+      type: object
+      description: |
+        Payload sent to Apple Push Notification service via HTTP/2. Uses the
+        standard `aps` dictionary with alert fields. Custom data is included
+        at the top level alongside `aps`.
+      properties:
+        aps:
+          type: object
+          properties:
+            alert:
+              type: object
+              properties:
+                title:
+                  type: string
+                  description: Alert title.
+                body:
+                  type: string
+                  description: Alert body text.
+            badge:
+              type: integer
+              description: App badge number.
+        url:
+          type: string
+          description: URL to open when notification is tapped.
+      example:
+        aps:
+          alert:
+            title: "Price Alert"
+            body: "{\"symbol\":\"BTC\",\"price\":42000}"
+        url: "https://app.example.com/alerts"

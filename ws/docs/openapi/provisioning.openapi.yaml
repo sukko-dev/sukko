@@ -1,0 +1,3050 @@
+openapi: 3.1.0
+
+info:
+  title: Sukko Provisioning API
+  version: 1.0.0
+  description: |
+    REST API for managing tenants, JWT signing keys, API keys, routing rules,
+    channel rules, and quotas in the Sukko multi-tenant WebSocket platform.
+
+    ## Authentication
+
+    All `/api/v1/` endpoints require authentication via one of:
+    - **Admin JWT**: `Authorization: Bearer {admin_jwt}` — Ed25519 keypair auth with `iss: "sukko-admin"`. Checked first; if present and valid, bypasses tenant JWT.
+    - **Tenant JWT**: `Authorization: Bearer {jwt}` — validated against per-tenant asymmetric keys (ES256, RS256, EdDSA).
+
+    Health, readiness, version, edition, config, and metrics endpoints (at root level, not under `/api/v1/`) require no authentication.
+
+    ## Authorization
+
+    Role-based access control with tenant isolation:
+    - **admin/system**: Full access to all tenants and operations
+    - **tenant owner**: Access to own tenant's resources only (JWT `tenant_id` must match)
+
+    Operations like creating tenants, suspending, and modifying routing rules require `admin` or `system` role.
+
+    ## Pagination
+
+    All list endpoints support `?limit=N&offset=M` with defaults `limit=50, offset=0` (max limit=100).
+    Responses include `{ items, total, limit, offset }`.
+
+    ## Error Format
+
+    All errors return: `{"code": "UPPER_SNAKE_CASE", "message": "human-readable"}`.
+  contact:
+    name: Sukko Platform Team
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: http://{host}:{port}
+    description: Provisioning service (internal, not publicly exposed)
+    variables:
+      host:
+        default: localhost
+        description: Provisioning service hostname
+      port:
+        default: "8080"
+        description: Provisioning service port
+
+paths:
+  /api/v1/tenants:
+    post:
+      operationId: createTenant
+      summary: Create a new tenant
+      description: Creates a tenant with optional initial JWT signing key. Requires admin or system role.
+      tags: [Tenants]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantRequest"
+      responses:
+        "201":
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateTenantResponse"
+        "400":
+          description: "Validation error. Codes: INVALID_REQUEST, SLUG_INVALID, SLUG_RESERVED, NAME_INVALID, CONSUMER_TYPE_INVALID, KEY_INVALID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Tenant already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      operationId: listTenants
+      summary: List all tenants
+      description: Returns paginated list of tenants. Requires admin or system role.
+      tags: [Tenants]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, suspended, deprovisioning, deleted]
+          description: Filter by tenant status
+      responses:
+        "200":
+          description: Paginated tenant list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedTenants"
+
+  /api/v1/tenants/{tenantSlug}:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    get:
+      operationId: getTenant
+      summary: Get tenant details
+      tags: [Tenants]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Tenant details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "404":
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Service temporarily unavailable (RequireTenant middleware DB lookup failed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    patch:
+      operationId: updateTenant
+      summary: Update tenant
+      description: Partial update — only provided fields are changed.
+      tags: [Tenants]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTenantRequest"
+      responses:
+        "200":
+          description: Tenant updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          description: "Validation error. Codes: INVALID_REQUEST, SLUG_NOT_PATCHABLE, NAME_INVALID, CONSUMER_TYPE_INVALID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: deprovisionTenant
+      summary: Deprovision tenant
+      description: |
+        Marks tenant for deletion. Requires admin or system role.
+
+        With `?force=true`, the tenant is deleted immediately and the response status is `deleted`.
+        Without it, the tenant is marked for async deprovisioning and the response status is `deprovisioning`.
+
+        The `force` parameter only accepts the literal string `"true"` — any other value (e.g. `1`, `True`) is treated as absent.
+      tags: [Tenants]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: force
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Pass `force=true` (literal string) to delete the tenant immediately.
+            Any other value is treated as absent (deprovisioning mode).
+      responses:
+        "200":
+          description: Tenant deprovisioning started or deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [deprovisioning, deleted]
+              examples:
+                deprovisioning:
+                  summary: Default — async deprovisioning started
+                  value:
+                    status: deprovisioning
+                force_deleted:
+                  summary: Force delete — tenant removed immediately
+                  value:
+                    status: deleted
+        "404":
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Deprovisioning failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: DEPROVISION_FAILED
+                message: "failed to deprovision tenant"
+
+  /api/v1/tenants/{tenantSlug}/rename:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+    post:
+      operationId: renameTenant
+      summary: Rename tenant slug
+      description: |
+        Renames the tenant's slug (Kafka namespace and URL identifier). This is a saga operation
+        that creates new Kafka topics and ACLs under the new slug before updating the database.
+        The old slug remains valid for JWT authentication during the `SLUG_RENAME_TOPIC_HOLD_PERIOD`
+        (default 7 days) to allow clients to rotate tokens without service interruption.
+
+        Requires admin or system role — tenant JWTs are rejected with 403.
+      tags: [Tenants]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenameTenantRequest"
+      responses:
+        "200":
+          description: Tenant renamed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          description: "Validation error. Codes: INVALID_REQUEST, SLUG_INVALID, SLUG_RESERVED, SLUG_UNCHANGED"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden — tenant JWT rejected on this endpoint; admin JWT required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict — slug already taken, rename already in progress, or tenant not active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Service temporarily unavailable (RequireTenant middleware DB lookup failed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/{tenantSlug}/suspend:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+    post:
+      operationId: suspendTenant
+      summary: Suspend tenant
+      description: Suspends an active tenant. Requires admin or system role.
+      tags: [Tenants]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Tenant suspended
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: suspended
+        "404":
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Tenant not in active state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/{tenantSlug}/reactivate:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+    post:
+      operationId: reactivateTenant
+      summary: Reactivate tenant
+      description: Reactivates a suspended tenant. Requires admin or system role.
+      tags: [Tenants]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Tenant reactivated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: active
+        "404":
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Tenant not in suspended state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/{tenantSlug}/keys:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    post:
+      operationId: createKey
+      summary: Create JWT signing key
+      description: Registers a public key for JWT signature verification. The gateway uses this to validate JWTs from this tenant's clients.
+      tags: [JWT Keys]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateKeyRequest"
+      responses:
+        "201":
+          description: Key created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantKey"
+        "400":
+          description: "Validation error. Codes: INVALID_REQUEST, KEY_INVALID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            A key with this `key_id` already exists. `key_id` is globally unique — it is the
+            JWT `kid` the gateway resolves a signing key by — so the conflict fires whether
+            the existing key belongs to this tenant or another.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: KEY_ALREADY_EXISTS
+                message: "A key with this key_id already exists"
+
+    get:
+      operationId: listKeys
+      summary: List JWT signing keys
+      tags: [JWT Keys]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: Paginated key list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedKeys"
+
+  /api/v1/tenants/{tenantSlug}/keys/{keyID}:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+      - $ref: "#/components/parameters/keyID"
+
+    delete:
+      operationId: revokeKey
+      summary: Revoke JWT signing key
+      description: Revokes a key. JWTs signed with this key will be rejected.
+      tags: [JWT Keys]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Key revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: revoked
+        "404":
+          description: Key not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/{tenantSlug}/api-keys:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    post:
+      operationId: createAPIKey
+      summary: Create API key
+      description: |
+        Creates an API key for WebSocket connections. The key is returned once on creation — store it securely.
+        API keys grant public-channel-only access (no publish). Clients can escalate to full JWT access mid-connection.
+      tags: [API Keys]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAPIKeyRequest"
+      responses:
+        "201":
+          description: API key created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKey"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      operationId: listAPIKeys
+      summary: List API keys
+      tags: [API Keys]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: Paginated API key list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedAPIKeys"
+
+  /api/v1/tenants/{tenantSlug}/api-keys/{keyID}:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+      - $ref: "#/components/parameters/keyID"
+
+    delete:
+      operationId: revokeAPIKey
+      summary: Revoke API key
+      description: Revokes an API key. Existing WebSocket connections using this key are not disconnected but new connections will be rejected.
+      tags: [API Keys]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: API key revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: revoked
+        "404":
+          description: API key not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/{tenantSlug}/routing-rules:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    get:
+      operationId: getRoutingRules
+      summary: Get routing rules
+      description: Returns channel-to-Kafka-topic routing rules for the tenant.
+      tags: [Routing Rules]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Routing rules
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingRulesResponse"
+    post:
+      operationId: addRoutingRule
+      summary: Add a routing rule
+      description: |
+        Adds a single routing rule without replacing existing rules. Requires admin or system role.
+
+        The rule is stored with the normalized pattern (bare `*` → `**`). Returns 409 on duplicate
+        priority or duplicate pattern.
+      tags: [Routing Rules]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddRoutingRuleRequest"
+      responses:
+        "201":
+          description: Rule added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rule:
+                    $ref: "#/components/schemas/RoutingRule"
+        "400":
+          description: Validation error or rule limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                validation_error:
+                  summary: Schema validation failed
+                  value:
+                    code: ROUTING_RULE_VALIDATION_ERROR
+                    message: "invalid pattern, empty topics, topic not provisioned, or too many topics per rule"
+                too_many_rules:
+                  summary: Per-tenant rule limit exceeded
+                  value:
+                    code: TOO_MANY_ROUTING_RULES
+                    message: "too many routing rules"
+        "403":
+          description: |
+            Edition rule-count cap reached. Routing rules are available on every edition,
+            but the per-tenant rule count is capped per edition (Community 10, Pro 100,
+            Enterprise unlimited). Returned when the edition cap is lower than the
+            configured `MAX_ROUTING_RULES_PER_TENANT` — otherwise the 400 above fires first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: EDITION_LIMIT_ROUTING_RULES_PER_TENANT
+                message: "routing_rules_per_tenant limit reached: 11/10 (community edition)"
+        "409":
+          description: Conflict — duplicate priority or duplicate pattern
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    put:
+      operationId: setRoutingRules
+      summary: Set routing rules
+      description: |
+        Replaces all routing rules for the tenant. Requires admin or system role.
+
+        Rules are evaluated in ascending priority order — **first match wins**. Unmatched channels route to the dead-letter topic.
+
+        **Constraints**: No duplicate patterns or priorities. Patterns use `**` for multi-segment wildcard (`*` accepted, normalized to `**`).
+
+        **Rule count** is capped by the lower of the configured `MAX_ROUTING_RULES_PER_TENANT` (default 100) and the edition cap (Community 10, Pro 100, Enterprise unlimited). Routing rules themselves are available on every edition.
+      tags: [Routing Rules]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRoutingRulesRequest"
+      responses:
+        "200":
+          description: Rules set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingRulesResponse"
+        "400":
+          description: Validation error, or rule count above the configured maximum (`TOO_MANY_ROUTING_RULES`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: |
+            Edition rule-count cap exceeded (Community 10, Pro 100, Enterprise unlimited).
+            Fires when the edition cap is lower than the configured
+            `MAX_ROUTING_RULES_PER_TENANT` — otherwise the 400 above fires first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: EDITION_LIMIT_ROUTING_RULES_PER_TENANT
+                message: "routing_rules_per_tenant limit reached: 11/10 (community edition)"
+
+    delete:
+      operationId: deleteRoutingRules
+      summary: Delete routing rules
+      description: Removes all routing rules for the tenant. Idempotent — returns 200 even if no rules exist. Requires admin or system role.
+      tags: [Routing Rules]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Rules deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: deleted
+        "500":
+          description: Failed to delete routing rules
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: DELETE_ROUTING_RULES_FAILED
+                message: "failed to delete routing rules"
+
+  /api/v1/tenants/{tenantSlug}/channel-rules:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    get:
+      operationId: getChannelRules
+      summary: Get channel rules
+      description: Returns channel access control rules for the tenant.
+      tags: [Channel Rules]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Channel rules
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantChannelRules"
+        "404":
+          description: No channel rules configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    put:
+      operationId: setChannelRules
+      summary: Set channel rules
+      description: |
+        Replaces channel access control rules for the tenant. Requires admin or system role.
+        Per-tenant rules are the sole channel-authorization source: a tenant with no rules
+        (or an empty rule side) is denied all subscribes/publishes on that side.
+        Patterns support wildcards (`*`) and the `{principal}` placeholder, which is
+        substituted with the authenticated JWT subject at authorization time — on both
+        subscribe-side and publish-side patterns.
+      tags: [Channel Rules]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetChannelRulesRequest"
+      responses:
+        "200":
+          description: Rules set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantChannelRules"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: deleteChannelRules
+      summary: Delete channel rules
+      description: Removes channel rules for the tenant. The tenant is then denied all channel subscribes and publishes (deny-all — there is no fallback rule set). Requires admin or system role.
+      tags: [Channel Rules]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Rules deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: deleted
+        "404":
+          description: No rules configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/{tenantSlug}/quotas:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    get:
+      operationId: getQuota
+      summary: Get tenant quotas
+      tags: [Quotas]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Tenant quotas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantQuota"
+
+    patch:
+      operationId: updateQuota
+      summary: Update tenant quotas
+      description: Partial update — only provided fields are changed. Requires admin or system role.
+      tags: [Quotas]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateQuotaRequest"
+      responses:
+        "200":
+          description: Quotas updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantQuota"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/{tenantSlug}/audit:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    get:
+      operationId: getAuditLog
+      summary: Get audit log
+      description: Returns paginated audit trail for the tenant.
+      tags: [Audit]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedAuditEntries"
+
+  /api/v1/tenants/{tenantSlug}/test-access:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    post:
+      operationId: testAccess
+      summary: Test channel access
+      description: Computes which channel patterns would be allowed for given groups. Useful for debugging access rules.
+      tags: [Channel Rules]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                groups:
+                  type: array
+                  items:
+                    type: string
+                  description: JWT groups to test access for
+              required:
+                - groups
+      responses:
+        "200":
+          description: Allowed patterns
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  allowed_patterns:
+                    type: array
+                    items:
+                      type: string
+
+  /api/v1/tenants/{tenantSlug}/tokens/revoke:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    post:
+      operationId: revokeToken
+      summary: Revoke a JWT token or all tokens for a user
+      description: |
+        Revoke a specific JWT by `jti` (token ID) or all JWTs issued to a user by `sub` (subject).
+        Revocation entries are retained for `PROVISIONING_TOKEN_REVOCATION_MAX_LIFETIME` (default 1h)
+        before the background prune loop removes them.
+
+        **Edition**: Pro (Token Revocation feature gate)
+
+        Provide exactly one of `sub` or `jti` — not both.
+      tags: [Token Revocation]
+      security:
+        - bearerAuth: []
+      x-edition: pro
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sub:
+                  type: string
+                  description: Revoke all tokens for this subject (user ID). Mutually exclusive with `jti`.
+                jti:
+                  type: string
+                  description: Revoke a specific token by JWT ID. Mutually exclusive with `sub`.
+                exp:
+                  type: integer
+                  format: int64
+                  description: Optional explicit expiry (Unix timestamp). Overrides the default max lifetime if provided and in the future.
+            examples:
+              by_subject:
+                value:
+                  sub: "user-123"
+              by_jti:
+                value:
+                  jti: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      responses:
+        "200":
+          description: Token(s) revoked successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "revoked"
+                  type:
+                    type: string
+                    enum: [user, token]
+                    description: Revocation type — `user` when `sub` was provided, `token` when `jti` was provided
+                  tenant_id:
+                    type: string
+                  expires_at:
+                    type: string
+                    format: date-time
+              example:
+                status: "revoked"
+                type: "user"
+                tenant_id: "acme"
+                expires_at: "2026-05-27T14:00:00Z"
+        "400":
+          description: Invalid request — missing both fields, or both provided simultaneously
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missing_fields:
+                  value:
+                    code: INVALID_REQUEST
+                    message: "one of 'sub' or 'jti' is required"
+                both_provided:
+                  value:
+                    code: INVALID_REQUEST
+                    message: "provide either 'sub' or 'jti', not both"
+        "401":
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Edition gate — requires Pro
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: EDITION_LIMIT
+                message: "This feature requires pro edition or higher"
+        "429":
+          description: Rate limited
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: RATE_LIMITED
+                message: "too many revocation requests"
+
+  /api/v1/keys/active:
+    get:
+      operationId: getActiveKeys
+      summary: Get all active JWT keys
+      description: Returns all active, non-expired, non-revoked JWT signing keys across all tenants. Used by the gateway for token validation. Requires system or admin role.
+      tags: [JWT Keys]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Active keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TenantKey"
+
+  /api/v1/api-keys/active:
+    get:
+      operationId: getActiveAPIKeys
+      summary: Get all active API keys
+      description: Returns all active API keys across all tenants. Used by the gateway for API key validation. Requires system or admin role.
+      tags: [API Keys]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Active API keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/APIKey"
+
+  # ── License Hot-Reload ──────────────────────────────────────────────
+  /api/v1/license:
+    post:
+      operationId: reloadLicense
+      summary: Reload license key
+      description: |
+        Push a new license key to the provisioning service. Requires admin JWT
+        authentication (defense in depth with license signature verification).
+
+        Rate-limited per IP (~10 req/min with burst of 3). Replay-protected via `iat` claim.
+        On success, the key is persisted (encrypted) and broadcast to all services via gRPC stream.
+      tags: [License]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              properties:
+                key:
+                  type: string
+                  description: Signed license key (base64url payload + ECDSA P-256 signature)
+            example:
+              key: "eyJlZGl0aW9uIjoicHJvIiwib3JnIjoiQWNtZSJ9.signature..."
+      responses:
+        "200":
+          description: License reloaded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  edition:
+                    type: string
+                    enum: [community, pro, enterprise]
+                  org:
+                    type: string
+                  expires_at:
+                    type: string
+                    format: date-time
+                  status:
+                    type: string
+                    const: reloaded
+              example:
+                edition: pro
+                org: "Acme Corp"
+                expires_at: "2027-04-08T00:00:00Z"
+                status: reloaded
+        "400":
+          description: Invalid key (bad format, invalid signature, or expired)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                invalidSignature:
+                  value: { code: "INVALID_SIGNATURE", message: "license signature verification failed" }
+                keyExpired:
+                  value: { code: "KEY_EXPIRED", message: "pushed key is already expired" }
+                invalidFormat:
+                  value: { code: "INVALID_FORMAT", message: "license key format invalid" }
+        "401":
+          description: Authentication required or invalid admin credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                missingToken:
+                  value:
+                    code: MISSING_TOKEN
+                    message: Authorization header required
+                unauthorized:
+                  value:
+                    code: UNAUTHORIZED
+                    message: invalid admin credentials
+        "403":
+          description: Insufficient role — admin or system role required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: INSUFFICIENT_ROLE
+                message: "Required role: admin or system"
+        "409":
+          description: Replay detected (iat not newer than current)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: "REPLAY_DETECTED"
+                message: "key iat is not newer than current — replay rejected"
+        "429":
+          description: Rate limited
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: "RATE_LIMITED"
+                message: "too many license reload requests"
+
+  # ── Admin Key Management ───────────────────────────────────────────
+  /api/v1/admin/keys:
+    post:
+      operationId: registerAdminKey
+      summary: Register an admin public key
+      description: |
+        Register a new Ed25519 or RS256 public key for admin JWT authentication.
+        Requires an existing admin JWT (bootstrap via `ADMIN_BOOTSTRAP_KEY` env var on first deploy).
+      tags: [Admin Keys]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [public_key]
+              properties:
+                name:
+                  type: string
+                  description: Human-readable key name (default "unnamed")
+                algorithm:
+                  type: string
+                  enum: [Ed25519, RS256]
+                  description: Key algorithm (default Ed25519)
+                public_key:
+                  type: string
+                  description: PEM-encoded public key
+            example:
+              name: "deploy-key"
+              algorithm: "Ed25519"
+              public_key: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA...\n-----END PUBLIC KEY-----"
+      responses:
+        "201":
+          description: Admin key registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminKey"
+        "400":
+          description: Invalid key material or unsupported algorithm
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    get:
+      operationId: listAdminKeys
+      summary: List active admin keys
+      description: Returns all active (non-revoked) admin keys. Requires admin JWT.
+      tags: [Admin Keys]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Active admin keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminKey"
+                  total:
+                    type: integer
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/admin/keys/{id}:
+    delete:
+      operationId: revokeAdminKey
+      summary: Revoke an admin key
+      description: |
+        Revoke an admin key. Cannot revoke the last active key (returns 409).
+        Requires admin JWT.
+      tags: [Admin Keys]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Admin key ID
+      responses:
+        "200":
+          description: Key revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key_id:
+                    type: string
+                  status:
+                    type: string
+                    const: revoked
+              example:
+                key_id: "ak_abc123"
+                status: "revoked"
+        "404":
+          description: Key not found or already revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Cannot revoke the last active admin key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: "LAST_KEY"
+                message: "cannot revoke the last active admin key"
+
+  # ── Push Credentials (Pro) ────────────────────────────────────────
+  /api/v1/push/credentials:
+    post:
+      operationId: uploadPushCredentials
+      summary: Upload push provider credentials
+      description: |
+        Upload push notification credentials for a tenant (FCM service account, APNs key, or VAPID keys).
+        Credentials are encrypted at rest with AES-256-GCM.
+
+        **Edition**: Pro (Web Push feature gate). Provider `vapid` requires Pro;
+        providers `fcm`/`apns` additionally require Enterprise (Mobile Push feature
+        gate) — 403 `EDITION_LIMIT` below that.
+      tags: [Push]
+      security:
+        - bearerAuth: []
+      x-edition: pro
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id, provider, credential_data]
+              properties:
+                tenant_id:
+                  type: string
+                  description: Tenant slug. The server resolves it to the tenant UUID stored at rest; the response echoes the slug.
+                provider:
+                  type: string
+                  enum: [fcm, apns, vapid]
+                credential_data:
+                  type: string
+                  description: Provider-specific credential payload (JSON string for FCM/APNs, VAPID format for vapid)
+            example:
+              tenant_id: "acme"
+              provider: "vapid"
+              credential_data: '{"public_key":"BNw...","private_key":"aBc..."}'
+      responses:
+        "201":
+          description: Credential created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                    format: int64
+                  provider:
+                    type: string
+                  tenant_id:
+                    type: string
+        "400":
+          description: Invalid request (missing fields, invalid provider, invalid credential data)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Edition gate — requires Pro (`vapid`) or Enterprise (`fcm`/`apns`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Tenant not found — the tenant_id slug does not resolve (TENANT_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Service temporarily unavailable — tenant slug resolution failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      operationId: deletePushCredentials
+      summary: Delete push provider credentials
+      description: |
+        Delete push credentials for a tenant and provider.
+        Supports JSON body or query parameters (`?tenant_id=X&provider=Y`).
+
+        **Edition**: Pro (Web Push feature gate). Deletion is not gated per
+        provider — `fcm`/`apns` credentials can be deleted on Pro (cleanup
+        after a downgrade stays possible).
+      tags: [Push]
+      security:
+        - bearerAuth: []
+      x-edition: pro
+      parameters:
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+          description: Tenant ID (alternative to JSON body)
+        - name: provider
+          in: query
+          schema:
+            type: string
+            enum: [fcm, apns, vapid]
+          description: Provider (alternative to JSON body)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_id:
+                  type: string
+                provider:
+                  type: string
+                  enum: [fcm, apns, vapid]
+      responses:
+        "200":
+          description: Credential deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: deleted
+        "404":
+          description: Credential not found, or the tenant_id slug does not resolve (TENANT_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Service temporarily unavailable — tenant slug resolution failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ── Push Channel Config (Pro) ──────────────────────────────────────
+  /api/v1/push/channels:
+    post:
+      operationId: createPushChannelConfig
+      summary: Create or update push channel config
+      description: |
+        Configure which channels trigger push notifications for a tenant.
+        Patterns must be tenant-scoped (start with `{tenant_slug}.`).
+
+        **Edition**: Pro (Web Push feature gate)
+      tags: [Push]
+      security:
+        - bearerAuth: []
+      x-edition: pro
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id, patterns]
+              properties:
+                tenant_id:
+                  type: string
+                  description: Tenant slug (also the channel-pattern prefix). Resolved to the tenant UUID server-side; the response echoes the slug.
+                patterns:
+                  type: array
+                  items:
+                    type: string
+                  description: Channel patterns that trigger push (must start with tenant_id prefix)
+                default_ttl:
+                  type: integer
+                  description: Push message TTL in seconds (default 2419200 = 28 days)
+                default_urgency:
+                  type: string
+                  enum: [very-low, low, normal, high]
+                  description: Push message urgency (default "normal")
+            example:
+              tenant_id: "acme"
+              patterns: ["acme.*.messages", "acme.*.alerts"]
+              default_ttl: 86400
+              default_urgency: "high"
+      responses:
+        "201":
+          description: Channel config created/updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushChannelConfig"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Tenant not found — the tenant_id slug does not resolve (TENANT_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Service temporarily unavailable — tenant slug resolution failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    get:
+      operationId: getPushChannelConfig
+      summary: Get push channel config for a tenant
+      description: |
+        **Edition**: Pro (Web Push feature gate)
+      tags: [Push]
+      security:
+        - bearerAuth: []
+      x-edition: pro
+      parameters:
+        - name: tenant_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Channel config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushChannelConfig"
+        "404":
+          description: Config not found for tenant, or the tenant_id slug does not resolve (TENANT_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Service temporarily unavailable — tenant slug resolution failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      operationId: deletePushChannelConfig
+      summary: Delete push channel config
+      description: |
+        Supports JSON body or query parameter (`?tenant_id=X`).
+
+        **Edition**: Pro (Web Push feature gate)
+      tags: [Push]
+      security:
+        - bearerAuth: []
+      x-edition: pro
+      parameters:
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_id:
+                  type: string
+      responses:
+        "200":
+          description: Config deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: deleted
+        "404":
+          description: Config not found for tenant, or the tenant_id slug does not resolve (TENANT_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Service temporarily unavailable — tenant slug resolution failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tenants/{tenantSlug}/connections:
+    get:
+      summary: List active connections for a tenant
+      operationId: listConnections
+      tags: [Connections]
+      description: Returns live WebSocket connections for the authenticated tenant. Requires Pro edition.
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+        - name: api_key_id
+          in: query
+          schema:
+            type: string
+          description: Filter by API key database ID.
+        - name: channel
+          in: query
+          schema:
+            type: string
+          description: Filter by subscribed channel name (exact match).
+        - name: transport
+          in: query
+          schema:
+            type: string
+            enum: [ws, sse]
+          description: Filter by transport type.
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: List of active connections
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionListResponse"
+        "503":
+          description: Registry unavailable — retry after the Retry-After header value
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      summary: Force-disconnect connections matching a filter (bulk)
+      operationId: bulkDisconnectConnections
+      tags: [Connections]
+      description: |
+        Force-disconnects all connections matching the provided filter(s). At least one filter is required.
+        Returns 202 Accepted immediately; the re-query goroutine fires after ~10s to disconnect connections
+        registered after the initial query. Requires Pro edition.
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+        - name: api_key_id
+          in: query
+          schema:
+            type: string
+          description: Disconnect all connections authenticated with this API key ID.
+        - name: channel
+          in: query
+          schema:
+            type: string
+          description: Disconnect all connections subscribed to this channel.
+      responses:
+        "202":
+          description: Bulk disconnect accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkDisconnectResponse"
+        "400":
+          description: No filter provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Registry unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tenants/{tenantSlug}/connections/{connId}:
+    get:
+      summary: Get a single connection by ID
+      operationId: getConnection
+      tags: [Connections]
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+        - name: connId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Connection detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionDetail"
+        "404":
+          description: Connection not found or belongs to a different tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Registry unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      summary: Force-disconnect a single connection
+      operationId: forceDisconnectConnection
+      tags: [Connections]
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+        - name: connId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Force-disconnect command published successfully
+        "404":
+          description: |
+            Connection not found, belongs to a different tenant, or the target pod has no active
+            subscribers (stale registry entry). Retry-After: 1 — connections registered within the
+            last WS_CONNECTIONS_REGISTRY_FLUSH_INTERVAL may not yet appear in the registry.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Admin channel unavailable — admin listener reconnecting.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ── Webhooks (Pro edition) ────────────────────────────────────────────────────
+
+  /api/v1/tenants/{tenantSlug}/webhooks:
+    post:
+      summary: Register a webhook endpoint
+      operationId: createWebhook
+      tags: [Webhooks]
+      description: Creates a new webhook registration. Requires Pro edition. URL must use https (http allowed for local dev only).
+      security:
+        - TenantJWT: []
+        - APIKey: []
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookRequest"
+      responses:
+        "201":
+          description: Webhook created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+        "400":
+          description: Validation error (invalid URL, missing channel_pattern, max_retries out of range)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: WEBHOOK_INVALID_INPUT
+                message: "webhook url must use https"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Feature not available in current edition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: EDITION_LIMIT
+                message: "webhooks require Pro edition or higher"
+        "422":
+          description: Webhook quota exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: WEBHOOK_QUOTA_EXCEEDED
+                message: "webhook quota exceeded"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    get:
+      summary: List webhook registrations
+      operationId: listWebhooks
+      tags: [Webhooks]
+      description: Returns paginated webhooks for the authenticated tenant.
+      security:
+        - TenantJWT: []
+        - APIKey: []
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: Paginated webhook list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Feature not available in current edition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: EDITION_LIMIT
+                message: "webhooks require Pro edition or higher"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tenants/{tenantSlug}/webhooks/{webhookID}:
+    get:
+      summary: Get a webhook by ID
+      operationId: getWebhook
+      tags: [Webhooks]
+      security:
+        - TenantJWT: []
+        - APIKey: []
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+        - name: webhookID
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Webhook found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Feature not available in current edition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: EDITION_LIMIT
+                message: "webhooks require Pro edition or higher"
+        "404":
+          description: Webhook not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: WEBHOOK_NOT_FOUND
+                message: "webhook not found"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    patch:
+      summary: Partially update a webhook
+      operationId: updateWebhook
+      tags: [Webhooks]
+      description: All fields are optional. Omitted fields are unchanged. Status transitions — enabled ↔ degraded ↔ suspended.
+      security:
+        - TenantJWT: []
+        - APIKey: []
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+        - name: webhookID
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWebhookRequest"
+      responses:
+        "200":
+          description: Updated webhook
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Feature not available in current edition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: EDITION_LIMIT
+                message: "webhooks require Pro edition or higher"
+        "404":
+          description: Webhook not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      summary: Delete a webhook
+      operationId: deleteWebhook
+      tags: [Webhooks]
+      security:
+        - TenantJWT: []
+        - APIKey: []
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+        - name: webhookID
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Webhook deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: deleted
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Feature not available in current edition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: EDITION_LIMIT
+                message: "webhooks require Pro edition or higher"
+        "404":
+          description: Webhook not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tenants/{tenantSlug}/webhooks/{webhookID}/test:
+    post:
+      summary: Synchronous test delivery
+      operationId: testWebhookDelivery
+      tags: [Webhooks]
+      security:
+        - BearerAuth: []
+      description: |
+        Performs a single synchronous HTTP POST to the registered webhook URL
+        using all standard worker logic (SSRF dial-time check, HMAC signing).
+        No retry is performed and no delivery record is written.
+        The suspension status gate does **not** apply — suspended and degraded webhooks
+        can be test-delivered so operators can verify before re-enabling.
+
+        Rate limits: 10 requests per webhook per minute, 30 per tenant per minute.
+        When the webhook worker is unreachable, returns 503.
+      parameters:
+        - $ref: "#/components/parameters/tenantSlug"
+        - name: webhookID
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the webhook to test
+      responses:
+        "200":
+          description: |
+            Test delivery completed. The destination may have returned a non-2xx status
+            or a connection error — check the response body for the actual outcome.
+            HTTP 200 indicates that the test delivery RPC itself succeeded; the
+            `status_code` field reflects the destination's response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestDeliveryResult"
+              examples:
+                success:
+                  summary: Destination returned 200
+                  value:
+                    status_code: 200
+                    latency_ms: 142
+                    response_body_preview: '{"received":true}'
+                    error: ""
+                ssrf_blocked:
+                  summary: SSRF protection blocked the delivery
+                  value:
+                    status_code: 0
+                    latency_ms: 0
+                    response_body_preview: ""
+                    error: "ssrf_blocked: example.internal resolves to private IP 10.0.0.1"
+        "401":
+          description: Unauthorized — missing or invalid tenant JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: UNAUTHORIZED
+                message: "missing tenant context"
+        "403":
+          description: Feature not available in current edition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: EDITION_LIMIT
+                message: "webhooks require Pro edition or higher"
+        "404":
+          description: Webhook not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: WEBHOOK_NOT_FOUND
+                message: "webhook not found"
+        "429":
+          description: Rate limit exceeded
+          headers:
+            Retry-After:
+              description: Seconds until the rate limit window resets
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: RATE_LIMIT_EXCEEDED
+                message: "rate limit exceeded for this webhook"
+        "503":
+          description: Webhook worker unreachable or deadline exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: WEBHOOK_WORKER_UNAVAILABLE
+                message: "webhook worker is not reachable"
+
+  /api/v1/admin/connections:
+    get:
+      summary: List active connections across all tenants (admin)
+      operationId: adminListConnections
+      tags: [Connections, Admin]
+      description: Requires admin JWT. Returns connections across all tenants with optional filters.
+      parameters:
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+        - name: pod_id
+          in: query
+          schema:
+            type: string
+        - name: transport
+          in: query
+          schema:
+            type: string
+            enum: [ws, sse]
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: Cross-tenant connection list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionListResponse"
+        "503":
+          description: Registry unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/admin/analytics/stream:
+    get:
+      summary: Stream real-time per-tenant analytics (admin, Pro edition)
+      operationId: adminAnalyticsStream
+      tags: [Analytics, Admin]
+      description: |
+        Server-Sent Events (SSE) stream of per-tenant analytics aggregated across all pods.
+        Polls the analytics DB every ~60s (ANALYTICS_FLUSH_INTERVAL) and pushes updated metrics.
+        Requires admin JWT and Pro edition.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter to a specific tenant (UUID). Omit to aggregate across all tenants. A non-empty, malformed (non-UUID) value is rejected with 400 before the stream opens.
+      responses:
+        "200":
+          description: SSE stream of analytics events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each event has a named type and JSON payload:
+                  - `snapshot` (on connect and every interval): full metrics for the tenant
+                example: |
+                  event: snapshot
+                  data: {"tenant_id":"acme","connections":{"active":142,"websocket":120,"sse":22},"messages":{"published":8420,"delivered":8415,"failed":5},"push":{"web":{"sent":200,"success":198,"failed":2,"expired":0,"rate_limited":0},"android":{"sent":150,"success":150,"failed":0,"expired":0,"rate_limited":0},"ios":{"sent":100,"success":99,"failed":1,"expired":0,"rate_limited":0}}}
+        "400":
+          description: Malformed tenant_id (not a valid UUID)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing or invalid admin JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Max concurrent SSE connections reached (ANALYTICS_SSE_MAX_CONNS)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /admin/login:
+    post:
+      summary: Admin UI login — exchange ADMIN_TOKEN for session cookie
+      operationId: adminUILogin
+      tags: [Admin UI]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  description: ADMIN_TOKEN value configured via environment variable
+      responses:
+        "303":
+          description: Login successful — redirects to /admin/ with Set-Cookie header
+        "401":
+          description: Invalid token — re-renders login page with error message (text/html)
+
+  /admin/logout:
+    post:
+      summary: Admin UI logout — clear session cookie
+      operationId: adminUILogout
+      tags: [Admin UI]
+      responses:
+        "303":
+          description: Logged out — redirects to /admin/login with cleared session cookie
+
+  /admin/schemas/channel-rules.json:
+    get:
+      summary: JSON Schema for the channel rules editor
+      operationId: adminUIChannelRulesSchema
+      tags: [Admin UI]
+      responses:
+        "200":
+          description: JSON Schema for validating channel rules in the CodeMirror editor
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /admin/system/health:
+    get:
+      summary: System health status for all Sukko services (session-gated)
+      operationId: adminUISystemHealth
+      tags: [Admin UI]
+      description: |
+        Fans out HTTP health probes to WS_SERVER_HEALTH_URL and GATEWAY_HEALTH_URL.
+        Result is cached for 10 seconds. Provisioning self-status is always "ok".
+        Requires a valid admin_session cookie.
+      responses:
+        "200":
+          description: Health status of all configured services
+          content:
+            text/html:
+              schema:
+                type: string
+                description: HTMX partial — system_health.html partial
+        "303":
+          description: Session expired — redirect to /admin/login
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Admin JWT (Ed25519 keypair, iss:"sukko-admin") or tenant JWT (per-tenant asymmetric keys).
+        Admin JWT is checked first; if the issuer is not "sukko-admin", tenant JWT validation is used.
+
+  parameters:
+    tenantSlug:
+      name: tenantSlug
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z][a-z0-9-]{2,62}$"
+      description: Tenant slug — the human-readable Kafka namespace and URL identifier (3–63 chars, lowercase alphanumeric + hyphens, must start with a letter)
+
+    keyID:
+      name: keyID
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Key identifier
+
+    limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 50
+        minimum: 1
+        maximum: 100
+      description: Number of items to return
+
+    offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        default: 0
+        minimum: 0
+      description: Number of items to skip
+
+  schemas:
+    ConnectionDetail:
+      type: object
+      required: [connection_id, tenant_id, pod_id, shard_id, remote_ip, transport, connected_at, channels, registry_status]
+      properties:
+        connection_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        api_key_id:
+          type: string
+          description: Stable database ID of the API key; omitted for JWT-only auth.
+        user_id:
+          type: string
+          description: JWT subject claim; omitted for API-key-only auth.
+        pod_id:
+          type: string
+        shard_id:
+          type: string
+        remote_ip:
+          type: string
+        transport:
+          type: string
+          enum: [ws, sse]
+        connected_at:
+          type: string
+          format: date-time
+        channels:
+          type: array
+          items:
+            type: string
+        channels_capped:
+          type: boolean
+          description: True when the connection's channel list was capped at MaxRegistryChannelsPerConnection (200).
+        registry_status:
+          type: string
+          enum: [current, possibly_stale]
+          description: |
+            `current` — all health indicators are green.
+            `possibly_stale` — one or more health signals are degraded (drops > 0, stale heartbeat, admin channel unhealthy, or health key absent).
+
+    BulkDisconnectResponse:
+      type: object
+      required: [disconnected, errors, channels_capped_warning, re_query_skipped]
+      properties:
+        disconnected:
+          type: integer
+          description: Number of connections successfully published a disconnect command.
+        errors:
+          type: integer
+          description: Number of connections where the disconnect failed (unhealthy pod or Valkey error).
+        channels_capped_warning:
+          type: boolean
+          description: True when at least one connection's channel list was capped; the filter may have missed some channels.
+        re_query_skipped:
+          type: boolean
+          description: True when the re-query goroutine was not launched (WG unavailable). Normally false.
+
+    ConnectionListResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectionDetail"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code (UPPER_SNAKE_CASE)
+          examples: ["TENANT_NOT_FOUND"]
+        message:
+          type: string
+          description: Human-readable error message
+          examples: ["tenant not found"]
+
+    Tenant:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Immutable UUID primary key (DB-generated)
+        slug:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{2,62}$"
+          description: Human-readable Kafka namespace and URL identifier (mutable via /rename)
+        previous_slug:
+          type: ["string", "null"]
+          description: Slug before the most recent rename; present during the rename hold period
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended, deprovisioning, deleted]
+        consumer_type:
+          type: string
+          enum: [shared, dedicated]
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        suspended_at:
+          type: ["string", "null"]
+          format: date-time
+        deprovision_at:
+          type: ["string", "null"]
+          format: date-time
+        deleted_at:
+          type: ["string", "null"]
+          format: date-time
+
+    CreateTenantRequest:
+      type: object
+      required: [slug, name]
+      properties:
+        slug:
+          type: string
+          minLength: 3
+          maxLength: 63
+          pattern: "^[a-z][a-z0-9-]{2,62}$"
+          description: Tenant slug — Kafka namespace and URL identifier (lowercase alphanumeric + hyphens, must start with a letter)
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        consumer_type:
+          type: string
+          enum: [shared, dedicated]
+          default: shared
+          description: Kafka consumer type — shared (pool) or dedicated (per-tenant consumer)
+        metadata:
+          type: object
+          additionalProperties: true
+        public_key:
+          $ref: "#/components/schemas/CreateKeyRequest"
+
+    CreateTenantResponse:
+      type: object
+      properties:
+        tenant:
+          $ref: "#/components/schemas/Tenant"
+        key:
+          $ref: "#/components/schemas/TenantKey"
+          description: Only present if public_key was provided in the request
+
+    RenameTenantRequest:
+      type: object
+      required: [slug]
+      properties:
+        slug:
+          type: string
+          minLength: 3
+          maxLength: 63
+          pattern: "^[a-z][a-z0-9-]{2,62}$"
+          description: New tenant slug
+
+    UpdateTenantRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        consumer_type:
+          type: string
+          enum: [shared, dedicated]
+        metadata:
+          type: object
+          additionalProperties: true
+
+    PaginatedTenants:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tenant"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    TenantKey:
+      type: object
+      properties:
+        key_id:
+          type: string
+        tenant_id:
+          type: string
+          format: uuid
+        algorithm:
+          type: string
+          enum: [ES256, RS256, EdDSA]
+        public_key:
+          type: string
+          description: PEM-encoded public key
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: ["string", "null"]
+          format: date-time
+        revoked_at:
+          type: ["string", "null"]
+          format: date-time
+
+    CreateKeyRequest:
+      type: object
+      required: [key_id, algorithm, public_key]
+      properties:
+        key_id:
+          type: string
+          minLength: 3
+          maxLength: 63
+          description: Unique key identifier
+        algorithm:
+          type: string
+          enum: [ES256, RS256, EdDSA]
+          description: Signing algorithm
+        public_key:
+          type: string
+          minLength: 50
+          description: PEM-encoded public key
+        expires_at:
+          type: string
+          format: date-time
+          description: Optional key expiration
+
+    PaginatedKeys:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantKey"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    APIKey:
+      type: object
+      properties:
+        key_id:
+          type: string
+          description: "API key value (pk_live_ prefix + random). Only returned in full on creation."
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: ["string", "null"]
+          format: date-time
+
+    CreateAPIKeyRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Human-readable label for the API key
+
+    PaginatedAPIKeys:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/APIKey"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    RoutingRule:
+      type: object
+      required: [pattern, topics, priority]
+      description: |
+        Maps a channel suffix pattern to one or more Kafka topic suffixes. Rules are evaluated in ascending priority order — first match wins. Unmatched channels are routed to the tenant's dead-letter topic.
+
+        **Pattern syntax**: `**` matches any number of dot-separated segments (multi-segment wildcard). `*` is accepted as an alias and normalized to `**` on storage — GET responses always return `**`. For example, `trades.**` matches both `trades.BTC-USD` and `trades.spot.BTC-USD`. The `{}` placeholder syntax is NOT supported.
+
+        **Topic suffixes**: Each value is a topic suffix (not a full topic name). The full topic name is constructed as `{namespace}.{tenant_slug}.{suffix}`. Specifying multiple suffixes fans out the message to all listed topics simultaneously.
+
+        **Priority**: Rules are evaluated in ascending order (lower value = higher priority). Use lower priority values (e.g., 0–99) for tenant-specific rules; higher values (e.g., 100) work well for broad catch-all rules.
+      properties:
+        pattern:
+          type: string
+          maxLength: 256
+          pattern: "^[a-zA-Z0-9.*_-]{1,256}$"
+          description: "Channel suffix pattern. Use `**` for multi-segment wildcard (e.g., `trades.**`, `rooms.*.presence`). Bare `*` is accepted and normalized to `**` on storage."
+          examples: ["trades.**", "rooms.*.presence", "**"]
+        topics:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: string
+            maxLength: 128
+            pattern: "^[a-zA-Z0-9._-]{1,128}$"
+          description: "One or more Kafka topic suffixes. Full topic name: `{namespace}.{tenant_slug}.{suffix}`. Must be pre-provisioned topics."
+          examples: [["trades"], ["trades", "audit-log"]]
+        priority:
+          type: integer
+          minimum: 0
+          description: "Rule evaluation priority — lower value matches first. Must be unique per tenant."
+          examples: [0, 10, 100]
+
+    RoutingRulesResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingRule"
+        total:
+          type: integer
+          description: Total number of routing rules for the tenant.
+        limit:
+          type: integer
+          description: Maximum number of items returned per page.
+        offset:
+          type: integer
+          description: Number of items skipped (pagination offset).
+
+    AddRoutingRuleRequest:
+      type: object
+      required: [rule]
+      properties:
+        rule:
+          $ref: "#/components/schemas/RoutingRule"
+
+    SetRoutingRulesRequest:
+      type: object
+      required: [rules]
+      properties:
+        rules:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RoutingRule"
+
+    TenantChannelRules:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        rules:
+          $ref: "#/components/schemas/ChannelRules"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ChannelRules:
+      type: object
+      properties:
+        public:
+          type: array
+          items:
+            type: string
+          description: "Channel patterns accessible to all authenticated users (e.g., '*.messages')"
+        group_mappings:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          description: "Group name → channel patterns mapping"
+        default:
+          type: array
+          items:
+            type: string
+          description: Fallback channel patterns when no group matches
+        publish_public:
+          type: array
+          items:
+            type: string
+          description: Channel patterns anyone can publish to
+        publish_group_mappings:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          description: "Group name → publish channel patterns"
+        publish_default:
+          type: array
+          items:
+            type: string
+          description: Fallback publish channel patterns
+
+    SetChannelRulesRequest:
+      type: object
+      properties:
+        public:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            maxLength: 256
+        group_mappings:
+          type: object
+          additionalProperties:
+            type: array
+            maxItems: 20
+            items:
+              type: string
+              maxLength: 256
+        default:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            maxLength: 256
+        publish_public:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            maxLength: 256
+        publish_group_mappings:
+          type: object
+          additionalProperties:
+            type: array
+            maxItems: 20
+            items:
+              type: string
+              maxLength: 256
+        publish_default:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            maxLength: 256
+
+    TenantQuota:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        max_topics:
+          type: integer
+        max_partitions:
+          type: integer
+        max_storage_bytes:
+          type: integer
+          format: int64
+        producer_byte_rate:
+          type: integer
+          format: int64
+          description: Max producer throughput in bytes/sec
+        consumer_byte_rate:
+          type: integer
+          format: int64
+          description: Max consumer throughput in bytes/sec
+        max_connections:
+          type: integer
+          description: Max WebSocket connections (0 = system default)
+        updated_at:
+          type: string
+          format: date-time
+
+    UpdateQuotaRequest:
+      type: object
+      properties:
+        max_topics:
+          type: integer
+        max_partitions:
+          type: integer
+        max_storage_bytes:
+          type: integer
+          format: int64
+        producer_byte_rate:
+          type: integer
+          format: int64
+        consumer_byte_rate:
+          type: integer
+          format: int64
+        max_connections:
+          type: integer
+
+    AuditEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        tenant_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+          description: "Action performed (e.g., 'create_tenant', 'revoke_key', 'set_routing_rules')"
+        actor:
+          type: string
+          description: Principal or user ID that performed the action
+        actor_type:
+          type: string
+          enum: [user, system, api_key]
+        ip_address:
+          type: ["string", "null"]
+        details:
+          type: object
+          additionalProperties: true
+          description: Action-specific metadata
+        created_at:
+          type: string
+          format: date-time
+
+    PaginatedAuditEntries:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEntry"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code (UPPER_SNAKE_CASE)
+        message:
+          type: string
+          description: Human-readable error description
+
+    AdminKey:
+      type: object
+      properties:
+        key_id:
+          type: string
+        name:
+          type: string
+        algorithm:
+          type: string
+          enum: [Ed25519, RS256]
+        public_key:
+          type: string
+          description: PEM-encoded public key
+        registered_by:
+          type: string
+          description: Actor who registered this key
+        created_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: ["string", "null"]
+          format: date-time
+
+    TestDeliveryResult:
+      type: object
+      description: |
+        Result of a synchronous test delivery attempt.
+        HTTP 200 is always returned for this schema — the destination's outcome
+        is reflected in `status_code` and `error`. An empty `error` field with a
+        2xx `status_code` indicates a fully successful delivery.
+      properties:
+        status_code:
+          type: integer
+          description: |
+            HTTP response status code from the destination. 0 indicates a
+            connection-level error (timeout, SSRF block, DNS failure) rather than
+            an HTTP response.
+          example: 200
+        latency_ms:
+          type: integer
+          format: int64
+          description: Round-trip delivery latency in milliseconds. 0 on connection error.
+          example: 142
+        response_body_preview:
+          type: string
+          maxLength: 512
+          description: First 512 bytes of the destination's response body. Empty on connection error.
+          example: '{"received":true}'
+        error:
+          type: string
+          description: |
+            Human-readable error description for connection-level failures
+            (ssrf_blocked, timeout, decryption_failure). Empty on success.
+          example: ""
+
+    Webhook:
+      type: object
+      required: [id, tenant_id, url, channel_pattern, status, max_retries, retry_count, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          description: "Webhook ID (wh_ prefix + base32)"
+          example: wh_abc1def2ghi3
+        tenant_id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+          description: HTTPS endpoint URL
+        channel_pattern:
+          type: string
+          description: Channel glob pattern (e.g. trades.*)
+        status:
+          type: string
+          enum: [enabled, degraded, suspended]
+        max_retries:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Maximum delivery attempts before entering degraded status
+        retry_count:
+          type: integer
+          description: Number of consecutive delivery failures since last success
+        last_status:
+          type: ["string", "null"]
+          description: HTTP status code string of last delivery attempt (null if never delivered)
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateWebhookRequest:
+      type: object
+      required: [url, channel_pattern, secret]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Delivery endpoint. Must be https (http allowed only when WEBHOOK_ALLOW_HTTP=true in local environments).
+        channel_pattern:
+          type: string
+          description: Channel glob pattern that triggers this webhook (e.g. trades.*)
+        secret:
+          type: string
+          description: Plaintext HMAC secret. Encrypted at rest; never returned in API responses.
+        max_retries:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+          description: Maximum delivery attempts before entering degraded status (0 = use default of 5)
+
+    UpdateWebhookRequest:
+      type: object
+      description: All fields are optional. Omitted fields are unchanged.
+      properties:
+        url:
+          type: string
+          format: uri
+        channel_pattern:
+          type: string
+        max_retries:
+          type: integer
+          minimum: 1
+          maximum: 10
+        status:
+          type: string
+          enum: [enabled, degraded, suspended]
+          description: Explicit status transition. Transitioning to 'enabled' resets retry_count to 0.
+
+    WebhookListResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Webhook"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    PushChannelConfig:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+        patterns:
+          type: array
+          items:
+            type: string
+          description: Channel patterns that trigger push notifications
+        default_ttl:
+          type: integer
+          description: Push message TTL in seconds (default 2419200 = 28 days)
+        default_urgency:
+          type: string
+          enum: [very-low, low, normal, high]
+          description: Push message urgency (default "normal")
+
+    AdminSystemHealth:
+      type: object
+      properties:
+        overall:
+          type: string
+          enum: [ok, degraded, unknown]
+        services:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              status:
+                type: string
+                enum: [ok, degraded, unknown, unconfigured]

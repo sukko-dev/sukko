@@ -1,0 +1,150 @@
+# Default values for ws-server subchart
+# Go envDefault values are the source of truth for application config.
+# Override any setting via extraEnv. See /config endpoint for current values.
+
+global:
+  imageRegistry: ""
+
+enabled: true
+
+replicaCount: 1
+
+image:
+  repository: sukko-server
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Deployment identity — drives Kafka topic namespace, consumer group naming.
+# Free-form string; Sukko convention: local, dev, stg, prod
+# environment: local
+
+# Server CLI flags (binary args, not env vars)
+shards: 2
+basePort: 3002
+lbAddr: ":3001"
+
+# Message Backend: "direct" (Go default) or "kafka"
+#   direct — in-process broadcast, zero external deps, no persistence
+#   kafka  — Kafka/Redpanda, persistence, offset-based replay
+# messageBackend: direct  # uncomment to override Go default
+
+# Broadcast Bus: "valkey" (only supported option)
+# Inter-pod pub/sub for message fan-out across server instances.
+# Valkey is required when WS_HISTORY_ENABLED=true.
+# broadcastType: valkey  # uncomment to override Go default
+
+# Cluster-wide max WebSocket connections. Per-pod = cluster / replicaCount.
+connectionLimits:
+  clusterMaxConnections: 100000
+
+# --- Infrastructure Connections ---
+# Empty values auto-wire to in-cluster services via release name.
+# Only set for external services or custom addresses.
+kafka:
+  # brokers: ""  # Auto: {{ .Release.Name }}-redpanda:9092
+  sasl:
+    enabled: false
+    # mechanism: scram-sha-256
+    # username: ""
+    existingSecret: ""
+    existingSecretKey: "kafka-sasl-password"
+  tls:
+    enabled: false
+
+valkey:
+  # addrs: ""  # Auto: {{ .Release.Name }}-valkey:6379
+  tls:
+    enabled: false
+
+# Connections registry (Pro+ edition — WS_CONNECTIONS_REGISTRY_ENABLED).
+# When enabled, ws-server tracks live connections in Valkey and exposes them
+# via the Provisioning API. Requires a valid Pro+ license key.
+# Uses the same Valkey instance as the broadcast bus (no extra Valkey needed).
+connectionsRegistry:
+  enabled: false
+
+# Override any Go envDefault. See /config endpoint for all available settings.
+# Example: { LOG_LEVEL: "debug", WS_PONG_WAIT: "120s" }
+# Gap recovery tuning (defaults match Go envDefault; only set when deviating):
+#   WS_GAP_NOTIFY_BUFFER_SIZE: "8"        # per-client gap notify buffer (1-64)
+#   WS_REPLAY_RATE_LIMIT_INTERVAL: "10s"  # min interval between live replay requests per client+channel
+extraEnv: {}
+
+# --- Kubernetes Resources ---
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
+
+resources:
+  requests:
+    cpu: "1"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "1Gi"
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3001
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+
+# Readiness gates traffic on backend readiness (kafka mode: topic-registry snapshot applied, #179 P3).
+# Liveness stays on /health so a not-ready pod is pulled from endpoints but never restarted.
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 3001
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+
+service:
+  type: NodePort
+  port: 3001
+  nodePort: 30080
+
+sessionAffinity:
+  enabled: false
+  timeoutSeconds: 10800
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+networkPolicy:
+  enabled: true
+  allowPrometheus: true
+
+
+analytics:
+  enabled: false
+  secrets:
+    existingSecret: ""
+    dbURLKey: "analytics-db-url"
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

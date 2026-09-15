@@ -1,0 +1,949 @@
+openapi: "3.1.0"
+info:
+  title: Sukko API
+  version: "1.0.0"
+  description: |
+    REST and SSE API for the Sukko real-time data platform.
+
+    ## Authentication
+
+    All endpoints (except `/health`) require authentication via one of:
+    - **JWT Bearer token**: `Authorization: Bearer <jwt>`
+    - **API Key header**: `X-API-Key: <key>`
+
+    Push endpoints under `/api/v1/push/` on the provisioning service require
+    admin authentication (`Authorization: Bearer <admin-token>`).
+
+    ## Edition Gating
+
+    Push notification endpoints (`/api/v1/push/*`) require the **Enterprise** edition.
+    SSE and REST publish require the **Pro** edition.
+
+    ## Error Format
+
+    All errors follow a standard JSON envelope:
+    ```json
+    {"code": "UPPER_SNAKE_CASE", "message": "Human-readable description"}
+    ```
+
+servers:
+  - url: https://{gateway-host}
+    description: ws-gateway (SSE, publish)
+  - url: https://{provisioning-host}
+    description: Provisioning service (push config, admin)
+  - url: https://{push-host}
+    description: Push service (subscribe, VAPID key)
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      description: Returns 200 if the service is healthy. No authentication required.
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /sse:
+    get:
+      operationId: sseConnect
+      summary: Open an SSE event stream
+      description: |
+        Opens a Server-Sent Events connection to receive real-time messages
+        on the requested channels. SSE is receive-only; use `POST /api/v1/publish`
+        to send messages.
+
+        **Edition**: Pro or higher.
+
+        The stream emits events in standard SSE format:
+        ```
+        id: 42
+        event: message
+        data: {"channel":"acme.prices","data":{...}}
+        ```
+
+        Keepalive comments (`: keepalive`) are sent periodically to prevent
+        proxy/load-balancer timeouts.
+
+        Reconnection: clients should send `Last-Event-ID` header with the last
+        received `id` value to resume from that point.
+      tags: [SSE]
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: channels
+          in: query
+          required: true
+          description: Comma-separated list of channels to subscribe to.
+          schema:
+            type: string
+            example: "acme.prices,acme.trades"
+        - name: token
+          in: query
+          required: false
+          description: JWT token (alternative to Authorization header).
+          schema:
+            type: string
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Resume from this event ID on reconnect.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SSE event stream opened.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE-formatted event stream.
+        "400":
+          description: Missing or empty channels parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: INVALID_REQUEST
+                message: "channels query parameter is required"
+        "401":
+          description: Authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: UNAUTHORIZED
+                message: "invalid or expired token"
+        "403":
+          description: Tenant mismatch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: UNAUTHORIZED
+                message: "tenant mismatch"
+        "429":
+          description: Tenant connection limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: TENANT_LIMIT_EXCEEDED
+                message: "tenant connection limit reached"
+        "503":
+          description: Backend server unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: SERVICE_UNAVAILABLE
+                message: "ws-server connection not available"
+
+  /api/v1/publish:
+    post:
+      operationId: publishMessage
+      summary: Publish a message to a channel
+      description: |
+        Publishes a message to the specified channel via REST. The message is
+        delivered to all connected WebSocket and SSE subscribers.
+
+        **Edition**: Pro or higher.
+      tags: [Publish]
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishRequest"
+      responses:
+        "200":
+          description: Message accepted for delivery.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishResponse"
+        "400":
+          description: Invalid request (bad JSON, missing channel/data, wrong Content-Type).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidJson:
+                  value:
+                    code: INVALID_REQUEST
+                    message: "invalid JSON body"
+                missingChannel:
+                  value:
+                    code: INVALID_REQUEST
+                    message: "channel is required"
+                missingData:
+                  value:
+                    code: INVALID_REQUEST
+                    message: "data is required"
+        "401":
+          description: Authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden (tenant mismatch).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Request body exceeds maximum publish size.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: BODY_TOO_LARGE
+                message: "request body exceeds maximum publish size"
+        "429":
+          description: Publish rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: RATE_LIMITED
+                message: "publish rate limit exceeded"
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Backend server unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/push/subscribe:
+    post:
+      operationId: pushSubscribe
+      summary: Register a device for push notifications
+      description: |
+        Registers a device to receive push notifications on the specified channels.
+        The request body varies by platform.
+
+        **Edition**: Enterprise.
+
+        **Platforms**:
+        - `web` — requires `endpoint`, `p256dh_key`, `auth_secret` (Web Push subscription)
+        - `android` — requires `token` (FCM registration token)
+        - `ios` — requires `token` (APNs device token)
+      tags: [Push]
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushSubscribeRequest"
+            examples:
+              web:
+                summary: Web Push subscription
+                value:
+                  tenant_id: "acme"
+                  principal: "user-123"
+                  platform: "web"
+                  channels: ["acme.alerts", "acme.prices"]
+                  endpoint: "https://fcm.googleapis.com/fcm/send/..."
+                  p256dh_key: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQ..."
+                  auth_secret: "tBHItJI5svbpC7yA2A..."
+              android:
+                summary: Android (FCM) subscription
+                value:
+                  tenant_id: "acme"
+                  principal: "user-123"
+                  platform: "android"
+                  channels: ["acme.alerts"]
+                  token: "fcm-registration-token-abc"
+              ios:
+                summary: iOS (APNs) subscription
+                value:
+                  tenant_id: "acme"
+                  principal: "user-123"
+                  platform: "ios"
+                  channels: ["acme.alerts"]
+                  token: "apns-device-token-xyz"
+      responses:
+        "200":
+          description: Device registered. Returns the assigned device ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushSubscribeResponse"
+        "400":
+          description: Validation error (missing fields, invalid platform, channel prefix mismatch).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidPlatform:
+                  value:
+                    code: INVALID_ARGUMENT
+                    message: "platform must be one of: web, android, ios"
+                missingEndpoint:
+                  value:
+                    code: INVALID_ARGUMENT
+                    message: "endpoint is required for web platform"
+                missingChannels:
+                  value:
+                    code: INVALID_ARGUMENT
+                    message: "at least one channel is required"
+        "401":
+          description: Authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error creating subscription.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: pushUnsubscribe
+      summary: Unregister a device from push notifications
+      description: |
+        Removes a push subscription by device ID.
+
+        **Edition**: Enterprise.
+      tags: [Push]
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushUnsubscribeRequest"
+      responses:
+        "200":
+          description: Device unregistered.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+        "400":
+          description: Missing device_id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: INVALID_ARGUMENT
+                message: "device_id is required"
+        "401":
+          description: Authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error deleting subscription.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/push/vapid-key:
+    get:
+      operationId: getVapidKey
+      summary: Get the tenant VAPID public key
+      description: |
+        Returns the VAPID public key for the authenticated tenant. Used by
+        browser clients to subscribe to Web Push. Auto-generates an ECDSA P-256
+        key pair on first request.
+
+        **Edition**: Enterprise.
+      tags: [Push]
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: The tenant ID to retrieve the VAPID key for.
+      responses:
+        "200":
+          description: VAPID public key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VapidKeyResponse"
+        "400":
+          description: Missing tenant_id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error (key generation or storage failure).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/push/credentials:
+    post:
+      operationId: uploadPushCredentials
+      summary: Upload push provider credentials
+      description: |
+        Uploads push notification provider credentials (FCM service account,
+        APNs key, or VAPID key pair) for a tenant. Admin-only endpoint on the
+        provisioning service.
+
+        **Edition**: Enterprise.
+
+        Supported providers: `fcm`, `apns`, `vapid`.
+
+        For FCM, a connectivity test (OAuth2 token exchange) is performed before
+        storing. For APNs and VAPID, connectivity tests are skipped.
+      tags: [Push Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadCredentialsRequest"
+      responses:
+        "201":
+          description: Credentials stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadCredentialsResponse"
+        "400":
+          description: Validation error or connectivity test failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingTenantId:
+                  value:
+                    code: MISSING_TENANT_ID
+                    message: "tenant_id is required"
+                invalidProvider:
+                  value:
+                    code: INVALID_PROVIDER
+                    message: "provider must be one of: fcm, apns, vapid"
+                fcmFailed:
+                  value:
+                    code: FCM_CONNECTIVITY_FAILED
+                    message: "FCM connectivity test failed: ..."
+        "401":
+          description: Admin authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error storing credentials.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: deletePushCredentials
+      summary: Delete push provider credentials
+      description: |
+        Removes push notification provider credentials for a tenant. Admin-only
+        endpoint on the provisioning service.
+
+        **Edition**: Enterprise.
+
+        Accepts parameters via JSON body or query parameters (`?tenant_id=...&provider=...`).
+      tags: [Push Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Tenant ID (alternative to JSON body).
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [fcm, apns, vapid]
+          description: Provider name (alternative to JSON body).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteCredentialsRequest"
+      responses:
+        "200":
+          description: Credentials deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: deleted
+        "400":
+          description: Missing or invalid parameters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Admin authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Credential not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: NOT_FOUND
+                message: "Push credential not found"
+
+  /api/v1/push/channels:
+    post:
+      operationId: createPushChannelConfig
+      summary: Create or update push channel configuration
+      description: |
+        Configures which channel patterns trigger push notifications for a tenant,
+        with default TTL and urgency. Upserts (creates or replaces).
+
+        **Edition**: Enterprise.
+
+        Channel patterns must be prefixed with the tenant ID (e.g., `acme.alerts.*`).
+        Valid urgency values: `very-low`, `low`, `normal`, `high`.
+      tags: [Push Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateChannelConfigRequest"
+      responses:
+        "201":
+          description: Channel configuration created or updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelConfigResponse"
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingTenantId:
+                  value:
+                    code: MISSING_TENANT_ID
+                    message: "tenant_id is required"
+                missingPatterns:
+                  value:
+                    code: MISSING_PATTERNS
+                    message: "patterns must be non-empty"
+                invalidPattern:
+                  value:
+                    code: INVALID_PATTERN
+                    message: "pattern \"other.alerts\" must start with tenant prefix \"acme.\""
+                invalidUrgency:
+                  value:
+                    code: INVALID_URGENCY
+                    message: "default_urgency must be one of: very-low, low, normal, high"
+        "401":
+          description: Admin authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      operationId: getPushChannelConfig
+      summary: Get push channel configuration for a tenant
+      description: |
+        Retrieves the push channel configuration for the specified tenant.
+
+        **Edition**: Enterprise.
+      tags: [Push Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: The tenant ID.
+      responses:
+        "200":
+          description: Channel configuration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelConfigResponse"
+        "400":
+          description: Missing tenant_id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Admin authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: No configuration found for tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: NOT_FOUND
+                message: "Push channel config not found for tenant"
+
+    delete:
+      operationId: deletePushChannelConfig
+      summary: Delete push channel configuration
+      description: |
+        Removes the push channel configuration for a tenant.
+
+        **Edition**: Enterprise.
+
+        Accepts parameters via JSON body or query parameter (`?tenant_id=...`).
+      tags: [Push Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Tenant ID (alternative to JSON body).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteChannelConfigRequest"
+      responses:
+        "200":
+          description: Configuration deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: deleted
+        "400":
+          description: Missing tenant_id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Admin authentication failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Configuration not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token issued for a tenant principal.
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Tenant API key.
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Machine-readable UPPER_SNAKE_CASE error code.
+          example: INVALID_REQUEST
+        message:
+          type: string
+          description: Human-readable error description.
+          example: "channel is required"
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+
+    PublishRequest:
+      type: object
+      required: [channel, data]
+      properties:
+        channel:
+          type: string
+          description: Target channel name (must include tenant prefix).
+          example: "acme.prices"
+        data:
+          description: Arbitrary JSON payload to deliver to subscribers.
+          example: {"symbol": "BTC", "price": 42000}
+
+    PublishResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          description: Publish status from ws-server.
+          example: accepted
+        channel:
+          type: string
+          description: Channel the message was published to.
+          example: "acme.prices"
+
+    PushSubscribeRequest:
+      type: object
+      required: [tenant_id, principal, platform, channels]
+      properties:
+        tenant_id:
+          type: string
+          description: Tenant ID.
+          example: acme
+        principal:
+          type: string
+          description: User principal (from JWT subject).
+          example: user-123
+        platform:
+          type: string
+          enum: [web, android, ios]
+          description: Push notification platform.
+        channels:
+          type: array
+          items:
+            type: string
+          description: Channels to receive push notifications for. Must be prefixed with tenant ID.
+          example: ["acme.alerts", "acme.prices"]
+        endpoint:
+          type: string
+          description: Web Push subscription endpoint URL (required for `web` platform).
+        p256dh_key:
+          type: string
+          description: Web Push P-256 Diffie-Hellman public key, base64url-encoded (required for `web` platform).
+        auth_secret:
+          type: string
+          description: Web Push authentication secret, base64url-encoded (required for `web` platform).
+        token:
+          type: string
+          description: FCM registration token or APNs device token (required for `android` and `ios` platforms).
+
+    PushSubscribeResponse:
+      type: object
+      properties:
+        device_id:
+          type: integer
+          format: int64
+          description: Unique identifier for the registered device subscription.
+          example: 42
+
+    PushUnsubscribeRequest:
+      type: object
+      required: [device_id]
+      properties:
+        device_id:
+          type: integer
+          format: int64
+          description: Device subscription ID returned from subscribe.
+          example: 42
+        tenant_id:
+          type: string
+          description: Tenant ID (for logging).
+
+    VapidKeyResponse:
+      type: object
+      properties:
+        public_key:
+          type: string
+          description: VAPID public key, base64url-encoded (uncompressed ECDSA P-256 point).
+          example: "BPe1R4J3K..."
+
+    UploadCredentialsRequest:
+      type: object
+      required: [tenant_id, provider, credential_data]
+      properties:
+        tenant_id:
+          type: string
+          description: Tenant ID.
+          example: acme
+        provider:
+          type: string
+          enum: [fcm, apns, vapid]
+          description: Push provider type.
+        credential_data:
+          type: string
+          description: |
+            Provider-specific credential JSON as a string. Examples:
+            - **fcm**: Google service account JSON
+            - **apns**: `{"key_id":"...","team_id":"...","private_key":"..."}`
+            - **vapid**: `{"public_key":"...","private_key":"..."}`
+
+    UploadCredentialsResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Credential record ID.
+        provider:
+          type: string
+          example: fcm
+        tenant_id:
+          type: string
+          example: acme
+
+    DeleteCredentialsRequest:
+      type: object
+      required: [tenant_id, provider]
+      properties:
+        tenant_id:
+          type: string
+          description: Tenant ID.
+        provider:
+          type: string
+          enum: [fcm, apns, vapid]
+          description: Provider to delete credentials for.
+
+    CreateChannelConfigRequest:
+      type: object
+      required: [tenant_id, patterns]
+      properties:
+        tenant_id:
+          type: string
+          description: Tenant ID.
+          example: acme
+        patterns:
+          type: array
+          items:
+            type: string
+          description: Channel patterns that trigger push notifications. Must be prefixed with tenant ID.
+          example: ["acme.alerts.*", "acme.critical"]
+        default_ttl:
+          type: integer
+          description: Default TTL for push messages in seconds. Defaults to 2419200 (28 days).
+          default: 2419200
+          example: 86400
+        default_urgency:
+          type: string
+          enum: [very-low, low, normal, high]
+          description: Default urgency for push messages. Defaults to `normal`.
+          default: normal
+
+    ChannelConfigResponse:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          example: acme
+        patterns:
+          type: array
+          items:
+            type: string
+          example: ["acme.alerts.*"]
+        default_ttl:
+          type: integer
+          example: 86400
+        default_urgency:
+          type: string
+          example: normal
+
+    DeleteChannelConfigRequest:
+      type: object
+      required: [tenant_id]
+      properties:
+        tenant_id:
+          type: string
+          description: Tenant ID whose channel config to delete.
+
+tags:
+  - name: Health
+    description: Health check endpoints.
+  - name: SSE
+    description: Server-Sent Events streaming (Pro edition).
+  - name: Publish
+    description: REST message publishing (Pro edition).
+  - name: Push
+    description: Push notification device registration (Enterprise edition).
+  - name: Push Admin
+    description: Push notification admin configuration (Enterprise edition, provisioning service).

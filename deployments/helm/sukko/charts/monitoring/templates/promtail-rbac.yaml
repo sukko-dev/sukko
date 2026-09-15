@@ -1,0 +1,44 @@
+{{- if and .Values.enabled .Values.promtail.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "monitoring.fullname" . }}-promtail
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: promtail
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  # Include namespace in name to avoid conflicts between environments
+  name: {{ include "monitoring.fullname" . }}-promtail-{{ .Release.Namespace }}
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: promtail
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  # Include namespace in name to avoid conflicts between environments
+  name: {{ include "monitoring.fullname" . }}-promtail-{{ .Release.Namespace }}
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: promtail
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "monitoring.fullname" . }}-promtail-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "monitoring.fullname" . }}-promtail
+    namespace: {{ .Release.Namespace }}
+{{- end }}

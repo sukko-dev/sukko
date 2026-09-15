@@ -1,0 +1,52 @@
+<div class="space-y-4">
+  <div class="flex items-center justify-between">
+    <h3 class="text-sm font-medium text-gray-700">Live Analytics</h3>
+    <span id="sse-status" class="text-xs text-gray-400">Connecting…</span>
+  </div>
+
+  <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+    <div class="rounded-lg border border-gray-200 bg-white p-4">
+      <dt class="text-xs font-medium text-gray-500">Connections</dt>
+      <dd id="metric-connections" class="mt-1 text-2xl font-semibold text-gray-900">—</dd>
+    </div>
+    <div class="rounded-lg border border-gray-200 bg-white p-4">
+      <dt class="text-xs font-medium text-gray-500">Messages/min</dt>
+      <dd id="metric-messages" class="mt-1 text-2xl font-semibold text-gray-900">—</dd>
+    </div>
+    <div class="rounded-lg border border-gray-200 bg-white p-4">
+      <dt class="text-xs font-medium text-gray-500">Subscriptions</dt>
+      <dd id="metric-subscriptions" class="mt-1 text-2xl font-semibold text-gray-900">—</dd>
+    </div>
+  </div>
+
+  {{if .CanPushAnalytics}}
+  <div class="rounded-lg border border-gray-200 bg-white p-4">
+    <h4 class="text-xs font-semibold text-gray-500 mb-3">Push Delivery (last minute)</h4>
+    <canvas id="push-chart" height="80"></canvas>
+  </div>
+  {{end}}
+</div>
+
+<script src="/admin/static/js/chart.min.js"></script>
+<script>
+(function() {
+  const tenantID = "{{.TenantID}}";
+  const url = "/admin/analytics/stream" + (tenantID ? "?tenant_id=" + tenantID : "");
+  const es = new EventSource(url);
+  const statusEl = document.getElementById("sse-status");
+
+  es.addEventListener("snapshot", function(e) {
+    const d = JSON.parse(e.data);
+    statusEl.textContent = "Live";
+    statusEl.className = "text-xs text-green-600";
+    if (d.connections !== undefined) document.getElementById("metric-connections").textContent = d.connections;
+    if (d.messages !== undefined) document.getElementById("metric-messages").textContent = d.messages;
+    if (d.subscriptions !== undefined) document.getElementById("metric-subscriptions").textContent = d.subscriptions;
+  });
+
+  es.onerror = function() {
+    statusEl.textContent = "Disconnected";
+    statusEl.className = "text-xs text-red-500";
+  };
+})();
+</script>

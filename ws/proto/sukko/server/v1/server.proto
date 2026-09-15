@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package sukko.server.v1;
+
+option go_package = "github.com/sukko-dev/sukko/gen/proto/sukko/server/v1;serverv1";
+
+// RealtimeService provides internal gateway-to-server communication
+// for SSE transport (Subscribe) and REST publish (Publish).
+// This is internal service-to-service communication per Constitution XII.
+service RealtimeService {
+  // Publish sends a message to a channel via the message backend.
+  // Gateway validates auth/permissions before calling this RPC.
+  // The server resolves routing rules and publishes to Kafka.
+  rpc Publish(PublishRequest) returns (PublishResponse);
+
+  // Subscribe opens a server-streaming RPC for receiving messages.
+  // Each stream maps to one virtual client in a shard's subscription index.
+  // Messages are delivered as SubscribeResponses with the full JSON envelope.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+// PublishRequest contains the message to publish to a channel.
+message PublishRequest {
+  // tenant_slug identifies the tenant owning the channel (client-facing routing label).
+  string tenant_slug = 1;
+
+  // channel is the target channel for the message.
+  string channel = 2;
+
+  // data is the raw message payload (JSON bytes).
+  bytes data = 3;
+
+  // principal is the publisher identity (for audit logging).
+  string principal = 4;
+}
+
+// PublishResponse confirms the message was accepted for delivery.
+message PublishResponse {
+  // status is "accepted" on success.
+  string status = 1;
+
+  // channel echoes back the target channel.
+  string channel = 2;
+
+  // mid is the stable message identity assigned to the published message —
+  // identical on every delivered copy (live, replay, history). Opaque to
+  // clients. Empty for multi-topic fan-out publishes (N records → N mids).
+  string mid = 3;
+}
+
+// SubscribeRequest initiates a streaming subscription to one or more channels.
+message SubscribeRequest {
+  // tenant_slug identifies the tenant for this subscription (client-facing routing label).
+  string tenant_slug = 1;
+
+  // principal is the subscriber identity (from JWT claims).
+  string principal = 2;
+
+  // channels is the list of channels to subscribe to.
+  repeated string channels = 3;
+
+  // remote_addr is the original client IP (for logging/metrics).
+  string remote_addr = 4;
+}
+
+// SubscribeResponse is a message delivered on the subscription stream.
+message SubscribeResponse {
+  // sequence is the per-connection monotonic sequence number.
+  // Used by the gateway as the SSE id: field for Last-Event-ID reconnection.
+  int64 sequence = 1;
+
+  // payload is the full JSON envelope from BroadcastEnvelope.Build(seq).
+  // Written as-is to the SSE data: line. No parsing needed by the gateway.
+  bytes payload = 2;
+}

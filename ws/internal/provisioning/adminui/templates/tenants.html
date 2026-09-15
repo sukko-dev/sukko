@@ -1,0 +1,41 @@
+{{template "layout.html" .}}
+{{define "title"}}Tenants — Sukko Admin{{end}}
+{{define "content"}}
+<div class="space-y-4">
+  <div class="flex items-center justify-between">
+    <h1 class="text-xl font-semibold text-gray-900">Tenants</h1>
+    <span class="text-sm text-gray-500">{{.TotalCount}} total</span>
+  </div>
+
+  <div class="flex gap-2">
+    <input
+      type="search"
+      name="q"
+      placeholder="Filter tenants…"
+      value="{{.Filter}}"
+      class="block w-full max-w-xs rounded-md border border-gray-300 px-3 py-1.5 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+      hx-get="/admin/tenants/rows"
+      hx-target="#tenant-table-body"
+      hx-trigger="input changed delay:300ms"
+      hx-include="[name='q']"
+    >
+  </div>
+
+  <div class="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+    <table class="min-w-full divide-y divide-gray-200 text-sm">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-4 py-3 text-left font-medium text-gray-500">Slug</th>
+          <th class="px-4 py-3 text-left font-medium text-gray-500">Name</th>
+          <th class="px-4 py-3 text-left font-medium text-gray-500">Status</th>
+          <th class="px-4 py-3 text-left font-medium text-gray-500">Connections</th>
+          <th class="px-4 py-3 text-left font-medium text-gray-500">Created</th>
+        </tr>
+      </thead>
+      <tbody id="tenant-table-body" class="divide-y divide-gray-100">
+        {{template "tenant_rows.html" .Rows}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{end}}

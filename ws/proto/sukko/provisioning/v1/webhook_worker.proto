@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package sukko.provisioning.v1;
+
+option go_package = "github.com/sukko-dev/sukko/gen/proto/sukko/provisioning/v1;provisioningv1";
+
+// WebhookWorkerService is the internal gRPC API between the provisioning service
+// and the webhook-worker. All RPCs are unary. Authentication is enforced by
+// WebhookWorkerAuthInterceptor using a shared WEBHOOK_INTERNAL_TOKEN.
+service WebhookWorkerService {
+  // ListWebhookTenants returns all tenant IDs that have at least one active
+  // (enabled or degraded) webhook. Called at webhook-worker startup to seed
+  // Valkey bus subscriptions.
+  rpc ListWebhookTenants(ListWebhookTenantsRequest) returns (ListWebhookTenantsResponse);
+
+  // ListWebhooksForTenant returns all webhook registrations for a tenant,
+  // including the encrypted secret (bytes). Used for cache TTL refresh and
+  // on-demand cache-miss hydration.
+  rpc ListWebhooksForTenant(ListWebhooksForTenantRequest) returns (ListWebhooksForTenantResponse);
+
+  // UpdateWebhookStatus transitions a webhook's status and resets retry_count.
+  // Called after retry exhaustion (→degraded) or recovery (→enabled).
+  rpc UpdateWebhookStatus(UpdateWebhookStatusRequest) returns (UpdateWebhookStatusResponse);
+
+  // RecordDelivery logs a single delivery attempt and updates last_delivery_at.
+  // The provisioning service prunes to keep at most 50 records per webhook.
+  rpc RecordDelivery(RecordDeliveryRequest) returns (RecordDeliveryResponse);
+}
+
+message ListWebhookTenantsRequest {}
+
+message ListWebhookTenantsResponse {
+  repeated string tenant_uuids = 1;
+}
+
+message ListWebhooksForTenantRequest {
+  string tenant_uuid = 1;   // tenant's stable UUID (webhooks.tenant_id FK)
+}
+
+message ListWebhooksForTenantResponse {
+  repeated WebhookRecord webhooks = 1;
+}
+
+// WebhookRecord is the wire representation sent from provisioning to webhook-worker.
+// secret_enc contains raw AES-256-GCM ciphertext bytes — NOT base64, NOT plaintext.
+// The webhook-worker decrypts using its local CREDENTIALS_ENCRYPTION_KEY.
+message WebhookRecord {
+  string id              = 1;
+  string tenant_uuid     = 2;
+  string url             = 3;
+  string channel_pattern = 4;
+  bytes  secret_enc      = 5;
+  string status          = 6;
+  int32  max_retries     = 7;
+  int64  last_delivery_at_ms = 8; // Unix ms; 0 = no prior delivery (treat as nil, never as time.Unix(0,0))
+}
+
+message UpdateWebhookStatusRequest {
+  string webhook_id  = 1;
+  string tenant_uuid = 2;
+  string status      = 3;
+  int32  retry_count = 4;
+}
+
+message UpdateWebhookStatusResponse {}
+
+message RecordDeliveryRequest {
+  string webhook_id      = 1;
+  string tenant_uuid     = 2;
+  string delivery_id     = 3;
+  int32  attempt         = 4;
+  int32  status_code     = 5;
+  int64  latency_ms      = 6;
+  string error           = 7;
+  int64  delivered_at_ms = 8; // Unix milliseconds
+}
+
+message RecordDeliveryResponse {}

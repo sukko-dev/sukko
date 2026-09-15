@@ -1,0 +1,58 @@
+# Default values for valkey subchart
+
+enabled: true
+
+replicaCount: 1
+
+port: 6379
+
+image:
+  repository: valkey/valkey
+  tag: 7.2-alpine
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "384Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+config:
+  # maxmemory MUST be set to ~75% of resources.limits.memory.
+  # If maxmemory exceeds the container memory limit, K8s OOM-kills the pod
+  # before Valkey's own LRU eviction fires — defeating the eviction policy.
+  # Rule of thumb: maxmemory = floor(limits.memory * 0.75)
+  #   512Mi limit → "384mb" (default here)
+  #   256Mi limit → "192mb"
+  #   128Mi limit → "96mb"
+  maxmemory: "384mb"
+
+  # allkeys-lru: evict any key (with or without TTL) using LRU when maxmemory is reached.
+  # This is correct for Sukko's workload:
+  #   - Broadcast pub/sub: ephemeral, no stored data — unaffected by eviction
+  #   - History Streams: TTL-keyed; LRU eviction degrades gracefully (older messages evicted first)
+  #   - Connection registry: TTL-keyed (120s); LRU eviction is acceptable (worst case: stale entry)
+  # Do NOT use noeviction — it causes write errors that crash the history writer and registry writer.
+  maxmemoryPolicy: "allkeys-lru"
+
+  # Disable persistence. Sukko uses Valkey for ephemeral broadcast, history caching,
+  # and TTL-backed connection registry — none of these need crash-safe persistence.
+  # AOF/RDB would consume disk I/O and storage for no benefit.
+  # Note: `--save ""` resets the save schedule on Valkey 7.2+ (RFC-compatible behavior).
+  # Verify with `valkey-cli CONFIG GET save` after deploy to confirm RDB is disabled.
+  save: ""
+  appendonly: "no"
+
+auth:
+  enabled: true
+  # password is set via secret
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

@@ -1,0 +1,36 @@
+# E2E-only Compose override for the DIRECT message backend.
+#
+# Applied by the E2E direct-backend cell (`task e2e:cell BACKEND=direct`, e.g. the
+# Community/direct anchor). Gives the tester the admin key so it can drive
+# provisioning (throwaway tenants, channel/routing rules). KAFKA_BROKERS stays
+# unset: the direct backend deliberately covers the Community-default data path;
+# the kafka-ingest + push suites are covered by the kafka-mode cells/jobs.
+#
+# The admin keypair (.admin.key) is generated per-run via `cmd/gen-admin-key`;
+# its public half is wired to provisioning as ADMIN_BOOTSTRAP_KEY. This
+# hand-rolled wiring is slated for removal once devstack (issue #144) lands.
+services:
+  sukko-tester:
+    volumes:
+      # Raw 64-byte Ed25519 admin private key (matches provisioning's ADMIN_BOOTSTRAP_KEY, kid bootstrap-0).
+      - ./taskfiles/e2e/.admin.key:/etc/sukko/admin.key:ro
+    environment:
+      # Admin JWT signing key so the tester can create tenants and rules on provisioning.
+      TESTER_ADMIN_KEY_FILE: "/etc/sukko/admin.key"
+      # The push suite's delivery check registers a WebPush endpoint on this host
+      # (the tester's own compose service name) and asserts the push service
+      # actually delivers to it. Unset ⇒ the delivery check skips — the battery
+      # sets it so the skip audit stays clean.
+      TESTER_PUSH_RECEIVER_HOST: "sukko-tester"
+
+  provisioning:
+    environment:
+      # The battery/suite driver makes far more than the default 60 req/min per
+      # IP across many suites from a single host — raise the limit so the e2e
+      # isn't throttled by a production-facing security control (§IX) that is
+      # meaningless for a single-IP test harness.
+      API_RATE_LIMIT_PER_MIN: "100000"
+      # Same rationale for the dedicated per-IP revoke limiter (independent of
+      # API_RATE_LIMIT_PER_MIN): the token-revocation suite issues many revokes
+      # from one host, so raise it well above the 30/min production default.
+      PROVISIONING_TOKEN_REVOCATION_RATE_LIMIT_PER_MIN: "100000"

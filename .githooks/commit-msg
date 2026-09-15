@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Commit-msg hook: reject AI-attribution markers in the commit message.
+# Mirrors scripts/check-provenance (which CI runs over the full range);
+# this is fast local feedback only. Install: git config core.hooksPath .githooks
+set -euo pipefail
+
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+MSG_FILE="$1"
+MARKERS_FILE="scripts/check-provenance/ai-markers.txt"
+
+[ -f "$MARKERS_FILE" ] || exit 0
+
+# Strip comment lines from the message (git strips them on commit anyway),
+# then match markers case-insensitively as fixed strings.
+HITS=$(grep -v '^#' "$MSG_FILE" \
+  | grep -iFf <(grep -vE '^#|^re:' "$MARKERS_FILE" | grep -v '^[[:space:]]*$') \
+  | head -5 || true)
+
+if [ -n "$HITS" ]; then
+  echo -e "${RED}[Provenance] AI-attribution markers in commit message:${NC}"
+  echo "$HITS"
+  echo -e "${YELLOW}Markers list: $MARKERS_FILE${NC}"
+  exit 1
+fi

@@ -1,0 +1,22 @@
+{{- if and .Values.enabled .Values.grafana.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "monitoring.fullname" . }}-grafana
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  type: {{ .Values.grafana.service.type | default "ClusterIP" }}
+  ports:
+    - port: {{ .Values.grafana.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+      {{- if and (eq (.Values.grafana.service.type | default "ClusterIP") "NodePort") .Values.grafana.service.nodePort }}
+      nodePort: {{ .Values.grafana.service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "monitoring.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+{{- end }}

@@ -1,0 +1,317 @@
+# =============================================================================
+# Build Images — Docker images pushed to ghcr.io
+# =============================================================================
+# Manual trigger only — Docker builds are expensive. Trigger via GitHub UI
+# or CLI:
+#   gh workflow run build-images.yml --ref main                        # all services
+#   gh workflow run build-images.yml --ref main -f services=gateway    # one service
+#   gh workflow run build-images.yml --ref main -f services="gateway,server"  # multiple
+#
+# When "all" (default), detects changes since last tag to decide what to build:
+#   - Changes in ws/internal/shared/ or ws/go.mod → rebuild all services
+#   - Changes in ws/cmd/server/ or ws/build/server/ → rebuild sukko-server only
+#   - etc.
+
+name: Build Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      services:
+        description: "Services to build (comma-separated: server,gateway,provisioning,push,tester,webhook-worker) or 'all' for change detection"
+        required: false
+        default: "all"
+        type: string
+  # A vMAJOR.MINOR.PATCH tag cuts an immutable, pinnable versioned release (scope B):
+  # semver-guarded -> full test gate -> build-all -> verify embedded production key ->
+  # push immutable :vX.Y.Z + move :latest. Manual dispatch (above) publishes :<sha> only
+  # and never touches :latest (release path owns it).
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # Per-ref, non-cancelling: a release (or dispatch) must not be aborted by a later one.
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Single source for the release jobs' service loops (§I). The dispatch-path `detect` job
+  # keeps its own JSON list (change-detection format) — pre-existing, not duplicated here.
+  SERVICES: "server gateway provisioning push tester webhook-worker"
+
+jobs:
+  detect:
+    name: Detect services to build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve build matrix
+        id: resolve
+        run: |
+          ALL_SERVICES='["server","gateway","provisioning","push","tester","webhook-worker"]'
+          INPUT="${{ inputs.services }}"
+
+          # Explicit service list — no change detection needed
+          if [ "$INPUT" != "all" ] && [ -n "$INPUT" ]; then
+            VALID="server gateway provisioning push tester webhook-worker"
+            MATRIX="["
+            for svc in $(echo "$INPUT" | tr ',' ' '); do
+              svc=$(echo "$svc" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+              if ! echo "$VALID" | grep -qw "$svc"; then
+                echo "::error::Unknown service '$svc'. Valid: $VALID"
+                exit 1
+              fi
+              MATRIX="$MATRIX\"$svc\","
+            done
+            MATRIX="${MATRIX%,}]"
+            echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+            echo "Building explicitly selected: $INPUT"
+            exit 0
+          fi
+
+          # Change detection: compare HEAD against last tag (or first commit if no tags)
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          CHANGED=$(git diff --name-only "$LAST_TAG"..HEAD)
+
+          # Shared changes → rebuild everything
+          # ws/internal/webhook/[^/]+.go = top-level webhook package (constants, ratelimiter)
+          # shared between webhook-worker and provisioning. Excludes ws/internal/webhook/worker/
+          # (the worker's own private code, caught by per-service detection below).
+          if echo "$CHANGED" | grep -qE '^ws/internal/shared/|^ws/internal/webhook/[^/]+\.go|^ws/go\.(mod|sum)$|^ws/proto/'; then
+            echo "matrix=$ALL_SERVICES" >> "$GITHUB_OUTPUT"
+            echo "Shared code changed — building all services"
+            exit 0
+          fi
+
+          # Per-service detection
+          SERVICES=""
+          for svc in server gateway provisioning push tester webhook-worker; do
+            pattern="^ws/cmd/$svc/|^ws/build/$svc/|^ws/internal/$svc/"
+            # webhook-worker's implementation lives at ws/internal/webhook/worker/ (not ws/internal/webhook-worker/)
+            if [ "$svc" = "webhook-worker" ]; then
+              pattern="${pattern}|^ws/internal/webhook/worker/"
+            fi
+            if echo "$CHANGED" | grep -qE "$pattern"; then
+              SERVICES="$SERVICES\"$svc\","
+            fi
+          done
+
+          if [ -z "$SERVICES" ]; then
+            # No service-specific changes detected — build all as fallback
+            echo "matrix=$ALL_SERVICES" >> "$GITHUB_OUTPUT"
+            echo "No service-specific changes detected — building all services"
+          else
+            MATRIX="[${SERVICES%,}]"
+            echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+            echo "Building changed services: $MATRIX"
+          fi
+
+  build-and-push:
+    name: Build sukko-${{ matrix.dir }}
+    needs: detect
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: ${{ fromJson(needs.detect.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Set build time
+        id: meta
+        run: echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ws
+          file: ws/build/${{ matrix.dir }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Manual dispatch publishes :<sha> ONLY — never :latest (the release path owns
+          # :latest), so a manual build can't regress the default-pull image.
+          tags: |
+            ghcr.io/sukko-dev/sukko-${{ matrix.dir }}:${{ github.sha }}
+          build-args: |
+            VERSION=${{ github.sha }}
+            COMMIT_HASH=${{ github.sha }}
+            BUILD_TIME=${{ steps.meta.outputs.build_time }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===========================================================================
+  # Versioned release (scope B) — fires ONLY on a vMAJOR.MINOR.PATCH tag push.
+  # release-guard (semver + immutability pre-check) -> release-test-gate (full
+  # suite incl. the armed realkey tag) -> release (build-all -> verify embedded
+  # production key -> push immutable :vX.Y.Z + move :latest). The release is green
+  # only AFTER the KMS production key is delivered — a placeholder/dev key set fails
+  # the source gate (/ "release cut from a placeholder commit").
+  # ===========================================================================
+  release-guard:
+    name: Release guard
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate semver tag
+        run: |
+          if ! printf '%s' "${GITHUB_REF_NAME}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag ${GITHUB_REF_NAME} is not vMAJOR.MINOR.PATCH — refusing release."
+            exit 1
+          fi
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite an existing version (immutability)
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          for svc in $SERVICES; do
+            if docker manifest inspect "ghcr.io/sukko-dev/sukko-${svc}:${TAG}" >/dev/null 2>&1; then
+              echo "::error::ghcr.io/sukko-dev/sukko-${svc}:${TAG} already exists — published versions are immutable."
+              exit 1
+            fi
+          done
+
+  release-test-gate:
+    name: Release test gate
+    needs: release-guard
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ws
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ws/go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet -tags "$(cat .ci-test-tags)" ./...
+
+      - name: Test (race, full suite incl. armed realkey)
+        run: go test -race -count=1 -timeout=10m -tags "$(cat .ci-test-tags)" ./...
+
+  release:
+    name: Release ${{ github.ref_name }}
+    needs: release-test-gate
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Serialize ALL releases (a fixed group, not per-ref) so two version tags pushed close
+    # together never race the :latest move. Immutable :vX.Y.Z is unaffected.
+    concurrency:
+      group: sukko-release-latest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set release metadata
+        run: |
+          echo "REL_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
+
+      # Source gate: a release MUST embed a production key set — never the
+      # placeholder or dev/e2e sentinel. The release build passes no GO_BUILD_TAGS, so
+      # the dev/e2e key can only slip in via a mistaken manifest — caught here + below.
+      - name: Source gate — production key set
+        run: |
+          MANIFEST=ws/internal/shared/license/keys/sukko.fingerprints
+          if grep -qwE 'placeholder|local' "$MANIFEST"; then
+            echo "::error::$MANIFEST still carries a placeholder/dev sentinel — not a production key set; deliver the production key first (Scenario 2)."
+            exit 1
+          fi
+
+      # Build EVERY service for BOTH arches and assert each built binary embeds every
+      # committed production fingerprint — build-all + verify-all-arches BEFORE any push,
+      # so a build or verify failure on any (service, arch) aborts before anything ships (AC6).
+      - name: Build all + verify embedded production key (every service, every arch)
+        run: |
+          MANIFEST=ws/internal/shared/license/keys/sukko.fingerprints
+          for svc in $SERVICES; do
+            for arch in amd64 arm64; do
+              echo "=== build+verify sukko-${svc} (${arch}) ==="
+              docker buildx build --platform "linux/${arch}" --load \
+                --file "ws/build/${svc}/Dockerfile" \
+                --build-arg VERSION="${REL_TAG}" \
+                --build-arg COMMIT_HASH="${GITHUB_SHA}" \
+                --build-arg BUILD_TIME="${BUILD_TIME}" \
+                --cache-from type=gha \
+                --cache-to type=gha,mode=max \
+                --tag "sukko-${svc}:verify-${arch}" ws
+              docker save "sukko-${svc}:verify-${arch}" -o /tmp/img.tar
+              while read -r FP _ || [ -n "$FP" ]; do
+                [ -z "$FP" ] && continue
+                if ! grep -qa "$FP" /tmp/img.tar; then
+                  echo "::error::sukko-${svc} (${arch}) does not embed production fingerprint ${FP}"
+                  exit 1
+                fi
+              done < "$MANIFEST"
+              rm -f /tmp/img.tar
+            done
+          done
+
+      # Publish every service's immutable multi-arch :vX.Y.Z. amd64/arm64 layers are cache
+      # hits from the verify builds, so this only assembles + pushes the manifests.
+      - name: Publish immutable :vX.Y.Z (all services)
+        run: |
+          for svc in $SERVICES; do
+            echo "=== publish sukko-${svc}:${REL_TAG} ==="
+            docker buildx build --platform linux/amd64,linux/arm64 --push \
+              --file "ws/build/${svc}/Dockerfile" \
+              --build-arg VERSION="${REL_TAG}" \
+              --build-arg COMMIT_HASH="${GITHUB_SHA}" \
+              --build-arg BUILD_TIME="${BUILD_TIME}" \
+              --cache-from type=gha \
+              --tag "ghcr.io/sukko-dev/sukko-${svc}:${REL_TAG}" ws
+          done
+
+      # Move :latest ONLY after every :vX.Y.Z is published — a publish failure never leaves
+      # :latest partially moved (AC6). ghcr->ghcr retag of the just-published multi-arch
+      # manifest; :latest is owned exclusively by this release path.
+      - name: Move :latest (all services)
+        run: |
+          for svc in $SERVICES; do
+            echo "=== move sukko-${svc}:latest -> ${REL_TAG} ==="
+            docker buildx imagetools create \
+              --tag "ghcr.io/sukko-dev/sukko-${svc}:latest" \
+              "ghcr.io/sukko-dev/sukko-${svc}:${REL_TAG}"
+          done

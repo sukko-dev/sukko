@@ -1,0 +1,22 @@
+# =============================================================================
+# Push Service Tasks
+# =============================================================================
+# Pattern: push:{action}
+
+version: "3"
+
+tasks:
+  build:
+    desc: Build push service binary
+    cmds:
+      - cd {{.ROOT_DIR}}/ws && go build -o bin/sukko-push ./cmd/push
+
+  run:
+    desc: Run push service locally
+    cmds:
+      - cd {{.ROOT_DIR}}/ws && go run ./cmd/push
+
+  migrate:
+    desc: Run push database migrations (requires DATABASE_URL env var)
+    cmds:
+      - cd {{.ROOT_DIR}}/ws && atlas migrate apply --dir file://internal/shared/migrations/postgres --url $DATABASE_URL

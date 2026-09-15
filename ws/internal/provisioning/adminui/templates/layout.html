@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-50">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{block "title" .}}Admin — Sukko{{end}}</title>
+  <link rel="stylesheet" href="/admin/static/css/tailwind.css">
+  <script src="/admin/static/js/htmx.min.js" defer></script>
+  <script src="/admin/static/js/alpine.min.js" defer></script>
+  {{if .NeedsCodeMirror}}
+  <script src="/admin/static/js/codemirror.bundle.js"></script>
+  {{end}}
+</head>
+<body class="h-full flex flex-col" hx-ext="">
+  <nav class="bg-gray-900 text-white">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex h-14 items-center justify-between">
+      <div class="flex items-center space-x-6">
+        <a href="/admin/" class="font-semibold text-sm tracking-wide text-gray-100 hover:text-white">Sukko Admin</a>
+        <a href="/admin/" class="text-sm text-gray-300 hover:text-white">Tenants</a>
+        <a href="/admin/status" class="text-sm text-gray-300 hover:text-white">Status</a>
+      </div>
+      <form method="POST" action="/admin/logout" class="flex items-center">
+        <button type="submit" class="text-xs text-gray-400 hover:text-white">Sign out</button>
+      </form>
+    </div>
+  </nav>
+  <main class="flex-1 overflow-auto">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      {{block "content" .}}{{end}}
+    </div>
+  </main>
+</body>
+</html>

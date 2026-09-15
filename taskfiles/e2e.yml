@@ -1,0 +1,645 @@
+# =============================================================================
+# E2E License Testing — Edition Matrix
+# =============================================================================
+# Runs boundary tests and claims assertions across all editions
+# using sukko-cli against a local docker-compose deployment.
+#
+# Usage:
+#   task e2e:license              Run full matrix
+#   task e2e:license:setup        Start services
+#   task e2e:license:community    Test Community limits (no key)
+#   task e2e:license:pro          Test Pro limits + claims
+#   task e2e:license:enterprise   Test Enterprise (unlimited) + claims
+#   task e2e:license:expired      Test expired Pro → Community degradation
+#   task e2e:license:teardown     Cleanup
+
+version: "3"
+
+vars:
+  DEV_KEY_PATH: ws/internal/shared/license/keys/sukko.dev.key
+  DEV_PUB_PATH: ws/internal/shared/license/keys/sukko.dev.pub
+  GENTOKEN_CMD: cd ws && go run ./internal/shared/license/gentoken
+  PROVISIONING_URL: http://localhost:8080
+
+env:
+  # Build the license-embedding images with the dev public key embedded,
+  # so keys minted at runtime via genkeys/gentoken validate against the running
+  # services. Consumed by the GO_BUILD_TAGS build arg in docker-compose.yml.
+  GO_BUILD_TAGS: sukko_e2e
+
+tasks:
+  # NOTE: this matrix boots via `sukko up`, which uses the sukko-cli's image-only compose
+  # (ghcr:latest, no build step) — so GO_BUILD_TAGS=sukko_e2e does NOT reach it and it
+  # validates whatever key the PUBLISHED images embed. It therefore cannot validate a
+  # pre-publish local branch's signing change; for local dev-key validation of license
+  # editions, use the SOURCE-build grid cells (task e2e:cell:pro-direct / enterprise-direct
+  # / expired-direct), which embed keys/sukko.dev.pub via the sukko_e2e build.
+  license:
+    desc: Run full E2E license matrix (Community → Pro → Enterprise → Expired)
+    cmds:
+      - task: license:setup
+      - task: license:community
+      - task: license:pro
+      - task: license:enterprise
+      - task: license:expired
+      - task: license:teardown
+
+  license:setup:
+    desc: Auto-generate dev keypair if missing, init and start services
+    cmds:
+      - |
+        # Regenerate when EITHER the private key OR the public key is missing: the
+        # sukko_e2e build embeds sukko.dev.pub, and a developer may have a stale
+        # sukko.dev.key without the matching .pub.
+        if [ ! -f "{{.DEV_KEY_PATH}}" ] || [ ! -f "{{.DEV_PUB_PATH}}" ]; then
+          echo "Dev keypair incomplete — generating..."
+          cd ws && go run ./internal/shared/license/genkeys
+        else
+          echo "Dev keypair exists"
+        fi
+      - sukko init --defaults 2>/dev/null || true
+      - sukko up
+
+  license:community:
+    desc: Test Community edition (no license key)
+    cmds:
+      - echo "=== Testing Community edition (no key) ==="
+      - sukko license remove 2>/dev/null || true
+      - sukko down 2>/dev/null || true
+      - sukko up
+      - sleep 5
+      # Claims assertion
+      - |
+        echo "Checking /edition claims..."
+        EDITION=$(curl -sf {{.PROVISIONING_URL}}/edition | jq -r '.edition')
+        if [ "$EDITION" != "community" ]; then
+          echo "FAIL: expected edition=community, got $EDITION"
+          exit 1
+        fi
+        echo "  edition: $EDITION ✓"
+      # Boundary tests
+      - sukko test validate --suite edition-limits
+      - echo "=== Community edition PASSED ==="
+
+  license:pro:
+    desc: Test Pro edition + claims assertion
+    vars:
+      TOKEN:
+        sh: "{{.GENTOKEN_CMD}} --key internal/shared/license/keys/sukko.dev.key --edition pro --org 'E2E Test' --expires +1y"
+    cmds:
+      - echo "=== Testing Pro edition ==="
+      - sukko license set "{{.TOKEN}}"
+      - sukko down 2>/dev/null || true
+      - sukko up
+      - sleep 5
+      # Claims assertion
+      - |
+        echo "Checking /edition claims..."
+        RESPONSE=$(curl -sf {{.PROVISIONING_URL}}/edition)
+        EDITION=$(echo "$RESPONSE" | jq -r '.edition')
+        ORG=$(echo "$RESPONSE" | jq -r '.org')
+        EXPIRED=$(echo "$RESPONSE" | jq -r '.expired')
+        MAX_TENANTS=$(echo "$RESPONSE" | jq -r '.limits.max_tenants')
+        if [ "$EDITION" != "pro" ]; then echo "FAIL: expected edition=pro, got $EDITION"; exit 1; fi
+        if [ "$ORG" != "E2E Test" ]; then echo "FAIL: expected org='E2E Test', got $ORG"; exit 1; fi
+        if [ "$EXPIRED" != "false" ]; then echo "FAIL: expected expired=false, got $EXPIRED"; exit 1; fi
+        if [ "$MAX_TENANTS" != "50" ]; then echo "FAIL: expected max_tenants=50, got $MAX_TENANTS"; exit 1; fi
+        echo "  edition: $EDITION ✓"
+        echo "  org: $ORG ✓"
+        echo "  expired: $EXPIRED ✓"
+        echo "  max_tenants: $MAX_TENANTS ✓"
+      # Boundary tests
+      - sukko test validate --suite edition-limits
+      - echo "=== Pro edition PASSED ==="
+
+  license:enterprise:
+    desc: Test Enterprise edition (unlimited) + claims assertion
+    vars:
+      TOKEN:
+        sh: "{{.GENTOKEN_CMD}} --key internal/shared/license/keys/sukko.dev.key --edition enterprise --org 'E2E Enterprise' --expires +1y"
+    cmds:
+      - echo "=== Testing Enterprise edition ==="
+      - sukko license set "{{.TOKEN}}"
+      - sukko down 2>/dev/null || true
+      - sukko up
+      - sleep 5
+      # Claims assertion — verify edition, org, and unlimited limits (0)
+      - |
+        echo "Checking /edition claims..."
+        RESPONSE=$(curl -sf {{.PROVISIONING_URL}}/edition)
+        EDITION=$(echo "$RESPONSE" | jq -r '.edition')
+        ORG=$(echo "$RESPONSE" | jq -r '.org')
+        EXPIRED=$(echo "$RESPONSE" | jq -r '.expired')
+        MAX_TENANTS=$(echo "$RESPONSE" | jq -r '.limits.max_tenants')
+        MAX_CONNECTIONS=$(echo "$RESPONSE" | jq -r '.limits.max_total_connections')
+        if [ "$EDITION" != "enterprise" ]; then echo "FAIL: expected edition=enterprise, got $EDITION"; exit 1; fi
+        if [ "$ORG" != "E2E Enterprise" ]; then echo "FAIL: expected org='E2E Enterprise', got $ORG"; exit 1; fi
+        if [ "$EXPIRED" != "false" ]; then echo "FAIL: expected expired=false, got $EXPIRED"; exit 1; fi
+        if [ "$MAX_TENANTS" != "0" ]; then echo "FAIL: expected max_tenants=0 (unlimited), got $MAX_TENANTS"; exit 1; fi
+        if [ "$MAX_CONNECTIONS" != "0" ]; then echo "FAIL: expected max_total_connections=0 (unlimited), got $MAX_CONNECTIONS"; exit 1; fi
+        echo "  edition: $EDITION ✓"
+        echo "  org: $ORG ✓"
+        echo "  expired: $EXPIRED ✓"
+        echo "  max_tenants: $MAX_TENANTS (unlimited) ✓"
+        echo "  max_total_connections: $MAX_CONNECTIONS (unlimited) ✓"
+      # Smoke test — create a few tenants, verify no rejection
+      - |
+        echo "Smoke test: creating tenants (should not be rejected)..."
+        for i in 1 2 3 4 5; do
+          if ! sukko tenant create "_e2e_enterprise_$i" "E2E Enterprise Test $i" 2>&1; then
+            echo "FAIL: tenant creation rejected — Enterprise should be unlimited"
+            exit 1
+          fi
+        done
+        echo "  5 tenants created without rejection ✓"
+      # Cleanup test tenants
+      - |
+        for i in 1 2 3 4 5; do
+          sukko tenant delete "_e2e_enterprise_$i" --force 2>/dev/null || true
+        done
+        echo "  test tenants cleaned up ✓"
+      - echo "=== Enterprise edition PASSED ==="
+
+  license:expired:
+    desc: Test expired Pro → Community degradation + claims assertion
+    vars:
+      TOKEN:
+        sh: "{{.GENTOKEN_CMD}} --key internal/shared/license/keys/sukko.dev.key --edition pro --org 'E2E Expired' --expires -1d 2>/dev/null"
+    cmds:
+      - echo "=== Testing expired Pro (Community degradation) ==="
+      - sukko license set "{{.TOKEN}}"
+      - sukko down 2>/dev/null || true
+      - sukko up
+      - sleep 5
+      # Claims assertion — should degrade to community with expired=true
+      - |
+        echo "Checking /edition claims..."
+        RESPONSE=$(curl -sf {{.PROVISIONING_URL}}/edition)
+        EDITION=$(echo "$RESPONSE" | jq -r '.edition')
+        EXPIRED=$(echo "$RESPONSE" | jq -r '.expired')
+        MAX_TENANTS=$(echo "$RESPONSE" | jq -r '.limits.max_tenants')
+        if [ "$EDITION" != "community" ]; then echo "FAIL: expected edition=community (degraded), got $EDITION"; exit 1; fi
+        if [ "$EXPIRED" != "true" ]; then echo "FAIL: expected expired=true, got $EXPIRED"; exit 1; fi
+        if [ "$MAX_TENANTS" != "3" ]; then echo "FAIL: expected max_tenants=3 (Community), got $MAX_TENANTS"; exit 1; fi
+        echo "  edition: $EDITION (degraded) ✓"
+        echo "  expired: $EXPIRED ✓"
+        echo "  max_tenants: $MAX_TENANTS (Community limit) ✓"
+      # Boundary tests — should enforce Community limits
+      - sukko test validate --suite edition-limits
+      - echo "=== Expired Pro degradation PASSED ==="
+
+  license:teardown:
+    desc: Cleanup after E2E tests
+    cmds:
+      - sukko license remove 2>/dev/null || true
+      - echo "=== E2E license matrix complete ==="
+
+  kafka-ingest:
+    desc: >-
+      E2E kafka-ingest round-trip regression — publish directly to Redpanda and verify a
+      gateway-subscribed client receives it, against a kafka-backend server (Community per ADR-0009; the Pro license exercises the routing-rules produce path) built
+      from source. Fails (not skips) if the delivery check is absent or not "pass".
+    vars:
+      COMPOSE: docker compose -f docker-compose.yml -f taskfiles/e2e/kafka.override.yml --profile kafka
+      # Raw 64-byte Ed25519 admin private key, generated per-run and mounted into the tester by
+      # the override; its public half is wired to provisioning as ADMIN_BOOTSTRAP_KEY.
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      # The repo compose (build-from-source) maps provisioning to host 18080 (the CLI compose
+      # used by the license tasks maps 8080 — hence the shared PROVISIONING_URL differs here).
+      PROVISIONING_URL: http://localhost:18080
+      # Matches the tester's TESTER_AUTH_TOKEN in docker-compose.yml.
+      TESTER_TOKEN: sukko-dev-token
+    cmds:
+      # Teardown runs even on failure (Taskfile defer, LIFO): stack down, then remove the key.
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        # Shared boot path (§X single source of truth): mint Pro token, gen admin key, boot the
+        # kafka-backend stack. All setup that `up` depends on runs inside e2e_boot_cell so the
+        # values reach the boot env.
+        e2e_boot_cell pro kafka "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} pro false
+        e2e_kafka_ready {{.COMPOSE}}
+      - |
+        set -eu
+        echo "=== Run kafka-ingest suite ==="
+        # --follow streams to completion so the final report is emitted; SUKKO_TESTER_TOKEN
+        # authenticates the CLI to the tester. Run the CLI hermetically: an isolated HOME/
+        # XDG_CONFIG_HOME means no ambient context leaks in (otherwise a developer's active
+        # context — e.g. tenant "demo" — is sent, and the tester skips its throwaway-tenant
+        # auto-create and fails). With no context the tester auto-creates a throwaway tenant.
+        # Extract the final report JSON line (has "test_type"); progress lines are ignored.
+        TMPCFG=$(mktemp -d)
+        REPORT=$(HOME="$TMPCFG" XDG_CONFIG_HOME="$TMPCFG/.config" SUKKO_TESTER_TOKEN={{.TESTER_TOKEN}} sukko test validate --suite kafka-ingest --follow --output json 2>/dev/null | grep '"test_type"' | tail -1)
+        rm -rf "$TMPCFG"
+        echo "$REPORT" | jq .
+        # Anti-vacuous-green guard: the delivery check MUST be present AND "pass". A skip emits
+        # check name "kafka-ingest" (not "kafka-ingest delivery"); connect/setup failures emit
+        # other names — so "present AND pass" closes skip/error/connect all at once.
+        STATUS=$(echo "$REPORT" | jq -r '.checks[]? | select(.name=="kafka-ingest delivery") | .status')
+        [ "$STATUS" = "pass" ] || { echo "FAIL: kafka-ingest delivery check status=${STATUS:-<absent>} (want pass)"; exit 1; }
+        echo "=== kafka-ingest round-trip PASSED (delivery=$STATUS) ==="
+      - |
+        set -eu
+        # rest-publish suite (kafka mode) — regression guard for #179: the gateway REST →
+        # gRPC → producer → Kafka PRODUCE path. Before #179 this returned HTTP 500
+        # UNKNOWN_TOPIC_OR_PARTITION (producer ignored routing rules → wrong topic); the
+        # "response format" check requires a 2xx {"status":"accepted"} response, so it is a
+        # non-vacuous guard that the produce fix holds (kafka-ingest above injects directly
+        # to Kafka and never exercises backend.Publish, so only this catches a produce regression).
+        #
+        # NOTE: this step gates ONLY the PRODUCE path ("response format"). The suite's ws/sse
+        # DELIVERY checks are gated by the grid cells `cell:pro-kafka` / `cell:enterprise-kafka`
+        # (and the direct cells) via their `REQUIRE_PASS` — those exercise the full
+        # publish→consume→broadcast loop with the delivery-liveness warmup. Re-gating delivery
+        # here would double-cover it and red this produce-focused job on delivery flakes it
+        # doesn't own (§XV).
+        echo "=== Run rest-publish suite (kafka mode) ==="
+        TMPCFG=$(mktemp -d)
+        REPORT=$(HOME="$TMPCFG" XDG_CONFIG_HOME="$TMPCFG/.config" SUKKO_TESTER_TOKEN={{.TESTER_TOKEN}} sukko test validate --suite rest-publish --follow --output json 2>/dev/null | grep '"test_type"' | tail -1)
+        rm -rf "$TMPCFG"
+        echo "$REPORT" | jq '{status, checks:[.checks[]|{name,status}]}'
+        # Anti-vacuous guard: the "response format" check MUST be present AND pass (proves the
+        # REST publish was accepted with 2xx — i.e. the produce path resolved a valid topic).
+        ST=$(echo "$REPORT" | jq -r '.checks[]? | select(.name=="response format") | .status')
+        [ "$ST" = "pass" ] || { echo "FAIL: rest-publish 'response format' status=${ST:-<absent>} (want pass — produce path regressed to non-2xx)"; exit 1; }
+        echo "=== rest-publish PRODUCE path PASSED (publish accepted 2xx; delivery gated in pro-kafka/enterprise-kafka cells) ==="
+
+  push-validate:
+    desc: >-
+      E2E push (Web Push) delivery regression — boot push-service in a kafka-mode,
+      Enterprise-licensed stack built from source and run the tester's `push` suite,
+      asserting a real WebPush notification arrives at the tester's mock receiver. Fails
+      (not skips) if the delivery check is absent/not-pass, any check skips, or the report
+      status != pass.
+    vars:
+      COMPOSE: docker compose -f docker-compose.yml -f taskfiles/e2e/push-validate.override.yml --profile enterprise --profile kafka
+      # Raw 64-byte Ed25519 admin private key, generated per-run and mounted into the tester
+      # by the override; its public half is wired to provisioning as ADMIN_BOOTSTRAP_KEY.
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      # Repo compose (build-from-source) maps provisioning to host 18080.
+      PROVISIONING_URL: http://localhost:18080
+      # Matches the tester's TESTER_AUTH_TOKEN in docker-compose.yml.
+      TESTER_TOKEN: sukko-dev-token
+      # push-service /ready (host port 3009): 503 until the Enterprise license syncs over
+      # the WatchLicense stream — gated separately from /health (always-200 liveness).
+      PUSH_READY_URL: http://localhost:3009/ready
+    cmds:
+      # Teardown runs even on failure (Taskfile defer, LIFO): stack down, then remove the key.
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      # Guard fixture test first — standalone, no Docker, ~1s. Fails fast if the anti-vacuous
+      # guard regressed, before spending 20+ min booting the stack.
+      - bash taskfiles/e2e/guard_test.sh
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        # Shared boot path (§X single source of truth): mint Enterprise token, gen admin key, boot
+        # the kafka-backend Enterprise stack (the push-validate override adds --profile enterprise
+        # so push-service builds/starts here too).
+        e2e_boot_cell enterprise kafka "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate ==="
+        {{.COMPOSE}} exec -T redpanda rpk cluster health
+        e2e_readiness_gate {{.PROVISIONING_URL}} enterprise false
+        # push-service /ready is 503 until the Enterprise license arrives over WatchLicense —
+        # poll it (NOT /health) so the suite doesn't start before the edition syncs.
+        echo "=== Poll push-service /ready ({{.PUSH_READY_URL}}) ==="
+        for i in $(seq 1 30); do
+          if curl -sf -o /dev/null "{{.PUSH_READY_URL}}"; then
+            echo "  push-service ready ✓"; break
+          fi
+          [ "$i" = "30" ] && { echo "FAIL: push-service /ready not 200 after 30 tries"; exit 1; }
+          sleep 2
+        done
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Run push suite (Web Push delivery) ==="
+        # Hermetic CLI env (isolated HOME/XDG so no ambient context leaks in — otherwise the
+        # tester skips its throwaway-tenant auto-create and misvalidates). The guard reads the
+        # raw stream on stdin and owns report extraction; capture only its exit code (not the
+        # report) so `rm` still runs and the step fails on a non-zero guard.
+        TMPCFG=$(mktemp -d)
+        rc=0
+        HOME="$TMPCFG" XDG_CONFIG_HOME="$TMPCFG/.config" SUKKO_TESTER_TOKEN={{.TESTER_TOKEN}} \
+          sukko test validate --suite push --follow --output json 2>/dev/null | push_validate_guard || rc=$?
+        rm -rf "$TMPCFG"
+        [ "$rc" -eq 0 ] || { echo "FAIL: push delivery guard failed (rc=$rc)"; exit 1; }
+        echo "=== push delivery PASSED (real WebPush received by the mock receiver) ==="
+
+  # ---------------------------------------------------------------------------
+  # Cell runner — the single boot path for an E2E (edition, backend, suites) cell
+  # ---------------------------------------------------------------------------
+  # Parametrized foundation of the editions×backends grid: boot a build-from-source
+  # stack for the given edition + message backend, readiness-gate, run the validate
+  # suites hermetically with the anti-vacuous guard, tear down (even on failure).
+  # The boot/readiness/battery logic lives once in taskfiles/e2e/stack.sh (§X).
+  cell:
+    desc: >-
+      Run one E2E grid cell — task e2e:cell EDITION=<community|pro|enterprise>
+      BACKEND=<direct|kafka> SUITES="<space-separated suites>". Fail-closed: a suite
+      fails the cell on report status != pass OR any skipped check (empty allow-list).
+    requires:
+      vars: [EDITION, BACKEND, SUITES]
+    vars:
+      # Backend selects the compose override (direct.override.yml | kafka.override.yml);
+      # kafka additionally needs --profile kafka to start Redpanda. Enterprise cells use
+      # the enterprise LICENSE (via e2e_boot_cell), NOT the enterprise profile — the grid
+      # runs no push suite, so push-service is intentionally not started.
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/{{.BACKEND}}.override.yml{{if eq .BACKEND "kafka"}} --profile kafka{{end}}'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      TESTER_TOKEN: sukko-dev-token
+      # Optional per-cell inputs (all explicit, single-source defaults — §I/§XV). No mode is
+      # inferred: EXPECT_EXPIRED is never derived from the sign of EXPIRY, EXPECT_EDITION is
+      # never re-derived from EDITION at the call site.
+      EXPIRY: '{{.EXPIRY | default "+1y"}}'                 # license expiry passed to gentoken --expires (-1d degrades the expired cell)
+      EXPECT_EDITION: '{{.EXPECT_EDITION | default .EDITION}}' # edition the readiness gate asserts (expired cell mints pro, expects community)
+      EXPECT_EXPIRED: '{{.EXPECT_EXPIRED | default "false"}}'  # .expired flag the readiness gate asserts (true only on the expired cell)
+      ALLOWED_SKIPS: '{{.ALLOWED_SKIPS | default ""}}'        # ;-separated <suite>:<check> skips tolerated by the anti-vacuous verdict
+      REQUIRE_PASS: '{{.REQUIRE_PASS | default ""}}'          # ;-separated <suite>:<check> checks required present-and-pass
+    cmds:
+      # Teardown runs even on failure (Taskfile defer, LIFO): stack down, then remove the key.
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Cell: edition={{.EDITION}} backend={{.BACKEND}} suites='{{.SUITES}}' expiry={{.EXPIRY}} ==="
+        e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" {{.EXPIRY}} {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate (expect edition={{.EXPECT_EDITION}} expired={{.EXPECT_EXPIRED}}) ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} {{.EXPECT_EDITION}} {{.EXPECT_EXPIRED}}
+        if [ "{{.BACKEND}}" = "kafka" ]; then
+          e2e_kafka_ready {{.COMPOSE}}
+        fi
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Run validate battery ==="
+        e2e_run_battery {{.TESTER_TOKEN}} "{{.ALLOWED_SKIPS}}" "{{.REQUIRE_PASS}}" {{.SUITES}}
+
+  # ---------------------------------------------------------------------------
+  # Anchor cells — the Spec 1 grid (single source of truth for each cell's suites).
+  # CI drives these by name (smoke-on-push / full-grid-on-schedule); later specs add rows.
+  # ---------------------------------------------------------------------------
+  cell:community-direct:
+    desc: "Grid cell — Community/direct (green set minus Pro-gated sse, + edition-limits, + api-key, + upgrade, + ratelimit)."
+    cmds:
+      - task: cell
+        vars:
+          EDITION: community
+          BACKEND: direct
+          # api-key + upgrade: edition-independent, backend-agnostic auth suites — cheapest cell.
+          # Both self-provision what they need (api-key: throwaway tenant + key; upgrade: also the
+          # JWT keypair via auth.Setup), so no TESTER_API_KEY / TESTER_AUTH_MODE is required.
+          SUITES: "channels pubsub ordering reconnect auth edition-limits rest-publish tenant-isolation provisioning api-key upgrade ratelimit"
+          # edition-limits: the connection-boundary sub-check honestly skips (Community's 500-conn limit
+          # exceeds the 100-conn test cap). provisioning: quota/lifecycle/audit stay Pro/Enterprise-gated, so
+          # those checks emit explicit skips — every one enumerated here (an unenumerated skip reds the cell).
+          # Routing rules are ungated on every edition (ADR-0014), so the whole routing battery now RUNS on
+          # Community and is required present-and-pass below — this cell is the proof the free tier can
+          # actually provision the channel→topic mapping its Kafka backend needs.
+          ALLOWED_SKIPS: "rest-publish:rest publish → sse receive;edition-limits:connection limit rejection;provisioning:get quota;provisioning:update quota;provisioning:suspend tenant;provisioning:reactivate tenant;provisioning:get audit log"
+          # tenant-isolation is fail-closed (errors, never skips); force both isolation checks present-and-pass.
+          # provisioning: the routing battery is ungated (ADR-0014) and must be present-and-pass here exactly
+          # as on pro-direct — a Community routing check that skips or vanishes means the ungating regressed.
+          # edition-limits: the per-edition rule COUNT is the wall that REPLACED the feature gate, so both
+          # boundary checks are required present-and-pass. The grid is fail-closed on a failing check but not
+          # on a MISSING one, so without these the cap could stop being asserted and the cell would still green.
+          # api-key + upgrade: all their checks fail-closed (no legitimate skip), so require each present-and-pass.
+          # ratelimit: the per-connection WS publish limiter is edition/backend-independent gateway code; all three
+          # checks are fail-closed (no skip path — the suite fails hard if enforcement is absent), so require each.
+          # scoping deny half (net-new): pubsub subscribe/publish denies, api-key group/user/publish denies, and the
+          # tenant-isolation cross-tenant subscribe deny are all fail-closed gateway-authz checks (no skip) → require each.
+          REQUIRE_PASS: "rest-publish:rest publish → ws receive;rest-publish:rest publish mid equality;tenant-isolation:tenant A → only A receives;tenant-isolation:tenant B → only B receives;edition-limits:routing rules within limit;edition-limits:routing rules limit rejection;provisioning:routing cross-tenant mismatch;provisioning:set routing rules;provisioning:get routing rules;provisioning:delete routing rules;provisioning:routing delete idempotent;provisioning:routing topic gate;provisioning:routing post duplicate pattern;provisioning:routing post duplicate priority;provisioning:routing put duplicate pattern;provisioning:routing rule validation;provisioning:routing role gate read;provisioning:routing role gate write;provisioning:routing get pagination;provisioning:routing get limit cap;provisioning:routing put echo;provisioning:routing star normalization;provisioning:rename bad json;provisioning:rename invalid slug;provisioning:rename reserved slug;provisioning:rename slug taken;provisioning:rename role gate;provisioning:rename happy path;provisioning:rename hold period;provisioning:test-access computed patterns;provisioning:test-access no rules;provisioning:test-access bad json;api-key:api key accepted;api-key:public channel subscribe;api-key:private channel denied;api-key:api key REST publish blocked;upgrade:api key initial connect;upgrade:public channel subscribe;upgrade:auth upgrade;upgrade:expired JWT rejected;ratelimit:rate limit enforcement;ratelimit:connection survives rate limit;ratelimit:publish recovers after refill;pubsub:publish auth rejection;pubsub:group subscribe denied;pubsub:user subscribe denied;api-key:group channel denied;api-key:user channel denied;api-key:ws publish denied;tenant-isolation:cross-tenant subscribe denied"
+
+  cell:community-direct-sentinel:
+    desc: >-
+      Grid cell — Community/direct against a Valkey SENTINEL HA topology (1 master + 1 replica +
+      3 sentinels, quorum 2). P1 proves the Sentinel client wiring delivers the Valkey-broadcast
+      battery (channels/pubsub/ordering/reconnect) with positive controls that Sentinel mode is
+      genuinely engaged (mode=sentinel log + SENTINEL-role assertion); P2 (severable) hard-kills
+      the master and asserts broadcast delivery recovers after replica promotion, within a
+      derived deadline. §XVIII DEVIATION (non-silent): this cell contains the grid's
+      FIRST destructive/chaos step (the mid-run master SIGKILL in the P2 block). Justified —
+      HA failover is untestable without inducing failover; isolated in the severable P2 cmd block
+      so it cannot destabilize the always-on P1 verdict.
+    vars:
+      # Three-file layer: base + direct backend + the sentinel topology (behind --profile sentinel).
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/direct.override.yml -f taskfiles/e2e/valkey-sentinel.override.yml --profile sentinel'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      TESTER_TOKEN: sukko-dev-token
+      # Valkey-broadcast-dependent suites already green on cell:community-direct (overlap makes
+      # "same battery, both topologies" a real apples-to-apples claim).
+      SUITES: "channels pubsub ordering reconnect"
+      # REQUIRE_PASS names the Valkey-ROUND-TRIP delivery checks only (NOT the bus-independent
+      # `reconnect:reconnect`) — a mode-selection regression that broke the bus would red these.
+      # Names are lockstep-checked against the tester deliveryCheck() sources by
+      # sentinel_guard_test.sh. ALLOWED_SKIPS is empty (these suites skip nothing on Community/direct).
+      REQUIRE_PASS: "pubsub:public round-trip;pubsub:user-scoped isolation;pubsub:group-scoped vip;pubsub:group-scoped traders;reconnect:pre-disconnect delivery;reconnect:post-reconnect delivery"
+    cmds:
+      # Teardown runs even on failure (Taskfile defer, LIFO). `down -v` clears the sentinel/replica
+      # volumes so no promoted-master state leaks into a back-to-back re-run.
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      # (1) Fail fast: the pure-verdict fixtures must pass before we spend minutes booting.
+      - bash taskfiles/e2e/sentinel_guard_test.sh
+      # (2) Boot the Community/direct stack against the sentinel topology. The sentinel healthchecks
+      # (master-addr known) + --wait make a mode-misconfigured boot fail HERE (Scenario 1 AC-1).
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Cell: community/direct + Valkey Sentinel topology ==="
+        e2e_boot_cell community direct "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      # (3) Readiness + the two anti-vacuous positive controls: the sentinels report mymaster,
+      # and the broadcast bus logged mode=sentinel (Scenario 1 AC-1a).
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate (community) + sentinel positive controls ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} community false
+        e2e_sentinel_ready {{.COMPOSE}}
+        e2e_sentinel_mode_log_check {{.COMPOSE}}
+      # (4) P1 verdict: the Valkey-broadcast battery, fail-closed, through a sentinel-resolved master.
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Run validate battery (P1) ==="
+        e2e_run_battery {{.TESTER_TOKEN}} "" "{{.REQUIRE_PASS}}" {{.SUITES}}
+      # (5) P2 (SEVERABLE — its own block, trimmable without touching 1-4): kill the master, wait
+      # for sentinel promotion, assert broadcast delivery recovers within the derived deadline.
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== P2 failover chaos: kill master, assert recovery ==="
+        e2e_sentinel_failover {{.TESTER_TOKEN}} {{.COMPOSE}}
+
+  cell:pro-kafka:
+    desc: "Grid cell — Pro/kafka (full green set; proves suites are backend-agnostic; + token-revocation on the push-smoke cadence)."
+    cmds:
+      - task: cell
+        vars:
+          EDITION: pro
+          BACKEND: kafka
+          SUITES: "channels pubsub ordering reconnect sse auth rest-publish tenant-isolation provisioning token-revocation history gap-recovery"
+          # provisioning: `get audit log` is Enterprise-gated → skips on Pro (the only routing/prov skip here;
+          # a non-routing check, so the "no routing ALLOWED_SKIPS on Pro" rule holds).
+          # token-revocation: the only two legitimate Pro skips — push-registration-deleted (the push
+          # service is not deployed on grid cells) and apikey-survives-revoke (skips by design; no API key in tester config).
+          ALLOWED_SKIPS: "provisioning:get audit log;token-revocation:push-registration-deleted;token-revocation:apikey-survives-revoke"
+          # Force rest-publish + tenant-isolation delivery checks AND every Pro-reachable provisioning routing
+          # check present-and-pass (the base verdict catches only skip/fail/error, not a silently-absent check).
+          # rename + test-access are all-editions (not gated) → required present-and-pass here too, no ALLOWED_SKIPS.
+          # token-revocation: all 16 fail-closed checks present-and-pass. `sub-force-disconnect-all` is a
+          # fail-only setup-collapse alias — NOT listed (present-and-pass on the three per-connection names
+          # covers a setup failure); `edition-gate` is deliberately un-enumerated so a Community-misbooted
+          # stack reds the cell (its skip is undeclared).
+          # scoping deny half (net-new): pubsub subscribe/publish denies + the tenant-isolation cross-tenant
+          # subscribe deny are fail-closed gateway-authz checks (no api-key suite on this cell) → require each.
+          REQUIRE_PASS: "edition-limits:routing rules within limit;edition-limits:routing rules limit rejection;rest-publish:rest publish → ws receive;rest-publish:rest publish mid equality;rest-publish:rest publish → sse receive;tenant-isolation:tenant A → only A receives;tenant-isolation:tenant B → only B receives;provisioning:routing delete idempotent;provisioning:routing topic gate;provisioning:routing post duplicate pattern;provisioning:routing post duplicate priority;provisioning:routing put duplicate pattern;provisioning:routing rule validation;provisioning:routing role gate read;provisioning:routing role gate write;provisioning:routing cross-tenant mismatch;provisioning:routing get pagination;provisioning:routing get limit cap;provisioning:routing put echo;provisioning:routing star normalization;provisioning:rename bad json;provisioning:rename invalid slug;provisioning:rename reserved slug;provisioning:rename slug taken;provisioning:rename role gate;provisioning:rename happy path;provisioning:rename hold period;provisioning:test-access computed patterns;provisioning:test-access no rules;provisioning:test-access bad json;token-revocation:revocation-stream-ready;token-revocation:jti-force-disconnect;token-revocation:jti-reject-reconnect;token-revocation:jti-unaffected;token-revocation:sub-force-disconnect-0;token-revocation:sub-force-disconnect-1;token-revocation:sub-force-disconnect-2;token-revocation:sub-new-token-allowed;token-revocation:sub-old-token-rejected;token-revocation:sub-iat-boundary;token-revocation:sse-force-disconnect;token-revocation:revoke-missing-fields;token-revocation:revoke-both-fields;token-revocation:revoke-tenant-mismatch;token-revocation:revoke-no-active-conn;token-revocation:revoke-idempotent;pubsub:publish auth rejection;pubsub:group subscribe denied;pubsub:user subscribe denied;tenant-isolation:cross-tenant subscribe denied;history:history delivery;history:history mid equality;gap-recovery:gap replay delivery;gap-recovery:live replay delivery"
+
+  cell:enterprise-kafka:
+    desc: "Grid cell — Enterprise/kafka (full green set under an Enterprise license)."
+    cmds:
+      - task: cell
+        vars:
+          EDITION: enterprise
+          BACKEND: kafka
+          SUITES: "channels pubsub ordering reconnect sse auth rest-publish"
+          # scoping deny half (net-new): pubsub subscribe/publish denies are fail-closed gateway-authz
+          # checks (no api-key/tenant-isolation suite on this cell) → require each present-and-pass.
+          REQUIRE_PASS: "rest-publish:rest publish → ws receive;rest-publish:rest publish mid equality;rest-publish:rest publish → sse receive;pubsub:publish auth rejection;pubsub:group subscribe denied;pubsub:user subscribe denied"
+
+  # ---------------------------------------------------------------------------
+  # Spec 2 cells — edition-axis widening (paid-direct, negative, degradation).
+  # ---------------------------------------------------------------------------
+  cell:pro-direct:
+    desc: "Grid cell — Pro/direct (full green set + edition-limits; restores sse-on-direct; + token-revocation)."
+    cmds:
+      - task: cell
+        vars:
+          EDITION: pro
+          BACKEND: direct
+          SUITES: "channels pubsub ordering reconnect sse auth edition-limits rest-publish tenant-isolation provisioning token-revocation"
+          # Pro's 10000-conn limit exceeds the 100-conn test cap → the boundary sub-check skips.
+          # provisioning: `get audit log` is Enterprise-gated → skips on Pro (non-routing skip).
+          # token-revocation: the only two legitimate Pro skips — push-registration-deleted (the push
+          # service is not deployed on grid cells) and apikey-survives-revoke (skips by design; no API key in tester config).
+          ALLOWED_SKIPS: "edition-limits:connection limit rejection;provisioning:get audit log;token-revocation:push-registration-deleted;token-revocation:apikey-survives-revoke"
+          # Force rest-publish + tenant-isolation delivery checks AND every Pro-reachable provisioning routing
+          # check present-and-pass. Routing gates identically off-Kafka (noop topic registry, main.go:216).
+          # rename + test-access are all-editions (not gated) → required present-and-pass here too, no ALLOWED_SKIPS.
+          # token-revocation: all 16 fail-closed checks present-and-pass. `sub-force-disconnect-all` is a
+          # fail-only setup-collapse alias — NOT listed (present-and-pass on the three per-connection names
+          # covers a setup failure); `edition-gate` is deliberately un-enumerated so a Community-misbooted
+          # stack reds the cell (its skip is undeclared).
+          # scoping deny half (net-new): pubsub subscribe/publish denies + the tenant-isolation cross-tenant
+          # subscribe deny are fail-closed gateway-authz checks (no api-key suite on this cell) → require each.
+          REQUIRE_PASS: "edition-limits:routing rules within limit;edition-limits:routing rules limit rejection;rest-publish:rest publish → ws receive;rest-publish:rest publish mid equality;rest-publish:rest publish → sse receive;tenant-isolation:tenant A → only A receives;tenant-isolation:tenant B → only B receives;provisioning:routing delete idempotent;provisioning:routing topic gate;provisioning:routing post duplicate pattern;provisioning:routing post duplicate priority;provisioning:routing put duplicate pattern;provisioning:routing rule validation;provisioning:routing role gate read;provisioning:routing role gate write;provisioning:routing cross-tenant mismatch;provisioning:routing get pagination;provisioning:routing get limit cap;provisioning:routing put echo;provisioning:routing star normalization;provisioning:rename bad json;provisioning:rename invalid slug;provisioning:rename reserved slug;provisioning:rename slug taken;provisioning:rename role gate;provisioning:rename happy path;provisioning:rename hold period;provisioning:test-access computed patterns;provisioning:test-access no rules;provisioning:test-access bad json;token-revocation:revocation-stream-ready;token-revocation:jti-force-disconnect;token-revocation:jti-reject-reconnect;token-revocation:jti-unaffected;token-revocation:sub-force-disconnect-0;token-revocation:sub-force-disconnect-1;token-revocation:sub-force-disconnect-2;token-revocation:sub-new-token-allowed;token-revocation:sub-old-token-rejected;token-revocation:sub-iat-boundary;token-revocation:sse-force-disconnect;token-revocation:revoke-missing-fields;token-revocation:revoke-both-fields;token-revocation:revoke-tenant-mismatch;token-revocation:revoke-no-active-conn;token-revocation:revoke-idempotent;pubsub:publish auth rejection;pubsub:group subscribe denied;pubsub:user subscribe denied;tenant-isolation:cross-tenant subscribe denied"
+
+  cell:enterprise-direct:
+    desc: "Grid cell — Enterprise/direct (full green set + edition-limits; unlimited path, no skips)."
+    cmds:
+      - task: cell
+        # Enterprise is unlimited: edition-limits early-returns per boundary with no skip, so this
+        # cell declares NO allowed skips (the empty ALLOWED_SKIPS default) — any skip reds the cell.
+        vars:
+          EDITION: enterprise
+          BACKEND: direct
+          SUITES: "channels pubsub ordering reconnect sse auth edition-limits rest-publish"
+          # Force both rest-publish delivery checks present-and-pass (the base verdict catches only
+          # skip/fail/error, not a silently-absent check).
+          # scoping deny half (net-new): pubsub subscribe/publish denies are fail-closed gateway-authz
+          # checks (no api-key/tenant-isolation suite on this cell) → require each present-and-pass.
+          REQUIRE_PASS: "rest-publish:rest publish → ws receive;rest-publish:rest publish mid equality;rest-publish:rest publish → sse receive;pubsub:publish auth rejection;pubsub:group subscribe denied;pubsub:user subscribe denied"
+
+  cell:expired-direct:
+    desc: "Grid cell — expired Pro → Community degradation (direct); proves Community limits bite."
+    cmds:
+      - task: cell
+        # Mint a Pro token that is already expired (-1d): the stack degrades to Community, so the
+        # gate expects edition=community + expired=true. REQUIRE_PASS forces the Community-only
+        # `tenant limit rejection` check to be present-and-pass (it is absent on the unlimited path,
+        # so it cannot live in the shared verdict) — proving the downgraded limit is actually enforced.
+        vars:
+          EDITION: pro
+          BACKEND: direct
+          SUITES: "edition-limits"
+          EXPIRY: "-1d"
+          EXPECT_EDITION: community
+          EXPECT_EXPIRED: "true"
+          ALLOWED_SKIPS: "edition-limits:connection limit rejection"
+          REQUIRE_PASS: "edition-limits:tenant limit rejection"
+
+  cell:community-kafka:
+    desc: >-
+      Grid cell — Community/kafka (ADR-0009: the data path — Kafka backend, history, gap
+      recovery, REST publish — is Community; capacity caps are the tier wall). Proves the
+      free tier BOOTS on the kafka backend, its gate surface holds, AND the ingest data
+      path DELIVERS — produce directly to the tenant topic, a gateway-subscribed client
+      receives it, license-free (the ADR-0009 benchmark claim).
+    cmds:
+      - task: cell
+        vars:
+          EDITION: community
+          BACKEND: kafka
+          # Client-publish-shaped suites (pubsub/ordering/reconnect/rest-publish delivery)
+          # cannot run here: client publish into kafka requires provisioned routing rules
+          # (ChannelTopicRouting is ungated since ADR-0014, but this cell is not yet gated for client-publish delivery). The INGEST
+          # path needs no routing rules — kafka-ingest produces straight to the tenant
+          # topic and asserts a subscribed client receives the fan-out — so it is the
+          # delivery proof this cell owns: Community+kafka is ingest-only BY DESIGN, and
+          # this cell proves that exact shape works license-free. (History + gap-recovery
+          # delivery proofs need tester protocol support that does not exist yet — tracked
+          # as the benchmark-artifact follow-up.)
+          SUITES: "channels auth edition-limits kafka-ingest history gap-recovery"
+          # edition-limits: the connection-boundary sub-check honestly skips (Community's 500-conn
+          # limit exceeds the 100-conn test cap).
+          ALLOWED_SKIPS: "edition-limits:connection limit rejection"
+          # "rest publish open" proves the endpoint carries no edition gate (409
+          # PUBLISH_NOT_ROUTABLE path on Community+kafka); "kafka-ingest delivery" proves
+          # the free-tier ingest→fan-out path delivers (it would SKIP if the tester's
+          # KAFKA_BROKERS wiring regressed — present-and-pass closes that hole); the
+          # history/gap-recovery delivery+mid checks prove the remaining ADR-0009 free
+          # data-path claims AND the ADR-0008 mid identity triple (live == history ==
+          # replay), all license-free.
+          REQUIRE_PASS: "edition-limits:rest publish open;kafka-ingest:kafka-ingest delivery;history:history delivery;history:history mid equality;gap-recovery:gap replay delivery;gap-recovery:live replay delivery"
+
+  validate-battery:
+    desc: >-
+      Validate battery on the direct backend — the Community/direct grid cell. (Re-expressed
+      via the cell runner; sse moved to the kafka cells, which unlock the Pro-gated feature.)
+    cmds:
+      - task: cell:community-direct
+
+  license-reload:
+    desc: Run license hot-reload validation (requires dev signing key)
+    cmds:
+      - |
+        if [ ! -f "{{.DEV_KEY_PATH}}" ] || [ ! -f "{{.DEV_PUB_PATH}}" ]; then
+          echo "Dev signing key incomplete — generating..."
+          cd ws && go run ./internal/shared/license/genkeys
+        fi
+      - |
+        echo "=== Running license-reload validation suite ==="
+        # The tester signing_key field now carries the PEM PKCS#8 ECDSA P-256 key
+        # TEXT directly (no base64) — file content == API content. jq -Rs
+        # slurps the raw PEM (newlines and all) and JSON-escapes it safely.
+        curl -sf http://localhost:8090/api/v1/tests \
+          -H 'Content-Type: application/json' \
+          -d "$(jq -Rs --arg suite license-reload '{type:"validate",suite:$suite,signing_key:.}' < {{.DEV_KEY_PATH}})"
+        echo ""
+        echo "=== License-reload validation complete ==="

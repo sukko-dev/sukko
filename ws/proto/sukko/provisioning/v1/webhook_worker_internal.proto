@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package sukko.provisioning.v1;
+
+option go_package = "github.com/sukko-dev/sukko/gen/proto/sukko/provisioning/v1;provisioningv1";
+
+// WebhookWorkerInternalService exposes internal RPCs the webhook-worker hosts.
+// Called by the provisioning service for synchronous test delivery.
+// Authentication: WebhookWorkerAuthUnaryInterceptor (x-internal-token header),
+// enforced on the worker's gRPC server for every inbound call.
+service WebhookWorkerInternalService {
+  rpc TestDeliver(TestDeliverRequest) returns (TestDeliverResponse);
+}
+
+message TestDeliverRequest {
+  string webhook_id = 1;
+  string tenant_uuid = 2;
+}
+
+message TestDeliverResponse {
+  int32  status_code           = 1;
+  int64  latency_ms            = 2;
+  string response_body_preview = 3; // first 512 bytes of response body; empty on connection error
+  string error                 = 4; // empty on HTTP success (even non-2xx); set on connection/SSRF/decrypt errors
+}

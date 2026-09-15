@@ -1,0 +1,29 @@
+# Paths that must never be tracked in this repository: editor and assistant
+# configuration and instruction files. These are developer-local settings, not
+# project source. Committing them publishes one contributor's local tooling
+# setup into a tree every contributor shares, and they drift silently because
+# nothing builds or tests them. Keep them in your own ignore file instead
+# (git supports a machine-global one via core.excludesFile).
+#
+# Rule forms — one per line, '#' comments and blank lines ignored:
+#   name/   directory; matches when any path segment equals it, at any depth
+#   name*   filename prefix; matches when the basename starts with it
+#   name    filename; matches when the basename equals it, at any depth
+# Matching is case-insensitive. This file is go:embed-ed into the binary —
+# edit here, no code change needed.
+
+# Configuration directories
+.claude/
+.cursor/
+.continue/
+.codeium/
+.windsurf/
+.aider*
+
+# Instruction files
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.cursorrules
+.windsurfrules
+copilot-instructions.md

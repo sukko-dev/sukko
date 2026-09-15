@@ -1,0 +1,178 @@
+# =============================================================================
+# GKE - Demo Environment
+# =============================================================================
+# Demo environment on Google Kubernetes Engine (GKE Standard).
+# Gateway (client-facing) and provisioning (operator-facing) are LoadBalancers.
+# Static gateway IP preserved via foundation layer (passed via --set at deploy time).
+#
+# Usage:
+#   GATEWAY_IP=$(terraform -chdir=deployments/terraform/environments/gke/demo-foundation output -raw gateway_external_ip)
+#   helm upgrade --install sukko ./deployments/helm/sukko \
+#     -f ./deployments/helm/sukko/values/gke/demo.yaml \
+#     -n sukko-demo --create-namespace \
+#     --set ws-gateway.service.loadBalancerIP=$GATEWAY_IP
+
+global:
+  namespace: sukko-demo
+  imageRegistry: "ghcr.io/sukko-dev"
+
+# ── Gateway ─────────────────────────────────────────────────────────
+ws-gateway:
+  replicaCount: 1
+  image:
+    tag: latest
+    pullPolicy: Always
+  extraEnv:
+    DEFAULT_TENANT_CONNECTION_LIMIT: "10000"
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  service:
+    type: LoadBalancer
+    port: 80
+    targetPort: 3000
+    loadBalancerIP: ""  # Set via --set at deploy time from foundation's gateway_external_ip
+
+# ── WebSocket Server ────────────────────────────────────────────────
+ws-server:
+  replicaCount: 1
+  environment: demo
+  # "demo" is not in the Go default VALID_NAMESPACES, so extend the allowlist alongside the namespace.
+  topicNamespace: demo
+  validNamespaces: "local,dev,stag,prod,demo"
+  messageBackend: kafka
+  image:
+    tag: latest
+    pullPolicy: Always
+  connectionLimits:
+    clusterMaxConnections: 100000
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  service:
+    type: ClusterIP
+
+# ── Provisioning ────────────────────────────────────────────────────
+provisioning:
+  replicaCount: 1
+  environment: demo
+  topicNamespace: demo
+  validNamespaces: "local,dev,stag,prod,demo"
+  image:
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+  service:
+    type: LoadBalancer
+    port: 8080
+    targetPort: 8080
+    grpcPort: 9090
+    loadBalancerIP: ""  # Set to terraform output provisioning_external_ip, or pass via --set in CI
+
+# ── Push Service ───────────────────────────────────────────────────
+push-service:
+  enabled: true
+  replicaCount: 1
+  environment: demo
+  topicNamespace: demo
+  validNamespaces: "local,dev,stag,prod,demo"
+  messageBackend: kafka
+  dryRun: "true"
+  image:
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+
+# ── Redpanda (Kafka) ───────────────────────────────────────────────
+redpanda:
+  enabled: true
+  replicaCount: 1
+  memory: "768M"
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "768Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+  storage:
+    enabled: true
+    size: 2Gi
+  externalAccess:
+    enabled: false
+
+# ── PostgreSQL ──────────────────────────────────────────────────────
+postgresql:
+  enabled: true
+
+# ── Valkey ──────────────────────────────────────────────────────────
+valkey:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+
+# ── Monitoring ──────────────────────────────────────────────────────
+monitoring:
+  enabled: true
+  prometheus:
+    enabled: true
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "250m"
+        memory: "512Mi"
+  grafana:
+    enabled: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "100m"
+        memory: "256Mi"
+  loki:
+    enabled: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "100m"
+        memory: "256Mi"
+  promtail:
+    enabled: true
+    resources:
+      requests:
+        cpu: "25m"
+        memory: "32Mi"
+      limits:
+        cpu: "50m"
+        memory: "64Mi"

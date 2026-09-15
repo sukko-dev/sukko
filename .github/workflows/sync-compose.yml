@@ -1,0 +1,119 @@
+# =============================================================================
+# Sync Compose — Push transformed docker-compose.yml to sukko-cli
+# =============================================================================
+# Manual trigger only. Run via GitHub Actions UI ("Run workflow" button)
+# or CLI: gh workflow run sync-compose.yml --ref main
+# Transforms build: → image: and creates/updates a PR in sukko-cli.
+# Uses a GitHub App for minimal cross-repo access (contents + PRs on sukko-cli only).
+
+name: Sync Compose
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync to sukko-cli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version-file: scripts/compose-transform/go.mod
+
+      - name: Test compose-transform
+        working-directory: scripts/compose-transform
+        run: go test -race ./...
+
+      - name: Transform docker-compose.yml
+        run: |
+          cd scripts/compose-transform
+          go run . < ../../docker-compose.yml > /tmp/docker-compose.yml
+
+      - name: Validate transformed compose
+        run: docker compose -f /tmp/docker-compose.yml config --quiet
+
+      - name: Get installation token
+        id: app-token
+        uses: actions/create-github-app-token@7bfa3a4717ef143a604ee0a99d859b8886a96d00 # v1.9.3
+        with:
+          app-id: ${{ vars.COMPOSE_SYNC_APP_ID }}
+          private-key: ${{ secrets.COMPOSE_SYNC_APP_PRIVATE_KEY }}
+          repositories: cli
+
+      - name: Checkout sukko-cli
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: sukko-dev/cli
+          token: ${{ steps.app-token.outputs.token }}
+          path: sukko-cli
+
+      - name: Sync compose file
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          cd sukko-cli
+
+          # Compare — exit early if identical (no-op)
+          if diff -q compose/docker-compose.yml /tmp/docker-compose.yml > /dev/null 2>&1; then
+            echo "No changes — compose files are identical"
+            exit 0
+          fi
+
+          # Configure git
+          git config user.name "sukko-compose-sync[bot]"
+          git config user.email "compose-sync@sukko.dev"
+
+          # Create or update branch
+          BRANCH="chore/sync-compose"
+          git checkout -B "$BRANCH"
+
+          # Copy transformed file
+          cp /tmp/docker-compose.yml compose/docker-compose.yml
+
+          # Commit
+          git add compose/docker-compose.yml
+          git commit -m "chore: sync docker-compose.yml from sukko
+
+          Source commit: ${{ github.sha }}
+          Triggered by: ${{ github.event.head_commit.message }}"
+
+          # Push (force to update existing branch)
+          git push --force origin "$BRANCH"
+
+          # Create or update PR
+          EXISTING_PR=$(gh pr list --repo sukko-dev/cli --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr edit "$EXISTING_PR" --repo sukko-dev/cli \
+              --body "$(cat <<'PRBODY'
+          Automated sync of docker-compose.yml from sukko.
+
+          **Source commit**: [${{ github.sha }}](https://github.com/sukko-dev/sukko/commit/${{ github.sha }})
+          **Trigger**: `${{ github.event.head_commit.message }}`
+
+          This PR was automatically created by the [compose-sync workflow](https://github.com/sukko-dev/sukko/actions/workflows/sync-compose.yml).
+          PRBODY
+          )"
+            echo "Updated existing PR #$EXISTING_PR"
+          else
+            gh pr create --repo sukko-dev/cli \
+              --base main \
+              --head "$BRANCH" \
+              --title "chore: sync docker-compose.yml from sukko" \
+              --body "$(cat <<'PRBODY'
+          Automated sync of docker-compose.yml from sukko.
+
+          **Source commit**: [${{ github.sha }}](https://github.com/sukko-dev/sukko/commit/${{ github.sha }})
+          **Trigger**: `${{ github.event.head_commit.message }}`
+
+          This PR was automatically created by the [compose-sync workflow](https://github.com/sukko-dev/sukko/actions/workflows/sync-compose.yml).
+          PRBODY
+          )" \
+              --label "automated,sync"
+            echo "Created new sync PR"
+          fi

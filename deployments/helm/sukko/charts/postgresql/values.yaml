@@ -1,0 +1,74 @@
+# Default values for PostgreSQL subchart
+# Minimal configuration for local development
+
+enabled: false
+
+image:
+  repository: postgres
+  tag: 16-alpine
+  pullPolicy: IfNotPresent
+
+auth:
+  database: sukko_provisioning
+  username: sukko
+  # Password - override in values file, never commit real passwords
+  password: ""
+  # Use existing secret instead of creating one
+  existingSecret: ""
+  # Key in existing secret containing the password
+  existingSecretKey: "postgresql-password"
+
+# Pod Security Context
+podSecurityContext:
+  fsGroup: 999
+
+# Container Security Context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+service:
+  type: ClusterIP
+  port: 5432
+
+# Persistence - disabled by default for local dev (uses emptyDir)
+persistence:
+  enabled: false
+  size: 1Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+
+# Liveness probe
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+# Readiness probe
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

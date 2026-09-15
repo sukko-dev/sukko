@@ -1,0 +1,129 @@
+{
+  "annotations": {"list":[]},
+  "description": "Cross-service log querying. Filter by service, level, component, tenant, channel, or free-text.",
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [{"title":"Sukko Dashboards","type":"dashboards","tags":["sukko"],"includeVars":true,"keepTime":true,"icon":"external link"}],
+  "panels": [
+    {
+      "type": "timeseries",
+      "id": 1,
+      "title": "Log Volume by Level",
+      "description": "Count of log lines per minute, grouped by level. Use this to spot error spikes before drilling into the log lines below.",
+      "gridPos": {"h":6,"w":24,"x":0,"y":0},
+      "datasource": {"type":"loki","uid":"${loki_datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"lineInterpolation":"smooth","stacking":{"mode":"normal"},"fillOpacity":70,"showPoints":"never","lineWidth":0},
+          "color": {"mode":"palette-classic"}
+        },
+        "overrides": [
+          {"matcher":{"id":"byName","options":"error"},"properties":[{"id":"color","value":{"fixedColor":"#F2495C","mode":"fixed"}}]},
+          {"matcher":{"id":"byName","options":"warn"},"properties":[{"id":"color","value":{"fixedColor":"#FADE2A","mode":"fixed"}}]},
+          {"matcher":{"id":"byName","options":"info"},"properties":[{"id":"color","value":{"fixedColor":"#5794F2","mode":"fixed"}}]},
+          {"matcher":{"id":"byName","options":"debug"},"properties":[{"id":"color","value":{"fixedColor":"#808080","mode":"fixed"}}]}
+        ]
+      },
+      "options": {
+        "tooltip": {"mode":"multi","sort":"desc"},
+        "legend": {"displayMode":"table","placement":"bottom","calcs":["sum","last"]}
+      },
+      "targets": [
+        {
+          "datasource": {"type":"loki","uid":"${loki_datasource}"},
+          "expr": "sum by (level) (count_over_time({app=~\"${service}\",namespace=\"${namespace}\"} | json | level=~\"${level}\" [1m]))",
+          "legendFormat": "{{level}}"
+        }
+      ]
+    },
+    {
+      "type": "logs",
+      "id": 2,
+      "title": "Log Lines",
+      "description": "Use the filter buttons on individual log lines to drill down by component, tenant_slug, tenant_uuid, or channel. Stream label {app} corresponds to app.kubernetes.io/name. Level and service filters update in real time via the dropdowns above.",
+      "gridPos": {"h":20,"w":24,"x":0,"y":6},
+      "datasource": {"type":"loki","uid":"${loki_datasource}"},
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "targets": [
+        {
+          "datasource": {"type":"loki","uid":"${loki_datasource}"},
+          "expr": "{app=~\"${service}\",namespace=\"${namespace}\"} | json | level=~\"${level}\" |= \"${search}\"",
+          "legendFormat": ""
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["sukko","logs"],
+  "templating": {
+    "list": [
+      {"name":"datasource","type":"datasource","query":"prometheus","label":"Prometheus","hide":0,"refresh":1},
+      {"name":"loki_datasource","type":"datasource","query":"loki","label":"Loki","hide":0,"refresh":1},
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": {"type":"loki","uid":"${loki_datasource}"},
+        "query": "label_values({namespace=~\"sukko.*\"},namespace)",
+        "label": "Namespace",
+        "hide": 0,
+        "refresh": 2,
+        "sort": 1,
+        "current": {"text":"sukko-demo","value":"sukko-demo"},
+        "includeAll": false,
+        "multi": false
+      },
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": {"type":"loki","uid":"${loki_datasource}"},
+        "query": "label_values({namespace=~\"${namespace}\"},app)",
+        "label": "Service",
+        "hide": 0,
+        "refresh": 2,
+        "sort": 1,
+        "current": {"text":"All","value":"$__all"},
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      },
+      {
+        "name": "level",
+        "type": "custom",
+        "query": "error,warn,info,debug",
+        "label": "Level",
+        "hide": 0,
+        "current": {"text":["error","warn"],"value":"error|warn"},
+        "options": [
+          {"text":"error","value":"error","selected":true},
+          {"text":"warn","value":"warn","selected":true},
+          {"text":"info","value":"info","selected":false},
+          {"text":"debug","value":"debug","selected":false}
+        ],
+        "includeAll": false,
+        "multi": true
+      },
+      {"name":"search","type":"textbox","label":"Search","hide":0,"current":{"text":"","value":""},"query":""},
+      {"name":"component","type":"textbox","label":"Component","hide":0,"current":{"text":"","value":""},"query":""},
+      {"name":"tenant_slug","type":"textbox","label":"Tenant Slug","hide":0,"current":{"text":"","value":""},"query":""},
+      {"name":"tenant_uuid","type":"textbox","label":"Tenant UUID","hide":0,"current":{"text":"","value":""},"query":""},
+      {"name":"channel","type":"textbox","label":"Channel","hide":0,"current":{"text":"","value":""},"query":""}
+    ]
+  },
+  "time": {"from":"now-1h","to":"now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Sukko — Log Explorer",
+  "uid": "sukko-log-explorer",
+  "version": 1
+}

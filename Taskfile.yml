@@ -1,0 +1,76 @@
+version: "3"
+
+# =============================================================================
+# Main Taskfile - Entry Point
+# =============================================================================
+# Pattern: {domain}:{action} [ENV=value]
+#
+# Environments:
+#   Local  - Docker Compose (sukko up / sukko down)
+#   Remote - Kubernetes (PLATFORM=gke ENV=demo)
+#
+# Run 'task --list-all' to see all available tasks
+
+includes:
+  # Domain taskfiles
+  k8s:
+    taskfile: ./taskfiles/k8s.yml
+    dir: .
+
+  push:
+    taskfile: ./taskfiles/push.yml
+    dir: .
+
+  tester:
+    taskfile: ./taskfiles/tester.yml
+    dir: .
+
+  # E2E testing
+  e2e:
+    taskfile: ./taskfiles/e2e.yml
+    dir: .
+
+  # Shared utilities (environment-independent)
+  helm:
+    taskfile: ./taskfiles/shared/helm.yml
+    dir: .
+  test:
+    taskfile: ./taskfiles/shared/test.yml
+    dir: .
+  version:
+    taskfile: ./taskfiles/shared/version.yml
+    dir: .
+
+tasks:
+  default:
+    desc: Show available commands
+    silent: true
+    cmds:
+      - echo "SUKKO WEBSOCKET SERVER"
+      - echo ""
+      - echo "=== TESTER DEPLOYMENT ==="
+      - echo "  task tester:do:deploy          Deploy tester to DO Droplet"
+      - echo "  task tester:gce:deploy         Deploy tester to GCE VM"
+      - echo ""
+      - echo "=== REMOTE KUBERNETES ==="
+      - echo "  task k8s:deploy PLATFORM=gke ENV=demo     Deploy to GKE"
+      - echo "  task k8s:status ENV=demo                  Show cluster status"
+      - echo "  task k8s:logs ENV=demo                    Tail logs"
+      - echo ""
+      - echo "=== TESTING ==="
+      - echo "  task test                      Run unit tests"
+      - echo "  task test:unit                 Run unit tests"
+      - echo "  task test:integration          Run integration tests"
+      - echo ""
+      - echo "=== E2E TESTING ==="
+      - echo "  task e2e:license               Run license E2E matrix"
+      - echo ""
+      - echo "Run 'task --list-all' for complete list"
+
+  # ===========================================================================
+  # Minimal Shortcuts (to avoid confusion)
+  # ===========================================================================
+  test:
+    desc: Run unit tests
+    cmds:
+      - task: test:unit

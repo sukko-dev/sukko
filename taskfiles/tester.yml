@@ -1,0 +1,31 @@
+# =============================================================================
+# Tester Deployment Tasks
+# =============================================================================
+# Pattern: tester:{provider}:{action}
+# Providers: gce (Google Compute Engine)
+
+version: "3"
+
+tasks:
+  # ===========================================================================
+  # Google Compute Engine Provider
+  # ===========================================================================
+  gce:deploy:
+    desc: Deploy sukko-tester to GCE VM (IAP SSH, no public IP)
+    cmds:
+      - bash {{.ROOT_DIR}}/deployments/tester/gce/deploy.sh
+
+  gce:destroy:
+    desc: Destroy sukko-tester GCE VM
+    cmds:
+      - bash {{.ROOT_DIR}}/deployments/tester/gce/destroy.sh
+
+  gce:logs:
+    desc: View sukko-tester container logs (via IAP tunnel)
+    cmds:
+      - bash {{.ROOT_DIR}}/deployments/tester/gce/logs.sh
+
+  gce:ssh:
+    desc: SSH into sukko-tester GCE VM (via IAP tunnel)
+    cmds:
+      - bash {{.ROOT_DIR}}/deployments/tester/gce/ssh.sh

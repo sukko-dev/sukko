@@ -1,0 +1,6 @@
+apiVersion: v2
+name: redpanda
+description: Redpanda - Kafka-compatible streaming platform
+type: application
+version: 1.0.0
+appVersion: "v23.3.5"

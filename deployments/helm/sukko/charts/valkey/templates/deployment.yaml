@@ -1,0 +1,96 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "valkey.fullname" . }}
+  labels:
+    {{- include "valkey.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "valkey.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "valkey.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: valkey
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - valkey-server
+          args:
+            {{- if .Values.auth.enabled }}
+            - "--requirepass"
+            - "$(VALKEY_PASSWORD)"
+            {{- end }}
+            - "--maxmemory"
+            - "{{ .Values.config.maxmemory }}"
+            - "--maxmemory-policy"
+            - "{{ .Values.config.maxmemoryPolicy }}"
+            - "--save"
+            - "{{ .Values.config.save }}"
+            - "--appendonly"
+            - "{{ .Values.config.appendonly }}"
+          ports:
+            - name: redis
+              containerPort: {{ .Values.port }}
+              protocol: TCP
+          {{- if .Values.auth.enabled }}
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valkey.fullname" . }}-secrets
+                  key: password
+                  optional: true
+          {{- end }}
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  {{- if .Values.auth.enabled }}
+                  valkey-cli -a "$VALKEY_PASSWORD" ping | grep -q PONG
+                  {{- else }}
+                  valkey-cli ping | grep -q PONG
+                  {{- end }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  {{- if .Values.auth.enabled }}
+                  valkey-cli -a "$VALKEY_PASSWORD" ping | grep -q PONG
+                  {{- else }}
+                  valkey-cli ping | grep -q PONG
+                  {{- end }}
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            timeoutSeconds: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

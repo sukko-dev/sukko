@@ -1,0 +1,170 @@
+# Default values for provisioning subchart
+# Go envDefault values are the source of truth for application config.
+# Override any setting via extraEnv. See /config endpoint for current values.
+
+global:
+  imageRegistry: ""
+
+enabled: true
+
+replicaCount: 1
+
+image:
+  repository: sukko-provisioning
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Deployment identity — drives Kafka topic namespace.
+# Free-form string; Sukko convention: local, dev, stg, prod
+# environment: local
+
+# Admin bootstrap key for first admin registration (optional).
+# Base64-encoded Ed25519 public key (44 chars). Auto-registers on first startup
+# when no admin keys exist in the database. Ignored after first registration.
+# Generate with: sukko auth keygen && base64 < ~/.sukko/contexts/<ctx>/admin.pub
+adminBootstrapKey: ""
+
+# Admin UI session-cookie configuration.
+# Requires Pro/Enterprise edition. Community operators see an upgrade notice page.
+adminUI:
+  # Set to true and configure adminToken to enable the web-based operator dashboard.
+  enabled: false
+  # existingSecret: name of a Kubernetes Secret with key "admin-token" (recommended for production).
+  # If set, adminToken is ignored.
+  existingSecret: ""
+  existingSecretKey: "admin-token"
+  # adminToken: ADMIN_TOKEN value (minimum 32 characters). Use existingSecret in production.
+  adminToken: ""
+  # sessionTTL: session lifetime. Valid range: 1m–720h. Leave blank to use Go default (8h).
+  sessionTTL: ""
+  # wsServerHealthURL: URL for the ws-server /health endpoint polled by GET /admin/system/health.
+  # Leave blank to skip ws-server health probing (status page shows "unconfigured").
+  # Example: http://<release>-ws-server:8080/health
+  wsServerHealthURL: ""
+  # gatewayHealthURL: URL for the ws-gateway /health endpoint polled by GET /admin/system/health.
+  # Leave blank to skip gateway health probing (status page shows "unconfigured").
+  gatewayHealthURL: ""
+
+# PostgreSQL connection
+database:
+  # Existing secret containing the database URL
+  existingSecret: ""
+  existingSecretKey: "database-url"
+  # Direct URL (used when existingSecret is empty; auto-wired to in-cluster PostgreSQL if blank)
+  url: ""
+
+# Ingress (expose provisioning API externally)
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tls: []
+  annotations: {}
+
+# Kafka broker address — used by the provisioning service for topic management.
+# Defaults to in-cluster Redpanda ({{ .Release.Name }}-redpanda:9092).
+# Override only if using an external Kafka cluster.
+kafka:
+  brokers: ""
+
+# Connections registry Valkey address, authentication and TLS.
+# addrs defaults to {{ .Release.Name }}-valkey:6379 (in-cluster). Override for external Valkey.
+# Set password when the Valkey chart has auth.enabled=true (the default).
+valkey:
+  # enabled: Set to false for Community edition deployments without a Valkey instance.
+  # Pro+ (ConnectionsAPI feature) requires Valkey — leave enabled: true.
+  enabled: true
+  addrs: ""             # Override in-cluster default (e.g. "external-valkey.example.com:6379")
+  # Prefer existingSecret in production to avoid storing credentials in Helm values/etcd.
+  # existingSecret: ""      # Name of a Kubernetes Secret containing the Valkey password.
+  # existingSecretKey: ""   # Key within the Secret (default: "valkey-password").
+  # password: ""            # Plaintext fallback — only for local/dev environments.
+  tls:
+    enabled: false
+    insecureSkipVerify: false
+    caPath: ""
+
+# Override any Go envDefault. See /config endpoint for all available settings.
+# Example: { LOG_LEVEL: "debug", CORS_ALLOWED_ORIGINS: "https://admin.example.com" }
+extraEnv: {}
+
+# --- Kubernetes Resources ---
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  timeoutSeconds: 2
+
+# Provisioning is operator-facing (Admin UI + REST API).
+# Gateway is client-facing (WebSocket/SSE/push).
+# Both use LoadBalancer — same pattern. DNS/TLS/Ingress can be added later.
+service:
+  type: LoadBalancer
+  port: 8080
+  targetPort: 8080
+  loadBalancerIP: ""
+  grpcPort: 9090
+  webhookWorkerGRPCPort: 9091  # Dedicated port for webhook-worker → provisioning gRPC (Pro+ only)
+
+# Webhook delivery configuration (Pro/Enterprise editions only).
+webhooks:
+  # Set to true for Pro/Enterprise deployments to expose the webhook-worker gRPC port (9091).
+  # Community edition: leave false.
+  enabled: false
+
+  # workerInternalGRPCPort is the port the webhook-worker's internal gRPC server listens on.
+  # Provisioning dials this port for the TestDeliver RPC (WEBHOOK_WORKER_GRPC_ADDR).
+  # Default matches the webhook-worker chart's service.internalGrpcPort (9095).
+  workerInternalGRPCPort: 9095
+
+  # Credentials shared between provisioning and the webhook-worker.
+  # Must reference the same Kubernetes Secret used by the webhook-worker chart (§IX).
+  secrets:
+    existingSecret: ""         # e.g. "<release>-webhook-secrets"
+    internalTokenKey: "internal-token"
+    credentialsEncryptionKeyKey: "credentials-encryption-key"
+
+
+analytics:
+  enabled: false
+  secrets:
+    existingSecret: ""
+    dbURLKey: "analytics-db-url"
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

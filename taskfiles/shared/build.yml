@@ -1,0 +1,154 @@
+# =============================================================================
+# Shared Build Tasks - Docker image building
+# =============================================================================
+
+version: "3"
+
+vars:
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  COMMIT_HASH:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  BUILD_TIME:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  # Registry can be overridden for remote builds
+  PROJECT: '{{.PROJECT | default "sukko-9e902"}}'
+  REGISTRY: '{{.REGISTRY | default ""}}'
+  # PUSH_REGISTRY: defaults to GCP Artifact Registry when REGISTRY is not set
+  PUSH_REGISTRY: '{{.REGISTRY | default (printf "us-central1-docker.pkg.dev/%s/sukko" .PROJECT)}}'
+  # Image prefix (empty for local, "registry/" for remote)
+  IMAGE_PREFIX: '{{if .REGISTRY}}{{.REGISTRY}}/{{end}}'
+
+tasks:
+  ws-server:
+    desc: Build ws-server Docker image
+    dir: "{{.ROOT_DIR}}/ws"
+    vars:
+      IMAGE: '{{.IMAGE_PREFIX}}{{.WS_SERVER_IMAGE | default "sukko-server"}}'
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker build -t {{.IMAGE}}:{{.TAG}}
+          --build-arg VERSION={{.VERSION}}
+          --build-arg COMMIT_HASH={{.COMMIT_HASH}}
+          --build-arg BUILD_TIME={{.BUILD_TIME}}
+          -f build/server/Dockerfile .
+
+  gateway:
+    desc: Build ws-gateway Docker image
+    dir: "{{.ROOT_DIR}}/ws"
+    vars:
+      IMAGE: '{{.IMAGE_PREFIX}}{{.GATEWAY_IMAGE | default "sukko-gateway"}}'
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker build -t {{.IMAGE}}:{{.TAG}}
+          --build-arg VERSION={{.VERSION}}
+          --build-arg COMMIT_HASH={{.COMMIT_HASH}}
+          --build-arg BUILD_TIME={{.BUILD_TIME}}
+          -f build/gateway/Dockerfile .
+
+  provisioning:
+    desc: Build provisioning Docker image
+    dir: "{{.ROOT_DIR}}/ws"
+    vars:
+      IMAGE: '{{.IMAGE_PREFIX}}{{.PROVISIONING_IMAGE | default "sukko-provisioning"}}'
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker build -t {{.IMAGE}}:{{.TAG}}
+          --build-arg VERSION={{.VERSION}}
+          --build-arg COMMIT_HASH={{.COMMIT_HASH}}
+          --build-arg BUILD_TIME={{.BUILD_TIME}}
+          -f build/provisioning/Dockerfile .
+
+  tester:
+    desc: Build sukko-tester Docker image
+    dir: "{{.ROOT_DIR}}/ws"
+    vars:
+      IMAGE: '{{.IMAGE_PREFIX}}{{.TESTER_IMAGE | default "sukko-tester"}}'
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker build -t {{.IMAGE}}:{{.TAG}}
+          --build-arg VERSION={{.VERSION}}
+          --build-arg COMMIT_HASH={{.COMMIT_HASH}}
+          --build-arg BUILD_TIME={{.BUILD_TIME}}
+          -f build/tester/Dockerfile .
+
+  all:
+    desc: Build all Docker images
+    cmds:
+      - task: ws-server
+      - task: gateway
+      - task: provisioning
+      - task: tester
+
+  # Cross-platform build for remote registries (linux/amd64,linux/arm64)
+  push:ws-server:
+    desc: Build and push ws-server to registry
+    dir: "{{.ROOT_DIR}}/ws"
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker buildx build --platform linux/amd64,linux/arm64
+          -t {{.PUSH_REGISTRY}}/ws-server:{{.TAG}}
+          --build-arg VERSION={{.VERSION}}
+          --build-arg COMMIT_HASH={{.COMMIT_HASH}}
+          --build-arg BUILD_TIME={{.BUILD_TIME}}
+          -f build/server/Dockerfile .
+          --push
+
+  push:gateway:
+    desc: Build and push ws-gateway to registry
+    dir: "{{.ROOT_DIR}}/ws"
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker buildx build --platform linux/amd64,linux/arm64
+          -t {{.PUSH_REGISTRY}}/ws-gateway:{{.TAG}}
+          --build-arg VERSION={{.VERSION}}
+          --build-arg COMMIT_HASH={{.COMMIT_HASH}}
+          --build-arg BUILD_TIME={{.BUILD_TIME}}
+          -f build/gateway/Dockerfile .
+          --push
+
+  push:provisioning:
+    desc: Build and push provisioning to registry
+    dir: "{{.ROOT_DIR}}/ws"
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker buildx build --platform linux/amd64,linux/arm64
+          -t {{.PUSH_REGISTRY}}/sukko-provisioning:{{.TAG}}
+          --build-arg VERSION={{.VERSION}}
+          --build-arg COMMIT_HASH={{.COMMIT_HASH}}
+          --build-arg BUILD_TIME={{.BUILD_TIME}}
+          -f build/provisioning/Dockerfile .
+          --push
+
+  push:tester:
+    desc: Build and push sukko-tester to registry
+    dir: "{{.ROOT_DIR}}/ws"
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker buildx build --platform linux/amd64,linux/arm64
+          -t {{.PUSH_REGISTRY}}/sukko-tester:{{.TAG}}
+          --build-arg VERSION={{.VERSION}}
+          --build-arg COMMIT_HASH={{.COMMIT_HASH}}
+          --build-arg BUILD_TIME={{.BUILD_TIME}}
+          -f build/tester/Dockerfile .
+          --push
+
+  push:all:
+    desc: Build and push all images to registry
+    cmds:
+      - task: push:ws-server
+        vars:
+          PUSH_REGISTRY: "{{.PUSH_REGISTRY}}"
+      - task: push:gateway
+        vars:
+          PUSH_REGISTRY: "{{.PUSH_REGISTRY}}"
+      - task: push:provisioning
+        vars:
+          PUSH_REGISTRY: "{{.PUSH_REGISTRY}}"
+      - task: push:tester
+        vars:
+          PUSH_REGISTRY: "{{.PUSH_REGISTRY}}"

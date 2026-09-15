@@ -1,0 +1,253 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ws-server.fullname" . }}
+  labels:
+    {{- include "ws-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- with .Values.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ws-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "ws-server.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- $needsKafka := eq (.Values.messageBackend | default "direct") "kafka" }}
+      {{- if or (not .Values.valkey.addrs) $needsKafka }}
+      initContainers:
+        {{- if not .Values.valkey.addrs }}
+        - name: wait-for-valkey
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ .Release.Name }}-valkey 6379; do echo "waiting for valkey..."; sleep 2; done']
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+        {{- end }}
+        {{- if and $needsKafka (not .Values.kafka.brokers) }}
+        - name: wait-for-redpanda
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ .Release.Name }}-redpanda 9092; do echo "waiting for redpanda..."; sleep 2; done']
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: ws-server
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{- if .Values.global.imageRegistry }}{{ .Values.global.imageRegistry }}/{{- end }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - "./sukko-server"
+          ports:
+            - name: http
+              containerPort: 3001
+              protocol: TCP
+            - name: grpc
+              containerPort: 3006
+              protocol: TCP
+            {{- range $i := until (int .Values.shards) }}
+            - name: shard-{{ $i }}
+              containerPort: {{ add $.Values.basePort $i }}
+              protocol: TCP
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "ws-server.fullname" . }}-config
+            - secretRef:
+                name: {{ include "ws-server.fullname" . }}-secrets
+                optional: true
+          env:
+            # Deployment identity (only injected when overriding Go envDefault)
+            {{- if .Values.environment }}
+            - name: ENVIRONMENT
+              value: {{ .Values.environment | quote }}
+            {{- end }}
+            # Explicit Kafka topic namespace — required in kafka mode, no default (fail-fast when unset).
+            {{- if .Values.topicNamespace }}
+            - name: KAFKA_TOPIC_NAMESPACE
+              value: {{ .Values.topicNamespace | quote }}
+            {{- end }}
+            {{- if .Values.validNamespaces }}
+            - name: VALID_NAMESPACES
+              value: {{ .Values.validNamespaces | quote }}
+            {{- end }}
+
+            # License key (Pro/Enterprise editions)
+            {{- with ((.Values.global).license) }}
+            {{- if .existingSecret }}
+            - name: SUKKO_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret }}
+                  key: {{ .existingSecretKey | default "license-key" }}
+            {{- end }}
+            {{- end }}
+
+            # Pod identity (Downward API — stable pod name for distributed locks and analytics)
+            - name: SUKKO_POD_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # TODO: remove WS_POD_ID in next release (feat/analytics-pod-id-cleanup)
+            - name: WS_POD_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+            # Analytics (opt-in)
+            {{- if .Values.analytics.enabled }}
+            - name: ANALYTICS_ENABLED
+              value: "true"
+            {{- if .Values.analytics.secrets.existingSecret }}
+            - name: ANALYTICS_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.analytics.secrets.existingSecret | quote }}
+                  key: {{ .Values.analytics.secrets.dbURLKey | default "analytics-db-url" | quote }}
+            {{- end }}
+            {{- end }}
+
+            # Server topology (override Go envDefaults for Kubernetes deployments)
+            - name: WS_NUM_SHARDS
+              value: {{ .Values.shards | quote }}
+            - name: WS_BASE_PORT
+              value: {{ .Values.basePort | quote }}
+            - name: WS_LB_ADDR
+              value: {{ .Values.lbAddr | quote }}
+
+            # Mode selections (only injected when non-default — Go defaults apply otherwise)
+            {{- if and .Values.messageBackend (ne .Values.messageBackend "direct") }}
+            - name: MESSAGE_BACKEND
+              value: {{ .Values.messageBackend | quote }}
+            {{- end }}
+
+            # Auto-wired service addresses (Kubernetes service discovery)
+            - name: VALKEY_ADDRS
+              value: {{ .Values.valkey.addrs | default (printf "%s-valkey:6379" .Release.Name) | quote }}
+            - name: PROVISIONING_GRPC_ADDR
+              value: {{ .Values.provisioningGRPCAddr | default (printf "%s-provisioning-grpc:9090" .Release.Name) | quote }}
+
+            {{- if $needsKafka }}
+            # Kafka/Redpanda (only when messageBackend=kafka)
+            - name: KAFKA_BROKERS
+              value: {{ .Values.kafka.brokers | default (printf "%s-redpanda:9092" .Release.Name) | quote }}
+            {{- if .Values.kafka.sasl.enabled }}
+            - name: KAFKA_SASL_ENABLED
+              value: "true"
+            - name: KAFKA_SASL_MECHANISM
+              value: {{ .Values.kafka.sasl.mechanism | default "scram-sha-256" | quote }}
+            {{- if .Values.kafka.sasl.username }}
+            - name: KAFKA_SASL_USERNAME
+              value: {{ .Values.kafka.sasl.username | quote }}
+            {{- end }}
+            - name: KAFKA_SASL_PASSWORD
+              {{- if .Values.kafka.sasl.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.kafka.sasl.existingSecret }}
+                  key: {{ .Values.kafka.sasl.existingSecretKey | default "kafka-sasl-password" }}
+              {{- else }}
+              value: {{ .Values.kafka.sasl.password | default "" | quote }}
+              {{- end }}
+            {{- end }}
+            {{- if .Values.kafka.tls.enabled }}
+            - name: KAFKA_TLS_ENABLED
+              value: "true"
+            {{- if .Values.kafka.tls.insecureSkipVerify }}
+            - name: KAFKA_TLS_INSECURE
+              value: "true"
+            {{- end }}
+            {{- if .Values.kafka.tls.caPath }}
+            - name: KAFKA_TLS_CA_PATH
+              value: {{ .Values.kafka.tls.caPath | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+
+            # Valkey broadcast bus TLS and auth (addrs always injected above)
+            {{- if .Values.valkey.password }}
+            - name: VALKEY_PASSWORD
+              value: {{ .Values.valkey.password | quote }}
+            {{- end }}
+            {{- if .Values.valkey.tls.enabled }}
+            - name: VALKEY_TLS_ENABLED
+              value: "true"
+            {{- if .Values.valkey.tls.insecureSkipVerify }}
+            - name: VALKEY_TLS_INSECURE
+              value: "true"
+            {{- end }}
+            {{- if .Values.valkey.tls.caPath }}
+            - name: VALKEY_TLS_CA_PATH
+              value: {{ .Values.valkey.tls.caPath | quote }}
+            {{- end }}
+            {{- end }}
+
+            # Connections registry (Pro+ edition).
+            # Only inject when enabled — WS_CONNECTIONS_REGISTRY_ENABLED defaults to false in Go.
+            {{- if .Values.connectionsRegistry.enabled }}
+            - name: WS_CONNECTIONS_REGISTRY_ENABLED
+              value: "true"
+            {{- end }}
+
+            # Internal secret (gateway → ws-server mutual auth).
+            # Both ws-server and ws-gateway MUST source from the SAME Secret so the values always match.
+            {{- if ((.Values.global).internalSecret).secretName }}
+            - name: WS_INTERNAL_SECRET_ENABLED
+              value: "true"
+            - name: WS_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.global.internalSecret.secretName | quote }}
+                  key: {{ .Values.global.internalSecret.secretKey | default "internal-secret" | quote }}
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

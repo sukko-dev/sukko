@@ -1,0 +1,89 @@
+# Default values for ws-gateway subchart
+# Go envDefault values are the source of truth for application config.
+# Override any setting via extraEnv. See /config endpoint for current values.
+
+global:
+  imageRegistry: ""
+  pushEnabled: false
+
+enabled: true
+
+replicaCount: 2
+
+image:
+  repository: sukko-gateway
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Deployment identity — drives logging, metrics namespacing.
+# Free-form string; Sukko convention: local, dev, stg, prod
+# environment: local
+
+# Override any Go envDefault. See /config endpoint for all available settings.
+# Example: { LOG_LEVEL: "debug", GATEWAY_DIAL_TIMEOUT: "30s" }
+extraEnv: {}
+
+# --- Kubernetes Resources ---
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+resources:
+  requests:
+    cpu: "250m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  timeoutSeconds: 2
+
+service:
+  type: LoadBalancer
+  port: 443
+  targetPort: 3000
+  loadBalancerIP: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+analytics:
+  enabled: false  # Set true for Pro/Enterprise with analytics DB configured
+  secrets:
+    existingSecret: ""  # kubectl create secret with analytics-db-url key
+    dbURLKey: "analytics-db-url"
+
+podAnnotations: {}
+
+terminationGracePeriodSeconds: 60
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

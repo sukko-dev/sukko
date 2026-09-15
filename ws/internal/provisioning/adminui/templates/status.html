@@ -1,0 +1,14 @@
+{{template "layout.html" .}}
+{{define "title"}}System Status — Sukko Admin{{end}}
+{{define "content"}}
+<div class="space-y-6">
+  <h1 class="text-xl font-semibold text-gray-900">System Status</h1>
+
+  <div id="health-container"
+    hx-get="/admin/system/health"
+    hx-trigger="load, every {{.PollInterval}}"
+    hx-target="#health-container">
+    <div class="text-sm text-gray-400">Checking status…</div>
+  </div>
+</div>
+{{end}}

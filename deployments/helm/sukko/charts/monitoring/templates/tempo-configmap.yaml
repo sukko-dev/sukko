@@ -1,0 +1,32 @@
+{{- if and .Values.enabled .Values.tempo.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "monitoring.fullname" . }}-tempo-config
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+data:
+  tempo.yml: |
+    server:
+      http_listen_port: {{ .Values.tempo.port }}
+
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /tmp/tempo/blocks
+        wal:
+          path: /tmp/tempo/wal
+
+    compactor:
+      compaction:
+        block_retention: {{ .Values.tempo.retention }}
+{{- end }}

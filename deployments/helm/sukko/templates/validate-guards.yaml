@@ -1,0 +1,2 @@
+{{- /* This template only performs validation — no resources rendered */ -}}
+{{- include "sukko.validate" . -}}

@@ -1,0 +1,236 @@
+# =============================================================================
+# Remote Kubernetes Tasks
+# =============================================================================
+# Domain: k8s
+# Pattern: k8s:{action} PLATFORM=gke ENV=demo
+
+version: "3"
+
+vars:
+  PLATFORM: '{{.PLATFORM | default "gke"}}'
+  K8S_ENV: '{{.ENV | default "demo"}}'
+  K8S_NAMESPACE: 'sukko-{{.K8S_ENV}}'
+  K8S_RELEASE_NAME: sukko
+  K8S_CHART_PATH: "{{.ROOT_DIR}}/deployments/helm/sukko"
+  K8S_VALUES_FILE: "{{.ROOT_DIR}}/deployments/helm/sukko/values/{{.PLATFORM}}/{{.K8S_ENV}}.yaml"
+  K8S_TF_DIR: "{{.ROOT_DIR}}/deployments/terraform/environments/{{.PLATFORM}}/{{.K8S_ENV}}"
+  K8S_FOUNDATION_TF_DIR: "{{.ROOT_DIR}}/deployments/terraform/environments/{{.PLATFORM}}/{{.K8S_ENV}}-foundation"
+  K8S_CLUSTER: 'sukko-{{.K8S_ENV}}'
+  # GKE
+  GKE_PROJECT: '{{.GKE_PROJECT | default ""}}'
+  GKE_ZONE: '{{.GKE_ZONE | default "us-central1-a"}}'
+  # Ports
+  K8S_GATEWAY_PORT: 3100
+  K8S_GRAFANA_PORT: 3000
+  K8S_PROMETHEUS_PORT: 9090
+
+tasks:
+  # ===========================================================================
+  # Core Cluster Operations
+  # ===========================================================================
+  setup:
+    desc: Full setup (foundation + cluster + connect + deploy)
+    cmds:
+      - task: foundation:init
+      - task: foundation:plan
+      - task: foundation:apply
+      - task: tf:init
+      - task: tf:plan
+      - task: tf:apply
+      - task: connect
+      - task: deploy
+      - task: status
+      - |
+        echo ""
+        echo "=== Next: Provision a tenant via sukko-cli ==="
+        echo ""
+        echo "  sukko tenant create --id <tenant> --name \"<name>\""
+        echo "  sukko key create --tenant <tenant> --generate"
+        echo "  sukko rules routing set --tenant <tenant> --file routing.json"
+        echo "  sukko rules channels set --tenant <tenant> --public \"*\""
+        echo ""
+        echo "Run 'sukko --help' for all available commands."
+
+  destroy:
+    desc: Destroy cluster (preserves foundation resources)
+    prompt: 'This will DESTROY the {{.PLATFORM}} cluster for {{.K8S_ENV}}. Are you sure?'
+    cmds:
+      - helm uninstall {{.K8S_RELEASE_NAME}} -n {{.K8S_NAMESPACE}} || true
+      - task: tf:destroy
+
+  deploy:
+    desc: Deploy/upgrade Helm release
+    cmds:
+      - task: connect
+      - |
+        EXTRA_SETS=""
+        GATEWAY_IP=$(terraform -chdir={{.K8S_FOUNDATION_TF_DIR}} output -raw gateway_external_ip 2>/dev/null || echo "")
+        if [ -n "$GATEWAY_IP" ]; then
+          EXTRA_SETS="$EXTRA_SETS --set ws-gateway.service.loadBalancerIP=$GATEWAY_IP"
+          echo "Using static gateway IP: $GATEWAY_IP"
+        fi
+        PROVISIONING_IP=$(terraform -chdir={{.K8S_FOUNDATION_TF_DIR}} output -raw provisioning_external_ip 2>/dev/null || echo "")
+        if [ -n "$PROVISIONING_IP" ]; then
+          EXTRA_SETS="$EXTRA_SETS --set provisioning.service.loadBalancerIP=$PROVISIONING_IP"
+          echo "Using static provisioning IP: $PROVISIONING_IP"
+        fi
+        helm upgrade --install {{.K8S_RELEASE_NAME}} {{.K8S_CHART_PATH}} \
+          -f {{.K8S_VALUES_FILE}} -n {{.K8S_NAMESPACE}} --create-namespace $EXTRA_SETS
+
+  connect:
+    desc: Connect kubectl to cluster
+    cmds:
+      - |
+        case "{{.PLATFORM}}" in
+          gke)
+            if [ -z "{{.GKE_PROJECT}}" ]; then
+              echo "ERROR: GKE_PROJECT is required for PLATFORM=gke"
+              echo "  Usage: task k8s:connect PLATFORM=gke ENV={{.K8S_ENV}} GKE_PROJECT=your-project"
+              exit 1
+            fi
+            gcloud container clusters get-credentials {{.K8S_CLUSTER}} \
+              --zone {{.GKE_ZONE}} \
+              --project {{.GKE_PROJECT}}
+            ;;
+          *)
+            echo "Unknown platform: {{.PLATFORM}}. Supported: gke"
+            exit 1
+            ;;
+        esac
+
+  status:
+    desc: Show pods and services
+    cmds:
+      - 'echo "=== Nodes ==="'
+      - kubectl get nodes -o wide
+      - 'echo ""'
+      - 'echo "=== Pods ==="'
+      - kubectl get pods -n {{.K8S_NAMESPACE}} -o wide
+      - 'echo ""'
+      - 'echo "=== Services ==="'
+      - kubectl get svc -n {{.K8S_NAMESPACE}}
+
+  logs:
+    desc: Tail ws-server logs
+    cmds:
+      - kubectl logs -f -l app.kubernetes.io/name=ws-server -n {{.K8S_NAMESPACE}} --tail=100
+
+  logs:gateway:
+    desc: Tail ws-gateway logs
+    cmds:
+      - kubectl logs -f -l app.kubernetes.io/name=ws-gateway -n {{.K8S_NAMESPACE}} --tail=100
+
+  logs:all:
+    desc: Tail all pod logs
+    cmds:
+      - kubectl logs -f --all-containers=true -l app.kubernetes.io/instance={{.K8S_RELEASE_NAME}} -n {{.K8S_NAMESPACE}} --tail=50
+
+  health:
+    desc: Check health endpoint via gateway
+    cmds:
+      - |
+        GATEWAY_IP=$(terraform -chdir={{.K8S_FOUNDATION_TF_DIR}} output -raw gateway_external_ip 2>/dev/null || echo "")
+        if [ -z "$GATEWAY_IP" ]; then
+          GATEWAY_IP=$(kubectl get svc -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ws-gateway -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+        fi
+        if [ -n "$GATEWAY_IP" ]; then
+          echo "Gateway IP: $GATEWAY_IP"
+          curl -s http://$GATEWAY_IP/health | jq .
+        else
+          echo "No external IP found. Try port-forward:"
+          echo "  task k8s:port-forward:gateway ENV={{.K8S_ENV}}"
+        fi
+
+  reload:
+    desc: Restart all pods (no rebuild)
+    cmds:
+      - kubectl rollout restart deployment -n {{.K8S_NAMESPACE}}
+      - kubectl rollout status deployment -n {{.K8S_NAMESPACE}} --timeout=120s
+
+  rollback:
+    desc: Rollback to previous release
+    cmds:
+      - helm rollback {{.K8S_RELEASE_NAME}} -n {{.K8S_NAMESPACE}}
+
+  events:
+    desc: Show recent events
+    cmds:
+      - kubectl get events -n {{.K8S_NAMESPACE}} --sort-by='.lastTimestamp' | tail -20
+
+  external-ips:
+    desc: Get external IPs for services
+    cmds:
+      - |
+        GATEWAY_IP=$(kubectl get svc -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ws-gateway -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+        if [ -z "$GATEWAY_IP" ]; then
+          GATEWAY_IP=$(terraform -chdir={{.K8S_FOUNDATION_TF_DIR}} output -raw gateway_external_ip 2>/dev/null || echo "not set")
+        fi
+        echo "Gateway (public): $GATEWAY_IP"
+        echo ""
+        echo "WS_URL=ws://$GATEWAY_IP/ws"
+
+  # ===========================================================================
+  # Port Forwarding
+  # ===========================================================================
+  port-forward:gateway:
+    desc: Port-forward ws-gateway
+    cmds:
+      - kubectl port-forward -n {{.K8S_NAMESPACE}} svc/{{.K8S_RELEASE_NAME}}-ws-gateway {{.K8S_GATEWAY_PORT}}:3000
+
+  port-forward:grafana:
+    desc: Port-forward Grafana
+    cmds:
+      - kubectl port-forward -n {{.K8S_NAMESPACE}} svc/{{.K8S_RELEASE_NAME}}-monitoring-grafana {{.K8S_GRAFANA_PORT}}:3000
+
+  port-forward:prometheus:
+    desc: Port-forward Prometheus
+    cmds:
+      - kubectl port-forward -n {{.K8S_NAMESPACE}} svc/{{.K8S_RELEASE_NAME}}-monitoring-prometheus {{.K8S_PROMETHEUS_PORT}}:9090
+
+  # ===========================================================================
+  # Foundation (VPC, static IPs — persists across cluster lifecycle)
+  # ===========================================================================
+  foundation:init:
+    desc: Initialize foundation Terraform
+    cmds:
+      - terraform -chdir={{.K8S_FOUNDATION_TF_DIR}} init
+
+  foundation:plan:
+    desc: Plan foundation changes
+    cmds:
+      - terraform -chdir={{.K8S_FOUNDATION_TF_DIR}} plan -out=tfplan
+
+  foundation:apply:
+    desc: Apply foundation (VPC, static IPs)
+    cmds:
+      - terraform -chdir={{.K8S_FOUNDATION_TF_DIR}} apply tfplan
+
+  foundation:destroy:
+    desc: Destroy foundation (DANGEROUS — loses static IPs)
+    prompt: 'This will DESTROY the foundation for {{.PLATFORM}}/{{.K8S_ENV}}. Are you sure?'
+    cmds:
+      - terraform -chdir={{.K8S_FOUNDATION_TF_DIR}} destroy
+
+  # ===========================================================================
+  # Terraform (cluster)
+  # ===========================================================================
+  tf:init:
+    desc: Initialize Terraform
+    cmds:
+      - terraform -chdir={{.K8S_TF_DIR}} init
+
+  tf:plan:
+    desc: Plan infrastructure changes
+    cmds:
+      - terraform -chdir={{.K8S_TF_DIR}} plan -out=tfplan
+
+  tf:apply:
+    desc: Apply infrastructure
+    cmds:
+      - terraform -chdir={{.K8S_TF_DIR}} apply tfplan
+
+  tf:destroy:
+    desc: Destroy infrastructure (DANGEROUS)
+    prompt: 'This will DESTROY the {{.PLATFORM}} cluster for {{.K8S_ENV}}. Are you sure?'
+    cmds:
+      - terraform -chdir={{.K8S_TF_DIR}} destroy

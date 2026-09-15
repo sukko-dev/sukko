@@ -1,0 +1,87 @@
+# =============================================================================
+# Shared Helm Tasks - Chart operations
+# =============================================================================
+
+version: "3"
+
+vars:
+  CHART_PATH: '{{.CHART_PATH | default (printf "%s/deployments/helm/sukko" .ROOT_DIR)}}'
+  VALUES_FILE: '{{.VALUES_FILE | default ""}}'
+  NAMESPACE: '{{.NAMESPACE | default "default"}}'
+
+tasks:
+  lint:
+    desc: Lint Helm charts
+    cmds:
+      - helm lint {{.CHART_PATH}}
+
+  template:
+    desc: Dry-run render templates
+    cmds:
+      - |
+        if [ -n "{{.VALUES_FILE}}" ]; then
+          helm template sukko {{.CHART_PATH}} -f {{.VALUES_FILE}}
+        else
+          helm template sukko {{.CHART_PATH}}
+        fi
+
+  deps:
+    desc: Update Helm dependencies
+    cmds:
+      - helm dependency update {{.CHART_PATH}}
+
+  diff:
+    desc: Show diff before upgrade
+    requires:
+      vars: [VALUES_FILE, NAMESPACE]
+    cmds:
+      - helm diff upgrade sukko {{.CHART_PATH}} -f {{.VALUES_FILE}} -n {{.NAMESPACE}}
+
+  upgrade:
+    desc: Upgrade/install Helm release
+    requires:
+      vars: [VALUES_FILE, NAMESPACE]
+    vars:
+      EXTRA_ARGS: '{{.EXTRA_ARGS | default ""}}'
+    cmds:
+      - helm upgrade --install sukko {{.CHART_PATH}} -f {{.VALUES_FILE}} -n {{.NAMESPACE}} --create-namespace {{.EXTRA_ARGS}}
+
+  uninstall:
+    desc: Uninstall Helm release
+    requires:
+      vars: [NAMESPACE]
+    cmds:
+      - helm uninstall sukko -n {{.NAMESPACE}} || true
+
+  rollback:
+    desc: Rollback to previous release
+    requires:
+      vars: [NAMESPACE]
+    cmds:
+      - helm rollback sukko -n {{.NAMESPACE}}
+
+  lint:examples:
+    desc: Lint and template-render all example Helm values files
+    vars:
+      EXAMPLES_DIR: '{{.ROOT_DIR}}/examples/helm'
+    cmds:
+      - |
+        ERRORS=0
+        for f in {{.EXAMPLES_DIR}}/values-*.yaml; do
+          [ -f "$f" ] || continue
+          NAME=$(basename "$f")
+          echo "=== Linting with $NAME ==="
+          if ! helm lint {{.CHART_PATH}} -f "$f"; then
+            ERRORS=$((ERRORS + 1))
+          fi
+          echo "=== Templating with $NAME ==="
+          if ! helm template sukko {{.CHART_PATH}} -f "$f" > /dev/null; then
+            ERRORS=$((ERRORS + 1))
+          fi
+          echo ""
+        done
+        if [ $ERRORS -gt 0 ]; then
+          echo "FAILED: $ERRORS error(s) found"
+          exit 1
+        fi
+        echo "All example values files passed lint and template checks"

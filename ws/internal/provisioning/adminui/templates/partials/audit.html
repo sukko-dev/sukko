@@ -1,0 +1,28 @@
+{{if .AuditEntries}}
+<div class="space-y-3">
+  <div class="overflow-hidden rounded-lg border border-gray-200">
+    <table class="min-w-full divide-y divide-gray-200 text-xs">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-3 py-2 text-left font-medium text-gray-500">Time</th>
+          <th class="px-3 py-2 text-left font-medium text-gray-500">Action</th>
+          <th class="px-3 py-2 text-left font-medium text-gray-500">Actor</th>
+          <th class="px-3 py-2 text-left font-medium text-gray-500">Details</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        {{range .AuditEntries}}
+        <tr>
+          <td class="px-3 py-2 text-gray-400 whitespace-nowrap">{{.Timestamp}}</td>
+          <td class="px-3 py-2 font-medium text-gray-700">{{.Action}}</td>
+          <td class="px-3 py-2 text-gray-500">{{.Actor}}</td>
+          <td class="px-3 py-2 text-gray-400">{{.Details}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{else}}
+<p class="py-6 text-center text-sm text-gray-400">No audit events</p>
+{{end}}

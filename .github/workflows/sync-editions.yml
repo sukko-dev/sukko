@@ -1,0 +1,145 @@
+# =============================================================================
+# Sync Editions — Push the generated edition/feature matrix to sukko-portal
+# =============================================================================
+# The portal's pricing page renders its feature comparison from
+# internal/editions/editions.json — generated from this repo's
+# ws/internal/shared/license/{features.go,limits.go} by the extract-editions
+# extractor (which lives in sukko-docs, the docs site's generator).
+#
+# Unlike sync-compose (manual-only, which drifted 6 weeks and missed #244),
+# this workflow ALSO triggers automatically when the license package changes
+# on main — the portal's parity tests make a stale matrix loud, but the sync
+# should never be the stale half.
+#
+# Manual run: gh workflow run sync-editions.yml --ref main
+# Uses the same GitHub App as sync-compose; its installation must cover
+# sukko-docs (read) and sukko-portal (contents + PRs).
+
+name: Sync Editions
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "ws/internal/shared/license/features.go"
+      - "ws/internal/shared/license/limits.go"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync to sukko-portal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Get installation token
+        id: app-token
+        uses: actions/create-github-app-token@7bfa3a4717ef143a604ee0a99d859b8886a96d00 # v1.9.3
+        with:
+          app-id: ${{ vars.COMPOSE_SYNC_APP_ID }}
+          private-key: ${{ secrets.COMPOSE_SYNC_APP_PRIVATE_KEY }}
+          repositories: docs,portal
+
+      - name: Checkout sukko-docs (extractor source)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: sukko-dev/docs
+          token: ${{ steps.app-token.outputs.token }}
+          path: sukko-docs
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version-file: sukko-docs/scripts/extract-editions/go.mod
+
+      - name: Generate editions.json
+        run: |
+          cd sukko-docs/scripts/extract-editions
+          go run . "$GITHUB_WORKSPACE/ws" > /tmp/editions.json
+
+      - name: Validate generated matrix
+        run: |
+          jq -e '(.editions | length) == 3
+                 and (.features | length) > 0
+                 and ([.features[] | select(.implemented)] | length) > 0' \
+            /tmp/editions.json > /dev/null
+          echo "editions: $(jq '.editions | length' /tmp/editions.json), features: $(jq '.features | length' /tmp/editions.json)"
+
+      - name: Checkout sukko-portal
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: sukko-dev/portal
+          token: ${{ steps.app-token.outputs.token }}
+          path: sukko-portal
+
+      - name: Sync editions file
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          cd sukko-portal
+
+          # Compare — exit early if identical (no-op)
+          if diff -q internal/editions/editions.json /tmp/editions.json > /dev/null 2>&1; then
+            echo "No changes — matrices are identical"
+            exit 0
+          fi
+
+          # Configure git
+          git config user.name "sukko-compose-sync[bot]"
+          git config user.email "compose-sync@sukko.dev"
+
+          # Create or update branch
+          BRANCH="chore/sync-editions"
+          git checkout -B "$BRANCH"
+
+          # Copy generated file
+          cp /tmp/editions.json internal/editions/editions.json
+
+          # Commit
+          git add internal/editions/editions.json
+          git commit -m "chore: sync editions.json from sukko
+
+          Source commit: ${{ github.sha }}"
+
+          # Push (force to update existing branch)
+          git push --force origin "$BRANCH"
+
+          # Create or update PR
+          EXISTING_PR=$(gh pr list --repo sukko-dev/portal --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr edit "$EXISTING_PR" --repo sukko-dev/portal \
+              --body "$(cat <<'PRBODY'
+          Automated sync of the edition/feature matrix from sukko.
+
+          **Source commit**: [${{ github.sha }}](https://github.com/sukko-dev/sukko/commit/${{ github.sha }})
+
+          The portal's parity and anchor tests (internal/editions) run against this
+          file — if this PR breaks them, curation needs a matching update (a feature
+          was added, removed, renamed, or remapped), which is exactly the drift the
+          guards exist to surface. Created by the
+          [sync-editions workflow](https://github.com/sukko-dev/sukko/actions/workflows/sync-editions.yml).
+          PRBODY
+          )"
+            echo "Updated existing PR #$EXISTING_PR"
+          else
+            gh pr create --repo sukko-dev/portal \
+              --base main \
+              --head "$BRANCH" \
+              --title "chore: sync editions.json from sukko" \
+              --body "$(cat <<'PRBODY'
+          Automated sync of the edition/feature matrix from sukko.
+
+          **Source commit**: [${{ github.sha }}](https://github.com/sukko-dev/sukko/commit/${{ github.sha }})
+
+          The portal's parity and anchor tests (internal/editions) run against this
+          file — if this PR breaks them, curation needs a matching update (a feature
+          was added, removed, renamed, or remapped), which is exactly the drift the
+          guards exist to surface. Created by the
+          [sync-editions workflow](https://github.com/sukko-dev/sukko/actions/workflows/sync-editions.yml).
+          PRBODY
+          )"
+            echo "Created new sync PR"
+          fi

@@ -1,0 +1,190 @@
+syntax = "proto3";
+
+package sukko.provisioning.v1;
+
+option go_package = "github.com/sukko-dev/sukko/gen/proto/sukko/provisioning/v1;provisioningv1";
+
+// Internal service — streaming provisioning data to gateway and ws-server.
+service ProvisioningInternalService {
+  // Stream active keys — snapshot on connect, deltas on change.
+  rpc WatchKeys(WatchKeysRequest) returns (stream WatchKeysResponse);
+
+  // Stream tenant config (channel rules, routing rules) — snapshot on connect, deltas on change.
+  rpc WatchTenantConfig(WatchTenantConfigRequest) returns (stream WatchTenantConfigResponse);
+
+  // Stream topic discovery — snapshot on connect, deltas on change.
+  rpc WatchTopics(WatchTopicsRequest) returns (stream WatchTopicsResponse);
+
+  // Stream active API keys — snapshot on connect, deltas on change.
+  rpc WatchAPIKeys(WatchAPIKeysRequest) returns (stream WatchAPIKeysResponse);
+
+  // Stream push config (credentials + channel patterns) — snapshot on connect, deltas on change.
+  rpc WatchPushConfig(WatchPushConfigRequest) returns (stream WatchPushConfigResponse);
+
+  // StorePushCredentials stores provider credentials for a tenant.
+  // Used by push service for VAPID auto-generation and admin API forwarding.
+  rpc StorePushCredentials(StorePushCredentialsRequest) returns (StorePushCredentialsResponse);
+
+  // Stream license key — sends current key on connect, updates on LicenseChanged events.
+  // Services call Manager.Reload() with the received key.
+  rpc WatchLicense(WatchLicenseRequest) returns (stream WatchLicenseResponse);
+
+  // Stream token revocations — snapshot on connect, deltas on change.
+  // Gateway checks revocation map on JWT validation. Push service deletes matching registrations.
+  rpc WatchTokenRevocations(WatchTokenRevocationsRequest) returns (stream WatchTokenRevocationsResponse);
+}
+
+message WatchKeysRequest {}
+
+message WatchKeysResponse {
+  bool is_snapshot = 1;           // true = full state, false = delta
+  repeated KeyInfo keys = 2;      // All active keys (snapshot) or changed keys (delta)
+  repeated string removed_key_ids = 3; // Key IDs removed (delta only)
+}
+
+message KeyInfo {
+  string key_id = 1;
+  string tenant_uuid = 2;         // owning tenant's stable UUID (identity of record)
+  string algorithm = 3;           // ES256, RS256, EdDSA
+  string public_key_pem = 4;
+  bool is_active = 5;
+  int64 expires_at_unix = 6;      // 0 = no expiry
+}
+
+message WatchTenantConfigRequest {}
+
+message WatchTenantConfigResponse {
+  bool is_snapshot = 1;
+  repeated TenantConfig tenants = 2;
+  repeated string removed_tenant_slugs = 3;
+}
+
+message TenantConfig {
+  string tenant_slug = 1; // client-facing routing label (the data-plane tenant identity / stream cache key)
+  reserved 2;           // was: OIDCConfig oidc (removed)
+  ChannelRules channel_rules = 3; // nil = no rules
+  repeated TopicRoutingRule routing_rules = 4;
+  string tenant_uuid = 5;   // stable tenant UUID — lets the gateway resolve tenant_slug -> UUID for JWT tenant binding
+  string previous_slug = 6; // prior slug during a rename hold window (empty otherwise) — aliased to tenant_uuid so old-slug tokens still resolve
+}
+
+message TopicRoutingRule {
+  string pattern = 1;
+  string topic_suffix = 2; // deprecated: use topics instead
+  repeated string topics = 3;
+  int32 priority = 4;
+}
+
+message ChannelRules {
+  repeated string public_channels = 1;
+  map<string, GroupChannels> group_mappings = 2;
+  repeated string default_channels = 3;
+  repeated string publish_public_channels = 4;
+  map<string, GroupChannels> publish_group_mappings = 5;
+  repeated string publish_default_channels = 6;
+}
+
+message GroupChannels {
+  repeated string channels = 1;
+}
+
+message WatchTopicsRequest {
+  string namespace = 1;           // Topic namespace (e.g., "prod")
+}
+
+message WatchTopicsResponse {
+  bool is_snapshot = 1;
+  // Deprecated in favour of shared_topic_tenants (kept populated during the transition so older
+  // consumers keep working). #179 P3: consumers resolve a shared topic's tenant from the map below
+  // instead of reverse-parsing the topic name.
+  repeated string shared_topics = 2;
+  repeated DedicatedTenant dedicated_tenants = 3;
+  // Shared topics carrying their owning tenant, so consumers need no reverse-parse (#179 P3).
+  repeated SharedTopic shared_topic_tenants = 4;
+}
+
+message DedicatedTenant {
+  string tenant_slug = 1;   // client-facing routing label (topic names embed the slug)
+  repeated string topics = 2;
+}
+
+message SharedTopic {
+  string tenant_slug = 1;   // owning tenant slug
+  string topic = 2;         // full topic name ({namespace}.{tenant}.{suffix})
+}
+
+message WatchAPIKeysRequest {}
+
+message WatchAPIKeysResponse {
+  bool is_snapshot = 1;                    // true = full state, false = delta
+  repeated APIKeyInfo api_keys = 2;        // All active keys (snapshot) or changed keys (delta)
+  repeated string removed_key_ids = 3;     // Key IDs removed (delta only)
+}
+
+message APIKeyInfo {
+  string key_id = 1;      // pk_live_...
+  string tenant_uuid = 2;  // owning tenant's stable UUID (identity of record)
+  string name = 3;
+  bool is_active = 4;
+}
+
+// --- Push Config Streaming ---
+
+message WatchPushConfigRequest {}
+
+message WatchPushConfigResponse {
+  bool is_snapshot = 1;                              // true = full state, false = delta
+  repeated PushCredentialInfo push_credentials = 2;  // Per-tenant provider credentials
+  repeated PushChannelConfig push_channel_configs = 3; // Per-tenant push channel patterns
+  repeated string removed_credential_ids = 4;        // Credential IDs removed (delta only)
+  repeated string removed_config_tenant_slugs = 5;   // Tenant slugs whose push config was removed (delta only)
+}
+
+message PushCredentialInfo {
+  string tenant_slug = 1;     // client-facing routing label (push runtime is slug-native; provisioning joins tenants to emit it)
+  string provider = 2;        // "vapid", "fcm", "apns"
+  string credential_data = 3; // Decrypted JSON (encrypted at rest, decrypted before streaming)
+}
+
+message PushChannelConfig {
+  string tenant_slug = 1;         // client-facing routing label (patterns embed the slug prefix)
+  repeated string patterns = 2;   // Channel glob patterns WITH tenant prefix
+  int32 default_ttl = 3;          // Push TTL in seconds (default 2419200 = 4 weeks)
+  string default_urgency = 4;     // "very-low", "low", "normal", "high"
+}
+
+// --- Store Push Credentials ---
+
+message StorePushCredentialsRequest {
+  string tenant_slug = 1;         // push sends the slug; provisioning resolves it to the tenant UUID before the push_credentials insert
+  string provider = 2;            // "vapid", "fcm", "apns"
+  string credential_data = 3;     // Raw JSON (encrypted by provisioning before storage)
+}
+
+message StorePushCredentialsResponse {
+  bool success = 1;
+}
+
+message WatchLicenseRequest {}
+
+message WatchLicenseResponse {
+  // Raw license key string. Services call Manager.Reload() with this value.
+  string license_key = 1;
+}
+
+message WatchTokenRevocationsRequest {}
+
+message WatchTokenRevocationsResponse {
+  repeated TokenRevocation revocations = 1;
+  bool is_snapshot = 2; // true = full snapshot, false = delta
+}
+
+message TokenRevocation {
+  string tenant_slug = 1;  // client-facing routing label (revocation is matched slug==slug end-to-end)
+  string type = 2;      // "user" or "token"
+  string sub = 3;       // For user-level revocation
+  string jti = 4;       // For token-level revocation
+  int64 revoked_at = 5; // Unix timestamp
+  int64 expires_at = 6; // Auto-prune time
+  bool removed = 7;     // true = entry expired/removed (delta only)
+}

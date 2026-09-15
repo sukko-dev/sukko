@@ -1,0 +1,42 @@
+# =============================================================================
+# Shared Version Tasks - Version management
+# =============================================================================
+
+version: "3"
+
+vars:
+  VERSION_FILE: "{{.ROOT_DIR}}/version.json"
+
+tasks:
+  info:
+    desc: Show current version info
+    vars:
+      VERSION:
+        sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+      COMMIT:
+        sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+      BRANCH:
+        sh: git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown"
+    cmds:
+      - 'echo "Version: {{.VERSION}}"'
+      - 'echo "Commit:  {{.COMMIT}}"'
+      - 'echo "Branch:  {{.BRANCH}}"'
+
+  check:
+    desc: Validate version consistency
+    cmds:
+      - |
+        if [ -f "{{.VERSION_FILE}}" ]; then
+          echo "Checking version.json..."
+          cat {{.VERSION_FILE}} | jq .
+        else
+          echo "No version.json found"
+        fi
+      - 'echo ""'
+      - 'echo "Git tags:"'
+      - git tag --list 'v*' | tail -5
+
+  changelog:
+    desc: Show recent changes
+    cmds:
+      - git log --oneline -20

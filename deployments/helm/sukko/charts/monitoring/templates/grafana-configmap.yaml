@@ -1,0 +1,54 @@
+{{- if and .Values.enabled .Values.grafana.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "monitoring.fullname" . }}-grafana-datasources
+  labels:
+    {{- include "monitoring.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        url: http://{{ include "monitoring.fullname" . }}-prometheus:{{ .Values.prometheus.port }}
+        isDefault: true
+        editable: false
+      {{- if .Values.loki.enabled }}
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://{{ include "monitoring.fullname" . }}-loki:{{ .Values.loki.port }}
+        editable: false
+      {{- end }}
+      {{- if .Values.tempo.enabled }}
+      - name: Tempo
+        type: tempo
+        uid: tempo
+        access: proxy
+        url: http://{{ include "monitoring.fullname" . }}-tempo:{{ .Values.tempo.port }}
+        editable: false
+      {{- end }}
+      {{- if .Values.pyroscope.enabled }}
+      - name: Pyroscope
+        type: grafana-pyroscope-datasource
+        uid: pyroscope
+        access: proxy
+        url: http://{{ include "monitoring.fullname" . }}-pyroscope:{{ .Values.pyroscope.port }}
+        editable: false
+      {{- end }}
+      {{- if .Values.alertmanager.enabled }}
+      - name: AlertManager
+        type: alertmanager
+        uid: alertmanager
+        access: proxy
+        url: http://{{ include "monitoring.fullname" . }}-alertmanager:{{ .Values.alertmanager.port }}
+        editable: false
+        jsonData:
+          implementation: prometheus
+      {{- end }}
+{{- end }}

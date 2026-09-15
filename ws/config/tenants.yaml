@@ -1,0 +1,29 @@
+# Tenant configuration for auth-service
+# App secrets are loaded from environment variables specified in secret_env
+#
+# To add a new tenant/app:
+# 1. Add the entry below
+# 2. Create the corresponding K8s Secret with the app secret
+# 3. Run: kubectl rollout restart deployment/auth-service
+
+tenants:
+  - id: "sukko-internal"
+    name: "Sukko Internal"
+    apps:
+      - id: "sukko-web"
+        name: "Sukko Web Dashboard"
+        secret_env: "APP_SECRET_SUKKO_WEB"
+      - id: "sukko-mobile"
+        name: "Sukko Mobile App"
+        secret_env: "APP_SECRET_SUKKO_MOBILE"
+
+  # Example external tenant (uncomment to use)
+  # - id: "acme-corp"
+  #   name: "Acme Trading Corp"
+  #   apps:
+  #     - id: "acme-web"
+  #       name: "Acme Web Dashboard"
+  #       secret_env: "APP_SECRET_ACME_WEB"
+  #     - id: "acme-bot-1"
+  #       name: "Acme Trading Bot"
+  #       secret_env: "APP_SECRET_ACME_BOT_1"
