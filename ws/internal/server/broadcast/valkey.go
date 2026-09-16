@@ -163,6 +163,12 @@ func newValkeyBus(cfg Config, logger zerolog.Logger) (*valkeyBus, error) {
 		SelectDB:         vcfg.DB,
 		TLSConfig:        tlsCfg,
 		ConnWriteTimeout: vcfg.WriteTimeout,
+		// The bus only publishes and (un)subscribes — it issues no cached reads
+		// (no DoCache/DoMultiCache anywhere in this package), so client-side
+		// caching buys nothing. Leaving it on makes the client negotiate
+		// CLIENT TRACKING on every connection, which also bars any server that
+		// does not implement it.
+		DisableCache: true,
 	}
 
 	if platform.UseValkeySentinel(vcfg.Addrs, vcfg.MasterName) {
@@ -541,9 +547,9 @@ func (b *valkeyBus) subscriptionMgmtLoop() {
 	reconcileTicker := time.NewTicker(reconcileTickInterval)
 	defer reconcileTicker.Stop()
 
-	// pendingKind tracks in-flight retry commands (tenantID → kind).
-	// Latest-wins: a new command for the same tenant supersedes any pending retry.
-	pendingKind := make(map[string]subCmdKind)
+	// Every command received here is issued. Valkey SUBSCRIBE/UNSUBSCRIBE are
+	// idempotent, so re-issuing one is harmless, and the reconcile tick below is
+	// only a real backstop if the commands it enqueues actually reach Valkey.
 	var retryTenantID string
 	var retryKind subCmdKind
 	currentBackoff := retryInitialBackoff
@@ -567,24 +573,7 @@ func (b *valkeyBus) subscriptionMgmtLoop() {
 			b.resubscribeAll()
 
 		case cmd := <-b.subCmdCh:
-			// Latest-wins: if there is a pending retry for the same tenant, supersede it.
-			if cmd.tenantID != "" {
-				if _, hasPending := pendingKind[cmd.tenantID]; hasPending {
-					pendingKind[cmd.tenantID] = cmd.kind
-					if retryTenantID == cmd.tenantID {
-						if !retryTimer.Stop() {
-							select {
-							case <-retryTimer.C:
-							default:
-							}
-						}
-						retryTimer.Reset(timerNeverFires)
-						retryTenantID = ""
-					}
-					continue
-				}
-			}
-			b.issueValkeyCommand(cmd, retryTimer, &retryTenantID, &retryKind, &currentBackoff, pendingKind)
+			b.issueValkeyCommand(cmd, retryTimer, &retryTenantID, &retryKind, &currentBackoff)
 
 		case <-retryTimer.C:
 			if retryTenantID == "" && retryKind != subCmdPSubscribe && retryKind != subCmdPUnsubscribe {
@@ -593,7 +582,7 @@ func (b *valkeyBus) subscriptionMgmtLoop() {
 			}
 			b.issueValkeyCommand(
 				subCmd{kind: retryKind, tenantID: retryTenantID},
-				retryTimer, &retryTenantID, &retryKind, &currentBackoff, pendingKind,
+				retryTimer, &retryTenantID, &retryKind, &currentBackoff,
 			)
 
 		case <-reconcileTicker.C:
@@ -610,7 +599,6 @@ func (b *valkeyBus) issueValkeyCommand(
 	retryTenantID *string,
 	retryKind *subCmdKind,
 	currentBackoff *time.Duration,
-	pendingKind map[string]subCmdKind,
 ) {
 	ctx, cancel := context.WithTimeout(b.ctx, retryMaxBackoff)
 	defer cancel()
@@ -637,9 +625,6 @@ func (b *valkeyBus) issueValkeyCommand(
 
 	if err == nil {
 		b.metrics.subscribeCommandsTotal.WithLabelValues(metricResultSuccess).Inc()
-		if cmd.tenantID != "" {
-			delete(pendingKind, cmd.tenantID)
-		}
 		*retryTenantID = ""
 		*retryKind = subCmdSubscribe // reset to zero value; prevents stale P* guard bypass on timer fire
 		if !retryTimer.Stop() {
@@ -662,9 +647,6 @@ func (b *valkeyBus) issueValkeyCommand(
 
 	*retryTenantID = cmd.tenantID
 	*retryKind = cmd.kind
-	if cmd.tenantID != "" {
-		pendingKind[cmd.tenantID] = cmd.kind
-	}
 
 	retryTimer.Reset(*currentBackoff)
 	*currentBackoff *= 2
