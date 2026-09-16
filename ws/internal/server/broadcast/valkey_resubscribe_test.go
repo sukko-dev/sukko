@@ -97,6 +97,14 @@ func awaitDelivery(t *testing.T, bus *valkeyBus, ch <-chan *Message, tenantID st
 // Found by the sukko-dev/bench fault matrix, not by unit tests: killing Valkey
 // mid-run left 480/480 subscriber-channel pairs dark from the kill to the end of
 // the run while the bus still reported healthy.
+//
+// Deliberately NOT parallel: it binds a real TCP listener and restarts miniredis
+// on the SAME address, and asserts recovery across timed windows (a 1.5s outage,
+// a 45s ceiling spanning the 30s reconcile tick). Running it concurrently would
+// contend for CPU with other tests and make those windows unreliable — precisely
+// the flakiness a regression guard must not have (§VIII).
+//
+//nolint:paralleltest // real TCP listener + timed recovery windows; see above
 func TestValkeyBus_ResubscribesAfterOutage(t *testing.T) {
 	mr := miniredis.NewMiniRedis()
 	if err := mr.Start(); err != nil {
