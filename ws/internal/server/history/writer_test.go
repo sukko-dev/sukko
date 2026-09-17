@@ -414,6 +414,51 @@ func TestHistoryWriter_BusUnhealthyTriggersRestart(t *testing.T) {
 	}
 }
 
+// TestHistoryWriter_NonConvergenceDoesNotRestart pins the writer's restart
+// gate to PUBLISH health only (ADR-0016). Subscription non-convergence is the
+// convergence loop's job to repair; restarting the writer cannot help it — the
+// restart's only effect is UnsubscribeAll → backoff → SubscribeAll, a
+// self-inflicted PSUBSCRIBE gap. Convergence also reads transiently false
+// after every first-subscribe/last-unsubscribe on the pod, so a heartbeat
+// sampling it would flap the writer under ordinary tenant churn. A
+// publish-path failure, by contrast, must still trigger the restart.
+func TestHistoryWriter_NonConvergenceDoesNotRestart(t *testing.T) {
+	t.Parallel()
+
+	mr := newTestMiniredis(t)
+	opts := defaultTestOpts()
+	opts.heartbeatInterval = 20 * time.Millisecond
+	opts.restartInitialBackoff = 5 * time.Millisecond
+	opts.restartMaxBackoff = 20 * time.Millisecond
+
+	w, cancel, bus := newTestWriter(t, mr, opts)
+
+	var wg syncWaitGroup
+	wg.Go(func() {
+		w.Run()
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Phase 1: non-converged but publish-healthy — many heartbeats must pass
+	// with ZERO restarts.
+	bus.setConverged(false)
+	time.Sleep(150 * time.Millisecond)
+	if restarts := metricCounterValue(t, w.Metrics().WriterRestartTotal); restarts != 0 {
+		t.Errorf("expected 0 restarts while non-converged but publish-healthy, got %v", restarts)
+	}
+
+	// Phase 2: publish-unhealthy (still non-converged) — restart must fire.
+	bus.setHealthy(false)
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	wg.Wait()
+
+	if restarts := metricCounterValue(t, w.Metrics().WriterRestartTotal); restarts < 1 {
+		t.Errorf("expected >=1 restart after publish path became unhealthy, got %v", restarts)
+	}
+}
+
 // TestHistoryWriter_CtxCancelExitsDuringBackoff verifies that canceling the parent context
 // causes Run() to exit even if it's sleeping in the backoff delay.
 func TestHistoryWriter_CtxCancelExitsDuringBackoff(t *testing.T) {

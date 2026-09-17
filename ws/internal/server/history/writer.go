@@ -267,8 +267,16 @@ func (h *Writer) tryAcquireLock(ctx context.Context, lockKey string) {
 // handleHeartbeatTick renews or attempts to acquire the writer lock on each tick.
 // It also checks bus health and returns an error if the writer should restart.
 func (h *Writer) handleHeartbeatTick(ctx context.Context, lockKey string, failures *int) error {
-	if !h.bus.IsHealthy() {
-		return errors.New("historyWriter: broadcast bus is unhealthy, triggering restart")
+	// Restart gate: PUBLISH health only, deliberately not bus.IsHealthy()
+	// (ADR-0016). IsHealthy also folds in subscription convergence, which
+	// (a) reads transiently false after every first-subscribe/last-unsubscribe
+	// on the pod, so sampling it here would flap the writer under ordinary
+	// tenant churn, and (b) is the convergence loop's job to repair — a writer
+	// restart cannot help it, and its only effect would be UnsubscribeAll →
+	// backoff → SubscribeAll: a self-inflicted PSUBSCRIBE gap. A dead publish
+	// path is the signal that the writer itself cannot do its job.
+	if !h.bus.GetMetrics().PublishHealthy {
+		return errors.New("historyWriter: broadcast bus publish path is unhealthy, triggering restart")
 	}
 
 	lockTTLStr := strconv.FormatInt(h.cfg.HistoryWriterLockTTLMs, 10)

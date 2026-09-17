@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"strings"
 	"sync"
@@ -29,30 +28,13 @@ const (
 	valkeyChannelSeparator = ":"
 	valkeyChannelWildcard  = "*"
 
-	subCmdChCapacity      = 64
 	retryInitialBackoff   = 100 * time.Millisecond
 	retryMaxBackoff       = 5 * time.Second
+	subCommandTimeout     = 5 * time.Second
 	reconcileTickInterval = 30 * time.Second
-	timerNeverFires       = time.Duration(math.MaxInt64)
 
 	panicComponentSubscriptionMgr = "subscription_management_goroutine"
 )
-
-// subCmdKind identifies the type of subscription command.
-type subCmdKind uint8
-
-const (
-	subCmdSubscribe    subCmdKind = iota // issue SUBSCRIBE {prefix}:{tenantID}
-	subCmdUnsubscribe                    // issue UNSUBSCRIBE {prefix}:{tenantID}
-	subCmdPSubscribe                     // issue PSUBSCRIBE {prefix}:* (SubscribeAll)
-	subCmdPUnsubscribe                   // issue PUNSUBSCRIBE {prefix}:* (UnsubscribeAll)
-)
-
-// subCmd is a command sent to the subscription management goroutine.
-type subCmd struct {
-	kind     subCmdKind
-	tenantID string // empty for P{UN}SUBSCRIBE commands
-}
 
 // tenantChannel constructs the full per-tenant Valkey channel name.
 // All callers MUST use this function — no inline string concatenation.
@@ -80,14 +62,42 @@ type valkeyBus struct {
 	allSubscribers    []subscriberEntry
 	subMu             sync.RWMutex
 
-	// Pod-level ref counts for Valkey subscription lifecycle. Protected by subRefMu.
-	// SUBSCRIBE/UNSUBSCRIBE enqueued AFTER releasing subRefMu.
+	// Pod-level ref counts for Valkey subscription lifecycle — the authoritative
+	// DESIRED subscription state (ADR-0016). Protected by subRefMu.
+	// desiredGen is bumped under subRefMu whenever the desired set changes, so a
+	// convergence pass can snapshot (generation, desired set) atomically. It is
+	// also bumped by reinitDedicatedClient when the confirmed set is invalidated,
+	// which forces convergence to read false until a full pass completes.
+	// Lock ordering: subRefMu and subMu are never held together (see GetMetrics).
+	// No I/O is ever performed while holding subRefMu.
 	subRefCounts         map[string]int
 	subscribeAllRefCount int
 	subRefMu             sync.Mutex
+	desiredGen           atomic.Uint64
 
-	// Subscription command channel — read exclusively by subscriptionMgmtLoop.
-	subCmdCh chan subCmd
+	// Subscription wakeup channel — capacity 1, read exclusively by
+	// subscriptionMgmtLoop. A wakeup carries no data; it means "desired state
+	// changed, re-derive". See signalSubscriptionChange for why discarding a
+	// wakeup when one is already pending is lossless by construction.
+	subWakeCh chan struct{}
+
+	// CONFIRMED subscription state: what this pod has successfully subscribed on
+	// the CURRENT dedicated connection. Owned exclusively by subscriptionMgmtLoop
+	// (like dedicatedClient) — no mutex; wiped wholesale by reinitDedicatedClient
+	// because a new connection has no subscriptions.
+	confirmedTenants map[string]struct{}
+	confirmedAll     bool
+
+	// confirmedGen is the desired-state generation the last fully successful
+	// convergence pass was built from. Written only by subscriptionMgmtLoop;
+	// read lock-free by IsHealthy/GetMetrics. Convergence (confirmedGen ==
+	// desiredGen) can be transiently false while a pass is pending, but is
+	// never true while confirmed differs from desired.
+	confirmedGen atomic.Uint64
+
+	// establishedCount mirrors len(confirmedTenants)+confirmedAll for lock-free
+	// reads by GetMetrics (confirmed state itself is loop-owned).
+	establishedCount atomic.Int64
 
 	// Dedicated connection for SetPubSubHooks. Written only by subscriptionMgmtLoop.
 	dedicatedClient valkey.DedicatedClient
@@ -98,11 +108,14 @@ type valkeyBus struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// Health tracking (atomic for lock-free reads)
-	healthy       atomic.Bool
-	lastPublish   atomic.Int64
-	publishErrors atomic.Uint64
-	messagesRecv  atomic.Uint64
+	// Health tracking (atomic for lock-free reads). Publish health and
+	// subscription convergence are deliberately separate signals (§XV,
+	// ADR-0016): the publish connection can be perfectly healthy while this
+	// pod's pub/sub subscriptions are still converging, and vice versa.
+	publishHealthy atomic.Bool
+	lastPublish    atomic.Int64
+	publishErrors  atomic.Uint64
+	messagesRecv   atomic.Uint64
 
 	shutdownTimeout           time.Duration
 	publishTimeout            time.Duration
@@ -211,7 +224,8 @@ func newValkeyBus(cfg Config, logger zerolog.Logger) (*valkeyBus, error) {
 		limits:                    cfg.Limits,
 		tenantSubscribers:         make(map[string][]subscriberEntry),
 		subRefCounts:              make(map[string]int),
-		subCmdCh:                  make(chan subCmd, subCmdChCapacity),
+		subWakeCh:                 make(chan struct{}, 1),
+		confirmedTenants:          make(map[string]struct{}),
 		shutdownTimeout:           cfg.ShutdownTimeout,
 		publishTimeout:            vcfg.PublishTimeout,
 		healthCheckInterval:       vcfg.HealthCheckInterval,
@@ -228,7 +242,7 @@ func newValkeyBus(cfg Config, logger zerolog.Logger) (*valkeyBus, error) {
 		reg = cfg.Registerer
 	}
 	b.metrics = newBusMetrics(reg)
-	b.healthy.Store(true)
+	b.publishHealthy.Store(true)
 	b.lastPublish.Store(time.Now().Unix())
 
 	return b, nil
@@ -287,12 +301,12 @@ func (b *valkeyBus) Publish(msg *Message) error {
 			Msg("broadcast: failed to publish message to Valkey")
 		b.publishErrors.Add(1)
 		b.metrics.publishFailuresTotal.Inc()
-		b.healthy.Store(false)
+		b.publishHealthy.Store(false)
 		return fmt.Errorf("%w: publish to %q: %w", ErrPublishUnavailable, ch, err)
 	}
 
 	b.lastPublish.Store(time.Now().Unix())
-	b.healthy.Store(true)
+	b.publishHealthy.Store(true)
 	return nil
 }
 
@@ -321,17 +335,13 @@ func (b *valkeyBus) Subscribe(tenantID string) (<-chan *Message, error) {
 	b.subRefMu.Lock()
 	b.subRefCounts[tenantID]++
 	isFirst := b.subRefCounts[tenantID] == 1
+	if isFirst {
+		b.noteDesiredChangedLocked()
+	}
 	b.subRefMu.Unlock()
 
 	if isFirst {
-		select {
-		case b.subCmdCh <- subCmd{kind: subCmdSubscribe, tenantID: tenantID}:
-		default:
-			b.logger.Warn().
-				Str(logging.LogKeyTenantSlug, tenantID).
-				Msg("broadcast: subCmdCh full, SUBSCRIBE enqueue dropped (reconciliation will recover)")
-			b.metrics.subscribeCommandsTotal.WithLabelValues(metricResultDropped).Inc()
-		}
+		b.signalSubscriptionChange()
 	}
 
 	return ch, nil
@@ -362,14 +372,13 @@ func (b *valkeyBus) SubscribeAll() (<-chan *Message, error) {
 	b.subRefMu.Lock()
 	b.subscribeAllRefCount++
 	isFirst := b.subscribeAllRefCount == 1
+	if isFirst {
+		b.noteDesiredChangedLocked()
+	}
 	b.subRefMu.Unlock()
 
 	if isFirst {
-		select {
-		case b.subCmdCh <- subCmd{kind: subCmdPSubscribe}:
-		default:
-			b.logger.Warn().Msg("broadcast: subCmdCh full, PSUBSCRIBE enqueue dropped")
-		}
+		b.signalSubscriptionChange()
 	}
 
 	return ch, nil
@@ -401,18 +410,12 @@ func (b *valkeyBus) Unsubscribe(tenantID string, ch <-chan *Message) error {
 	isLast := b.subRefCounts[tenantID] == 0
 	if isLast {
 		delete(b.subRefCounts, tenantID)
+		b.noteDesiredChangedLocked()
 	}
 	b.subRefMu.Unlock()
 
 	if isLast {
-		select {
-		case b.subCmdCh <- subCmd{kind: subCmdUnsubscribe, tenantID: tenantID}:
-		default:
-			b.logger.Warn().
-				Str(logging.LogKeyTenantSlug, tenantID).
-				Msg("broadcast: subCmdCh full, UNSUBSCRIBE enqueue dropped (reconciliation will recover)")
-			b.metrics.subscribeCommandsTotal.WithLabelValues(metricResultDropped).Inc()
-		}
+		b.signalSubscriptionChange()
 	}
 
 	return nil
@@ -438,14 +441,13 @@ func (b *valkeyBus) UnsubscribeAll(ch <-chan *Message) error {
 	b.subRefMu.Lock()
 	b.subscribeAllRefCount--
 	isLast := b.subscribeAllRefCount == 0
+	if isLast {
+		b.noteDesiredChangedLocked()
+	}
 	b.subRefMu.Unlock()
 
 	if isLast {
-		select {
-		case b.subCmdCh <- subCmd{kind: subCmdPUnsubscribe}:
-		default:
-			b.logger.Warn().Msg("broadcast: subCmdCh full, PUNSUBSCRIBE enqueue dropped")
-		}
+		b.signalSubscriptionChange()
 	}
 
 	return nil
@@ -542,31 +544,67 @@ func (b *valkeyBus) initDedicatedClient() {
 }
 
 // reinitDedicatedClient releases the current dedicated connection and obtains a new one.
+// A fresh connection has no subscriptions, so the confirmed state is wiped wholesale and
+// the generation is bumped: convergence reads false until a full pass completes against
+// the new connection, even though the desired set itself did not change.
 func (b *valkeyBus) reinitDedicatedClient() {
 	if b.dedicatedCancel != nil {
 		b.dedicatedCancel()
 	}
 	b.initDedicatedClient()
+
+	clear(b.confirmedTenants)
+	b.confirmedAll = false
+	b.updateEstablished()
+	b.desiredGen.Add(1)
 }
 
 // --- Subscription management goroutine ---
 
+// noteDesiredChangedLocked records a desired-state change. Callers MUST hold
+// subRefMu: bumping the generation inside the same critical section as the map
+// change is what lets converge snapshot (generation, desired set) atomically.
+// It also keeps the desired gauge exact under concurrent mutation.
+func (b *valkeyBus) noteDesiredChangedLocked() {
+	b.desiredGen.Add(1)
+	n := len(b.subRefCounts)
+	if b.subscribeAllRefCount > 0 {
+		n++
+	}
+	b.metrics.subscriptionsDesired.Set(float64(n))
+}
+
+// signalSubscriptionChange wakes the subscription management goroutine.
+//
+// This is the crux of the declared-state design (ADR-0016): the wakeup channel
+// has capacity 1 and carries no data — it means "desired state changed,
+// re-derive". When the non-blocking send finds the slot already occupied,
+// discarding the signal is CORRECT, not lossy: the pending wakeup causes a
+// full re-read of the desired state, which already includes this change.
+// Losslessness is structural — there is no bounded queue of commands to
+// overflow, so no burst of changes and no reconnect storm can drop
+// subscription state.
+func (b *valkeyBus) signalSubscriptionChange() {
+	select {
+	case b.subWakeCh <- struct{}{}:
+	default: // a wakeup is already pending; it will observe this change too
+	}
+}
+
 // subscriptionMgmtLoop is the only goroutine that issues Valkey SUBSCRIBE/UNSUBSCRIBE
-// commands. It uses a nested-select pattern to give ctx.Done() effective priority.
+// commands. Its sole job is to make the confirmed subscription state match the
+// desired state (ADR-0016): every trigger — wakeup, disconnect, retry timer,
+// reconcile tick — funnels into the same full convergence pass. A failed pass is
+// retried with capped exponential backoff (§IV). It uses a nested-select pattern
+// to give ctx.Done() effective priority.
 func (b *valkeyBus) subscriptionMgmtLoop() {
 	defer logging.RecoverPanic(b.logger, panicComponentSubscriptionMgr, nil)
 
-	retryTimer := time.NewTimer(timerNeverFires)
-	defer retryTimer.Stop()
 	reconcileTicker := time.NewTicker(reconcileTickInterval)
 	defer reconcileTicker.Stop()
 
-	// Every command received here is issued. Valkey SUBSCRIBE/UNSUBSCRIBE are
-	// idempotent, so re-issuing one is harmless, and the reconcile tick below is
-	// only a real backstop if the commands it enqueues actually reach Valkey.
-	var retryTenantID string
-	var retryKind subCmdKind
-	currentBackoff := retryInitialBackoff
+	backoff := retryInitialBackoff
+	var retryCh <-chan time.Time // nil (never fires) while no failed pass is pending
 
 	for {
 		// Priority shutdown check at the top of each iteration.
@@ -576,189 +614,204 @@ func (b *valkeyBus) subscriptionMgmtLoop() {
 		default:
 		}
 
+		backstop := false
 		select {
 		case <-b.ctx.Done():
 			return
 
 		case err := <-b.disconnectCh:
 			b.logger.Error().Err(err).Msg("broadcast: Valkey pub/sub disconnected, reconnecting")
-			b.healthy.Store(false)
 			b.reinitDedicatedClient()
-			b.resubscribeAll()
 
-		case cmd := <-b.subCmdCh:
-			b.issueValkeyCommand(cmd, retryTimer, &retryTenantID, &retryKind, &currentBackoff)
+		case <-b.subWakeCh:
+			// Desired state changed — fall through to converge.
 
-		case <-retryTimer.C:
-			if retryTenantID == "" && retryKind != subCmdPSubscribe && retryKind != subCmdPUnsubscribe {
-				b.logger.Warn().Msg("broadcast: retry timer fired with no pending retry")
-				continue
-			}
-			b.issueValkeyCommand(
-				subCmd{kind: retryKind, tenantID: retryTenantID},
-				retryTimer, &retryTenantID, &retryKind, &currentBackoff,
-			)
+		case <-retryCh:
+			// Backoff elapsed after a failed pass — try again.
 
 		case <-reconcileTicker.C:
-			b.reconcile()
+			// Periodic backstop: normally a no-op pass; anything it has to
+			// issue is divergence the event-driven path missed and is counted
+			// in reconcileCorrectionsTotal.
+			backstop = true
+		}
+
+		if b.converge(backstop) {
+			retryCh = nil // discard any pending retry — the state is converged
+			backoff = retryInitialBackoff
+		} else {
+			retryCh = time.After(backoff)
+			backoff = min(backoff*2, retryMaxBackoff)
 		}
 	}
 }
 
-// issueValkeyCommand sends a SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE command
-// on the dedicated client. On failure: schedules retry with exponential backoff.
-func (b *valkeyBus) issueValkeyCommand(
-	cmd subCmd,
-	retryTimer *time.Timer,
-	retryTenantID *string,
-	retryKind *subCmdKind,
-	currentBackoff *time.Duration,
-) {
-	ctx, cancel := context.WithTimeout(b.ctx, retryMaxBackoff)
-	defer cancel()
-
-	var err error
-	switch cmd.kind {
-	case subCmdSubscribe:
-		err = b.dedicatedClient.Do(ctx,
-			b.dedicatedClient.B().Subscribe().Channel(tenantChannel(b.channelPrefix, cmd.tenantID)).Build(),
-		).Error()
-	case subCmdUnsubscribe:
-		err = b.dedicatedClient.Do(ctx,
-			b.dedicatedClient.B().Unsubscribe().Channel(tenantChannel(b.channelPrefix, cmd.tenantID)).Build(),
-		).Error()
-	case subCmdPSubscribe:
-		err = b.dedicatedClient.Do(ctx,
-			b.dedicatedClient.B().Psubscribe().Pattern(tenantChannelPattern(b.channelPrefix)).Build(),
-		).Error()
-	case subCmdPUnsubscribe:
-		err = b.dedicatedClient.Do(ctx,
-			b.dedicatedClient.B().Punsubscribe().Pattern(tenantChannelPattern(b.channelPrefix)).Build(),
-		).Error()
+// converge performs one full convergence pass: it snapshots the desired state,
+// diffs it against the confirmed state, and issues exactly the SUBSCRIBE /
+// UNSUBSCRIBE / PSUBSCRIBE / PUNSUBSCRIBE commands needed to close the gap.
+// Only called from subscriptionMgmtLoop. Returns true when confirmed fully
+// matches the snapshotted desired state.
+//
+// Individual SERVER-CLASS command failures (the connection is alive and the
+// server answered with an error reply) do not abort the pass — every other
+// divergence is still acted on (one tenant's failure can never block another
+// tenant's convergence, and no success ever cancels another tenant's pending
+// retry). A TRANSPORT-CLASS failure (dead or unresponsive connection) aborts
+// the pass after the first failing command: every subsequent command would
+// fail identically, so aborting bounds a disconnect storm's per-cycle cost at
+// one command and one log line instead of one per tenant. Nothing is lost —
+// the caller schedules a backoff retry that re-derives the full diff.
+// backstop marks a reconcile-tick-triggered pass: commands issued then are
+// counted as corrections.
+func (b *valkeyBus) converge(backstop bool) bool {
+	// Snapshot generation and desired set in one critical section; no I/O is
+	// performed under the lock (§VII).
+	b.subRefMu.Lock()
+	gen := b.desiredGen.Load()
+	desired := make(map[string]struct{}, len(b.subRefCounts))
+	for tid := range b.subRefCounts {
+		desired[tid] = struct{}{}
 	}
+	wantAll := b.subscribeAllRefCount > 0
+	b.subRefMu.Unlock()
 
-	if err == nil {
-		b.metrics.subscribeCommandsTotal.WithLabelValues(metricResultSuccess).Inc()
-		*retryTenantID = ""
-		*retryKind = subCmdSubscribe // reset to zero value; prevents stale P* guard bypass on timer fire
-		if !retryTimer.Stop() {
-			select {
-			case <-retryTimer.C:
-			default:
-			}
+	ok := true
+	abort := false // set on a transport-class failure: skip the rest of the pass
+
+	// handleFailure records the failure and classifies it: an error that is
+	// not a Valkey server reply means the connection itself is broken.
+	// errors.AsType (not valkey.IsValkeyErr, which is a bare type assertion)
+	// because issueSubCommand wraps the error for context (§III).
+	handleFailure := func(err error, command, tid string) {
+		b.recordSubCommandFailure(err, command, tid)
+		ok = false
+		if _, serverReply := errors.AsType[*valkey.ValkeyError](err); !serverReply {
+			abort = true
 		}
-		retryTimer.Reset(timerNeverFires)
-		*currentBackoff = retryInitialBackoff
-		return
 	}
 
-	// Schedule retry with exponential backoff.
+	// Missing: desired but not confirmed → SUBSCRIBE.
+	for tid := range desired {
+		if abort || b.ctx.Err() != nil {
+			break
+		}
+		if _, confirmed := b.confirmedTenants[tid]; confirmed {
+			continue
+		}
+		err := b.issueSubCommand(
+			b.dedicatedClient.B().Subscribe().Channel(tenantChannel(b.channelPrefix, tid)).Build(),
+		)
+		if err != nil {
+			handleFailure(err, "SUBSCRIBE", tid)
+			continue
+		}
+		b.confirmedTenants[tid] = struct{}{}
+		b.recordSubCommandSuccess(backstop)
+	}
+
+	// Stale: confirmed but no longer desired → UNSUBSCRIBE (unsubscribes are
+	// honored by diffing, never by replaying events).
+	for tid := range b.confirmedTenants {
+		if abort || b.ctx.Err() != nil {
+			break
+		}
+		if _, want := desired[tid]; want {
+			continue
+		}
+		err := b.issueSubCommand(
+			b.dedicatedClient.B().Unsubscribe().Channel(tenantChannel(b.channelPrefix, tid)).Build(),
+		)
+		if err != nil {
+			handleFailure(err, "UNSUBSCRIBE", tid)
+			continue
+		}
+		delete(b.confirmedTenants, tid)
+		b.recordSubCommandSuccess(backstop)
+	}
+
+	// All-tenant pattern subscription (SubscribeAll).
+	if !abort && wantAll && !b.confirmedAll && b.ctx.Err() == nil {
+		err := b.issueSubCommand(
+			b.dedicatedClient.B().Psubscribe().Pattern(tenantChannelPattern(b.channelPrefix)).Build(),
+		)
+		if err != nil {
+			handleFailure(err, "PSUBSCRIBE", "")
+		} else {
+			b.confirmedAll = true
+			b.recordSubCommandSuccess(backstop)
+		}
+	}
+	if !abort && !wantAll && b.confirmedAll && b.ctx.Err() == nil {
+		err := b.issueSubCommand(
+			b.dedicatedClient.B().Punsubscribe().Pattern(tenantChannelPattern(b.channelPrefix)).Build(),
+		)
+		if err != nil {
+			handleFailure(err, "PUNSUBSCRIBE", "")
+		} else {
+			b.confirmedAll = false
+			b.recordSubCommandSuccess(backstop)
+		}
+	}
+
+	if b.ctx.Err() != nil {
+		// Shutting down: skip the bookkeeping, the loop exits on its next check.
+		return false
+	}
+
+	b.updateEstablished()
+
+	if ok {
+		// Confirmed now matches the desired state as of gen. If the desired
+		// state changed while this pass ran, a wakeup is already pending and
+		// the next pass will advance the generation again — convergence may
+		// read transiently false, never falsely true.
+		b.confirmedGen.Store(gen)
+	}
+	return ok
+}
+
+// issueSubCommand sends one subscription command on the dedicated client with a
+// bounded timeout. Only called from subscriptionMgmtLoop.
+func (b *valkeyBus) issueSubCommand(cmd valkey.Completed) error {
+	ctx, cancel := context.WithTimeout(b.ctx, subCommandTimeout)
+	defer cancel()
+	if err := b.dedicatedClient.Do(ctx, cmd).Error(); err != nil {
+		return fmt.Errorf("broadcast: subscription command: %w", err)
+	}
+	return nil
+}
+
+// recordSubCommandSuccess counts a successfully issued subscription command.
+// Commands issued by a reconcile-backstop pass are divergence the event-driven
+// path missed, counted separately as corrections.
+func (b *valkeyBus) recordSubCommandSuccess(backstop bool) {
+	b.metrics.subscribeCommandsTotal.WithLabelValues(metricResultSuccess).Inc()
+	if backstop {
+		b.metrics.reconcileCorrectionsTotal.Inc()
+	}
+}
+
+// recordSubCommandFailure logs and counts a failed subscription command. The
+// failure leaves the confirmed state untouched, so the next convergence pass
+// (scheduled with backoff by the caller) retries it.
+func (b *valkeyBus) recordSubCommandFailure(err error, command, tenantID string) {
 	b.logger.Error().
 		Err(err).
-		Str(logging.LogKeyTenantSlug, cmd.tenantID).
-		Msg("broadcast: subscription command failed, scheduling retry")
+		Str("command", command).
+		Str(logging.LogKeyTenantSlug, tenantID).
+		Msg("broadcast: subscription command failed, convergence pass will retry")
 	b.metrics.subscribeCommandsTotal.WithLabelValues(metricResultRetry).Inc()
-
-	*retryTenantID = cmd.tenantID
-	*retryKind = cmd.kind
-
-	retryTimer.Reset(*currentBackoff)
-	*currentBackoff *= 2
-	if *currentBackoff > retryMaxBackoff {
-		*currentBackoff = retryMaxBackoff
-	}
 }
 
-// resubscribeAll re-enqueues SUBSCRIBE for all active tenants and PSUBSCRIBE if needed.
-// Called after a Valkey reconnect.
-func (b *valkeyBus) resubscribeAll() {
-	b.subRefMu.Lock()
-	tenants := make([]string, 0, len(b.subRefCounts))
-	for tid := range b.subRefCounts {
-		tenants = append(tenants, tid)
+// updateEstablished refreshes the established gauge and its lock-free mirror
+// from the confirmed state. Only called from subscriptionMgmtLoop.
+func (b *valkeyBus) updateEstablished() {
+	n := int64(len(b.confirmedTenants))
+	if b.confirmedAll {
+		n++
 	}
-	hasSubscribeAll := b.subscribeAllRefCount > 0
-	b.subRefMu.Unlock()
-
-	for _, tid := range tenants {
-		select {
-		case b.subCmdCh <- subCmd{kind: subCmdSubscribe, tenantID: tid}:
-		default:
-			b.logger.Warn().
-				Str(logging.LogKeyTenantSlug, tid).
-				Str("reason", "reconnect_overflow").
-				Msg("broadcast: subCmdCh full during reconnect; tenant will recover via reconciliation tick")
-			b.metrics.subscribeCommandsTotal.WithLabelValues(metricResultDropped).Inc()
-		}
-	}
-
-	if hasSubscribeAll {
-		select {
-		case b.subCmdCh <- subCmd{kind: subCmdPSubscribe}:
-		default:
-			b.logger.Warn().Msg("broadcast: subCmdCh full, PSUBSCRIBE reconnect enqueue dropped")
-		}
-	}
-}
-
-// reconcile checks that Valkey subscriptions match expected state and re-issues any missing ones.
-// Runs periodically via reconcileTicker. All PUBSUB diagnostic queries use b.client (not dedicatedClient).
-func (b *valkeyBus) reconcile() {
-	b.subRefMu.Lock()
-	tenants := make([]string, 0, len(b.subRefCounts))
-	for tid := range b.subRefCounts {
-		tenants = append(tenants, tid)
-	}
-	hasSubscribeAll := b.subscribeAllRefCount > 0
-	b.subRefMu.Unlock()
-
-	ctx, cancel := context.WithTimeout(b.ctx, reconcileTickInterval/2)
-	defer cancel()
-
-	for _, tid := range tenants {
-		ch := tenantChannel(b.channelPrefix, tid)
-		result := b.client.Do(ctx, b.client.B().PubsubNumsub().Channel(ch).Build())
-		if result.Error() != nil {
-			// Do NOT abort — continue to next tenant per
-			b.logger.Warn().
-				Err(result.Error()).
-				Str(logging.LogKeyTenantSlug, tid).
-				Msg("broadcast: reconcile PUBSUB NUMSUB error, skipping tenant this tick")
-			continue
-		}
-
-		m, err := result.AsMap()
-		if err != nil {
-			b.logger.Warn().Err(err).Str(logging.LogKeyTenantSlug, tid).Msg("broadcast: reconcile PUBSUB NUMSUB parse error")
-			continue
-		}
-
-		v := m[ch]
-		if count, _ := v.AsInt64(); count == 0 {
-			b.logger.Info().Str(logging.LogKeyTenantSlug, tid).Msg("broadcast: reconcile detected missing subscription, re-issuing")
-			select {
-			case b.subCmdCh <- subCmd{kind: subCmdSubscribe, tenantID: tid}:
-				b.metrics.reconcileCorrectionsTotal.Inc()
-			default:
-			}
-		}
-	}
-
-	if hasSubscribeAll {
-		result := b.client.Do(ctx, b.client.B().PubsubNumpat().Build())
-		if result.Error() != nil {
-			b.logger.Warn().Err(result.Error()).Msg("broadcast: reconcile PUBSUB NUMPAT error, skipping SubscribeAll check this tick")
-			return
-		}
-		if n, _ := result.AsInt64(); n == 0 {
-			b.logger.Info().Msg("broadcast: reconcile detected missing PSUBSCRIBE, re-issuing")
-			select {
-			case b.subCmdCh <- subCmd{kind: subCmdPSubscribe}:
-				b.metrics.reconcileCorrectionsTotal.Inc()
-			default:
-			}
-		}
-	}
+	b.establishedCount.Store(n)
+	b.metrics.subscriptionsEstablished.Set(float64(n))
 }
 
 // --- Lifecycle ---
@@ -818,9 +871,22 @@ func (b *valkeyBus) ShutdownWithContext(ctx context.Context) {
 	b.logger.Info().Msg("BroadcastBus shutdown complete")
 }
 
-// IsHealthy returns true if the Valkey connection is operational.
+// subscriptionsConverged reports whether the confirmed subscription state
+// matches the desired state (ADR-0016). Lock-free: both generations are
+// atomics. May read transiently false while a convergence pass is pending or
+// in flight; never reads true while confirmed differs from desired.
+func (b *valkeyBus) subscriptionsConverged() bool {
+	return b.confirmedGen.Load() == b.desiredGen.Load()
+}
+
+// IsHealthy returns true if the Valkey connection is operational: the publish
+// path is healthy AND this pod's subscriptions have converged. The two signals
+// are tracked separately (§XV) — a successful publish or ping never masks a
+// missing subscription. Callers using this for liveness/readiness decisions:
+// subscription non-convergence is a DEGRADED condition — it must never fail a
+// Kubernetes probe (see handleHealth in internal/server).
 func (b *valkeyBus) IsHealthy() bool {
-	if !b.healthy.Load() {
+	if !b.publishHealthy.Load() || !b.subscriptionsConverged() {
 		return false
 	}
 
@@ -847,6 +913,8 @@ func (b *valkeyBus) GetMetrics() Metrics {
 		lastPubAgo = -1
 	}
 
+	// Lock ordering (§VII): subMu and subRefMu are taken strictly sequentially,
+	// never nested — each is released before the other is acquired.
 	b.subMu.RLock()
 	subscriberCount := len(b.allSubscribers)
 	for _, entries := range b.tenantSubscribers {
@@ -854,15 +922,26 @@ func (b *valkeyBus) GetMetrics() Metrics {
 	}
 	b.subMu.RUnlock()
 
+	b.subRefMu.Lock()
+	desired := len(b.subRefCounts)
+	if b.subscribeAllRefCount > 0 {
+		desired++
+	}
+	b.subRefMu.Unlock()
+
 	return Metrics{
-		Type:             platform.BroadcastTypeValkey,
-		Healthy:          b.IsHealthy(),
-		ChannelPrefix:    b.channelPrefix,
-		Subscribers:      subscriberCount,
-		PublishErrors:    b.publishErrors.Load(),
-		MessagesReceived: b.messagesRecv.Load(),
-		LastPublishAgo:   lastPubAgo,
-		LastPublishTime:  lastPubTime,
+		Type:                     platform.BroadcastTypeValkey,
+		Healthy:                  b.IsHealthy(),
+		PublishHealthy:           b.publishHealthy.Load(),
+		SubscriptionsConverged:   b.subscriptionsConverged(),
+		SubscriptionsDesired:     desired,
+		SubscriptionsEstablished: int(b.establishedCount.Load()),
+		ChannelPrefix:            b.channelPrefix,
+		Subscribers:              subscriberCount,
+		PublishErrors:            b.publishErrors.Load(),
+		MessagesReceived:         b.messagesRecv.Load(),
+		LastPublishAgo:           lastPubAgo,
+		LastPublishTime:          lastPubTime,
 	}
 }
 
@@ -884,12 +963,12 @@ func (b *valkeyBus) healthCheckLoop() {
 
 			if err != nil {
 				b.logger.Error().Err(err).Msg("Valkey health check failed")
-				b.healthy.Store(false)
+				b.publishHealthy.Store(false)
 			} else {
 				if b.logger.GetLevel() <= zerolog.DebugLevel {
 					b.logger.Debug().Msg("Valkey health check passed")
 				}
-				b.healthy.Store(true)
+				b.publishHealthy.Store(true)
 			}
 		}
 	}

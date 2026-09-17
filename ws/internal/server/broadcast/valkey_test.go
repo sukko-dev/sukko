@@ -159,6 +159,12 @@ func newTestBusMetrics(suffix string) *busMetrics {
 		reconcileCorrectionsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "test_reconcile_" + suffix,
 		}),
+		subscriptionsDesired: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "test_subs_desired_" + suffix,
+		}),
+		subscriptionsEstablished: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "test_subs_established_" + suffix,
+		}),
 		publishFailuresTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "test_publish_failures_" + suffix,
 		}),
@@ -172,7 +178,7 @@ func TestValkeyBus_ErrSubscriberNotFound(t *testing.T) {
 	b := &valkeyBus{
 		tenantSubscribers: make(map[string][]subscriberEntry),
 		subRefCounts:      make(map[string]int),
-		subCmdCh:          make(chan subCmd, subCmdChCapacity),
+		subWakeCh:         make(chan struct{}, 1),
 		bufferSize:        8,
 		logger:            zerolog.Nop(),
 		metrics:           newTestBusMetrics("notfound"),
@@ -196,7 +202,7 @@ func TestValkeyBus_PerCallerIsolation(t *testing.T) {
 	b := &valkeyBus{
 		tenantSubscribers: make(map[string][]subscriberEntry),
 		subRefCounts:      make(map[string]int),
-		subCmdCh:          make(chan subCmd, subCmdChCapacity),
+		subWakeCh:         make(chan struct{}, 1),
 		bufferSize:        8,
 		logger:            zerolog.Nop(),
 		metrics:           newTestBusMetrics("isolation"),
@@ -234,7 +240,7 @@ func TestValkeyBus_FanOutDropIsolation(t *testing.T) {
 	b := &valkeyBus{
 		tenantSubscribers: make(map[string][]subscriberEntry),
 		subRefCounts:      make(map[string]int),
-		subCmdCh:          make(chan subCmd, subCmdChCapacity),
+		subWakeCh:         make(chan struct{}, 1),
 		bufferSize:        1, // 1-slot buffer to make it easy to fill
 		logger:            zerolog.Nop(),
 		metrics:           newTestBusMetrics("dropisolation"),
@@ -279,7 +285,7 @@ func TestValkeyBus_SubscribeValidation(t *testing.T) {
 	b := &valkeyBus{
 		tenantSubscribers: make(map[string][]subscriberEntry),
 		subRefCounts:      make(map[string]int),
-		subCmdCh:          make(chan subCmd, subCmdChCapacity),
+		subWakeCh:         make(chan struct{}, 1),
 		bufferSize:        8,
 		logger:            zerolog.Nop(),
 		metrics:           newTestBusMetrics("validation"),

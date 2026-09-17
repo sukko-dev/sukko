@@ -123,8 +123,27 @@ type Metrics struct {
 	// Type identifies the backend ("valkey")
 	Type string `json:"type"`
 
-	// Healthy indicates if the backend connection is operational
+	// Healthy indicates if the backend connection is operational:
+	// PublishHealthy AND SubscriptionsConverged (ADR-0016)
 	Healthy bool `json:"healthy"`
+
+	// PublishHealthy indicates the publish connection is operational
+	// (last PUBLISH / health-check ping succeeded)
+	PublishHealthy bool `json:"publish_healthy"`
+
+	// SubscriptionsConverged indicates the backend subscriptions this pod has
+	// established match what its subscribers require. False means some
+	// broadcasts published elsewhere are not being received here — a DEGRADED
+	// condition, never a readiness/liveness failure (ADR-0016).
+	SubscriptionsConverged bool `json:"subscriptions_converged"`
+
+	// SubscriptionsDesired is the number of backend subscriptions this pod wants
+	// (active tenant channels + the all-tenant pattern subscription when in use)
+	SubscriptionsDesired int `json:"subscriptions_desired"`
+
+	// SubscriptionsEstablished is the number of backend subscriptions confirmed
+	// on the current pub/sub connection
+	SubscriptionsEstablished int `json:"subscriptions_established"`
 
 	// ChannelPrefix is the Valkey pub/sub channel name prefix (full channel = prefix:tenantID)
 	ChannelPrefix string `json:"channel_prefix"`
