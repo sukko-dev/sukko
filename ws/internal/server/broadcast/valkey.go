@@ -224,6 +224,9 @@ func newValkeyBus(cfg Config, logger zerolog.Logger) (*valkeyBus, error) {
 
 	// Use provided registerer from Config if present, else default.
 	reg := prometheus.DefaultRegisterer
+	if cfg.Registerer != nil {
+		reg = cfg.Registerer
+	}
 	b.metrics = newBusMetrics(reg)
 	b.healthy.Store(true)
 	b.lastPublish.Store(time.Now().Unix())
@@ -235,13 +238,19 @@ func newValkeyBus(cfg Config, logger zerolog.Logger) (*valkeyBus, error) {
 
 // Publish sends a message to the per-tenant Valkey pub/sub channel.
 // Validates TenantID before publishing (non-empty, no separator character).
-func (b *valkeyBus) Publish(msg *Message) {
+//
+// Fail-fast (see the Bus interface contract): a failed PUBLISH is logged,
+// counted, and returned wrapped in ErrPublishUnavailable — never buffered or
+// retried here. Retry policy belongs to the caller: the Kafka consumer retries
+// in place to preserve at-least-once delivery, while other callers surface the
+// error or deliberately drop.
+func (b *valkeyBus) Publish(msg *Message) error {
 	if msg.TenantID == "" {
 		b.logger.Error().
 			Str("subject", msg.Subject).
 			Msg("broadcast: publish rejected: empty tenant ID")
 		b.metrics.droppedTotal.WithLabelValues(metricTenantLabelEmpty).Inc()
-		return
+		return ErrEmptyTenantID
 	}
 	if strings.Contains(msg.TenantID, valkeyChannelSeparator) {
 		b.logger.Error().
@@ -249,7 +258,7 @@ func (b *valkeyBus) Publish(msg *Message) {
 			Str("subject", msg.Subject).
 			Msg("broadcast: publish rejected: tenant ID contains separator character")
 		b.metrics.droppedTotal.WithLabelValues(metricTenantLabelInvalid).Inc()
-		return
+		return ErrInvalidTenantID
 	}
 
 	payload, err := json.Marshal(msg)
@@ -259,7 +268,10 @@ func (b *valkeyBus) Publish(msg *Message) {
 			Str("subject", msg.Subject).
 			Msg("broadcast: failed to serialize message")
 		b.publishErrors.Add(1)
-		return
+		b.metrics.publishFailuresTotal.Inc()
+		// Permanent reject: retrying an unserializable message cannot succeed,
+		// so this is deliberately NOT wrapped in ErrPublishUnavailable.
+		return fmt.Errorf("broadcast: serialize message for subject %q: %w", msg.Subject, err)
 	}
 
 	ch := tenantChannel(b.channelPrefix, msg.TenantID)
@@ -274,12 +286,14 @@ func (b *valkeyBus) Publish(msg *Message) {
 			Str("subject", msg.Subject).
 			Msg("broadcast: failed to publish message to Valkey")
 		b.publishErrors.Add(1)
+		b.metrics.publishFailuresTotal.Inc()
 		b.healthy.Store(false)
-		return
+		return fmt.Errorf("%w: publish to %q: %w", ErrPublishUnavailable, ch, err)
 	}
 
 	b.lastPublish.Store(time.Now().Unix())
 	b.healthy.Store(true)
+	return nil
 }
 
 // --- Subscribe / Unsubscribe ---

@@ -378,7 +378,7 @@ func TestNewConsumer_WiresFields(t *testing.T) {
 
 	logger := zerolog.Nop()
 	guard := newMockResourceGuard()
-	broadcast := func(_ string, _ []byte, _ string, _ int32, _ int64) {}
+	broadcast := func(_ string, _ []byte, _ string, _ int32, _ int64) error { return nil }
 	reg := prometheus.NewRegistry()
 
 	consumer, err := NewConsumer(ConsumerConfig{
@@ -418,7 +418,7 @@ func TestNewConsumer_NilRegisterer_UsesSingleton(t *testing.T) { //nolint:parall
 
 	logger := zerolog.Nop()
 	guard := newMockResourceGuard()
-	broadcast := func(_ string, _ []byte, _ string, _ int32, _ int64) {}
+	broadcast := func(_ string, _ []byte, _ string, _ int32, _ int64) error { return nil }
 
 	consumer, err := NewConsumer(ConsumerConfig{
 		Brokers:               []string{"localhost:1"},
@@ -448,7 +448,7 @@ func TestNewConsumer_EmptyConsumerType_ReturnsError(t *testing.T) {
 
 	logger := zerolog.Nop()
 	guard := newMockResourceGuard()
-	broadcast := func(_ string, _ []byte, _ string, _ int32, _ int64) {}
+	broadcast := func(_ string, _ []byte, _ string, _ int32, _ int64) error { return nil }
 	reg := prometheus.NewRegistry()
 
 	_, err := NewConsumer(ConsumerConfig{

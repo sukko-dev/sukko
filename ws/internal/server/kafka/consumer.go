@@ -58,6 +58,14 @@ var consumerRevokeCommitMetrics = struct {
 	once              sync.Once
 }{}
 
+// consumerBroadcastRetryMetrics holds the broadcast retry counters registered
+// once at package level. Tests bypass this singleton via ConsumerConfig.Registerer.
+var consumerBroadcastRetryMetrics = struct {
+	retriesTotal        prometheus.Counter
+	blockedSecondsTotal prometheus.Counter
+	once                sync.Once
+}{}
+
 // topicPauser is the minimal interface for pausing Kafka topic fetching.
 // *kgo.Client satisfies this interface in production; mockPauser is used in tests.
 type topicPauser interface {
@@ -81,7 +89,25 @@ type TokenEvent struct {
 // BroadcastFunc is called when a message is received.
 // Parameters: subject (broadcast routing key), message (raw JSON), topicName, partition, offset.
 // The extra fields allow the history writer to populate TenantID/StreamID/Channel on broadcast.Message.
-type BroadcastFunc func(subject string, message []byte, topicName string, partition int32, offset int64)
+//
+// Return contract: nil means the message was handed to the broadcast bus OR was
+// deliberately dropped by policy inside the callback (permanent reject — logged
+// and counted there). A non-nil error means delivery transiently failed (the
+// broadcast backend is unavailable) and the SAME record must be retried before
+// its offset may be marked for commit — the consumer retries in place with
+// capped exponential backoff (§IV) to preserve at-least-once delivery.
+type BroadcastFunc func(subject string, message []byte, topicName string, partition int32, offset int64) error
+
+// Broadcast publish retry backoff (§IV: infrastructure-layer retries use capped
+// exponential backoff). Mirrors the broadcast bus's own retry constants
+// (retryInitialBackoff/retryMaxBackoff in broadcast/valkey.go). Deliberately
+// named constants rather than env vars (§I): the values bound a recovery loop
+// whose duration is dictated by the outage, not by tuning — there is no
+// operational reason to configure them per deployment.
+const (
+	broadcastRetryInitialBackoff = 100 * time.Millisecond
+	broadcastRetryMaxBackoff     = 5 * time.Second
+)
 
 // ResourceGuard interface for rate limiting and CPU emergency brake
 type ResourceGuard interface {
@@ -119,6 +145,12 @@ type Consumer struct {
 	replayFetchMaxBytes       int32
 	backpressureCheckInterval time.Duration
 
+	// Broadcast publish retry backoff. Initialized from the package constants;
+	// fields (not constants) only so tests can shrink the waits — production
+	// code never overrides them (same pattern as backpressureCheckInterval).
+	broadcastRetryInitial time.Duration
+	broadcastRetryMax     time.Duration
+
 	// Routing — resolves the channel from the record's HeaderChannel and the registry-supplied tenant.
 	namespace      string
 	tenantResolver func(topic string) (string, bool) // topic → tenant from the registry map (#179 P3)
@@ -145,6 +177,12 @@ type Consumer struct {
 	commitOnRevokeTimeout time.Duration          // max time for CommitMarkedOffsets in revoke callback
 	revokeCommitCounter   *prometheus.CounterVec // ws_consumer_revoke_commit_total{result}
 	revokeCommitDuration  prometheus.Observer    // ws_consumer_revoke_commit_duration_seconds (never nil after NewConsumer)
+
+	// Broadcast retry observability (§VI): the retry loop is backpressure that
+	// blocks the consume loop, so both the retry count and the blocked time
+	// must be visible on dashboards.
+	broadcastRetryCounter   prometheus.Counter // ws_consumer_broadcast_retries_total
+	broadcastBlockedSeconds prometheus.Counter // ws_consumer_broadcast_blocked_seconds_total
 
 	// Security config retained for the replay client (ReplayFromOffsets creates a separate kgo.Client).
 	sasl *kafkashared.SASLConfig
@@ -336,6 +374,8 @@ func NewConsumer(cfg ConsumerConfig) (*Consumer, error) {
 		fetchMaxBytes:             cfg.FetchMaxBytes,
 		replayFetchMaxBytes:       cfg.ReplayFetchMaxBytes,
 		backpressureCheckInterval: backpressureInterval,
+		broadcastRetryInitial:     broadcastRetryInitialBackoff,
+		broadcastRetryMax:         broadcastRetryMaxBackoff,
 
 		// Routing
 		namespace:      cfg.Namespace,
@@ -429,6 +469,46 @@ func NewConsumer(cfg ConsumerConfig) (*Consumer, error) {
 		})
 		consumer.revokeCommitCounter = consumerRevokeCommitMetrics.counterVec
 		consumer.revokeCommitDuration = consumerRevokeCommitMetrics.durationHistogram
+	}
+
+	// Register broadcast retry metrics (counter + blocked-time counter).
+	// Tests pass cfg.Registerer to bypass the singleton; nil uses promauto.
+	if cfg.Registerer != nil {
+		retries := prometheus.NewCounter(prometheus.CounterOpts{
+			Name: MetricBroadcastRetriesTotal,
+			Help: "Total broadcast publish retries after a transient bus failure (each increment is one failed attempt on a record being held for at-least-once delivery)",
+		})
+		if err := cfg.Registerer.Register(retries); err != nil {
+			client.Close()
+			cancel()
+			return nil, fmt.Errorf("failed to register broadcast retries counter: %w", err)
+		}
+		blocked := prometheus.NewCounter(prometheus.CounterOpts{
+			Name: MetricBroadcastBlockedSecondsTotal,
+			Help: "Total seconds the consume loop spent blocked in broadcast retry backpressure while the bus was unavailable",
+		})
+		if err := cfg.Registerer.Register(blocked); err != nil {
+			client.Close()
+			cancel()
+			return nil, fmt.Errorf("failed to register broadcast blocked seconds counter: %w", err)
+		}
+		consumer.broadcastRetryCounter = retries
+		consumer.broadcastBlockedSeconds = blocked
+	} else {
+		// Register both counters in a single once.Do for atomicity (either both
+		// registered or neither — concurrent NewConsumer calls are safe).
+		consumerBroadcastRetryMetrics.once.Do(func() {
+			consumerBroadcastRetryMetrics.retriesTotal = promauto.NewCounter(prometheus.CounterOpts{
+				Name: MetricBroadcastRetriesTotal,
+				Help: "Total broadcast publish retries after a transient bus failure (each increment is one failed attempt on a record being held for at-least-once delivery)",
+			})
+			consumerBroadcastRetryMetrics.blockedSecondsTotal = promauto.NewCounter(prometheus.CounterOpts{
+				Name: MetricBroadcastBlockedSecondsTotal,
+				Help: "Total seconds the consume loop spent blocked in broadcast retry backpressure while the bus was unavailable",
+			})
+		})
+		consumer.broadcastRetryCounter = consumerBroadcastRetryMetrics.retriesTotal
+		consumer.broadcastBlockedSeconds = consumerBroadcastRetryMetrics.blockedSecondsTotal
 	}
 
 	if batchEnabled {
@@ -577,9 +657,10 @@ func (c *Consumer) consumeLoop() {
 	// stranded until the next record happens to arrive (Constitution §VII: the message pipeline MUST NOT
 	// stall; the earlier single-goroutine loop blocked in PollFetches so its flush timer never fired,
 	// stranding burst tails indefinitely). §VII also prefers this goroutine-owns-state + channel design
-	// over shared state. (The one exception to the batchTimeout flush cadence is an in-progress CPU
-	// emergency brake in prepareMessage, which intentionally blocks this loop as backpressure until CPU
-	// recovers — bounded, not a stall.)
+	// over shared state. (Two exceptions to the batchTimeout flush cadence intentionally block
+	// this loop as bounded backpressure, not a stall: an in-progress CPU emergency brake in
+	// prepareMessage until CPU recovers, and broadcastWithRetry in deliverBatch while the broadcast
+	// bus is down — see broadcastWithRetry for why blocking beats committing past undelivered records.)
 	recordCh := make(chan *kgo.Record, c.batchSize)
 
 	c.wg.Go(func() {
@@ -613,16 +694,21 @@ func (c *Consumer) consumeLoop() {
 
 	batch := make([]preparedMessage, 0, c.batchSize)
 
-	flushBatch := func() {
+	// flushBatch returns false when delivery was aborted (consumer context
+	// canceled while a record was stuck in broadcast retry). The caller MUST
+	// stop consuming: the abandoned record is unmarked, and under cumulative
+	// commit (kgo.AutoCommitMarks) ANY later mark on that partition — including
+	// a deliberate-drop mark — would commit past it, losing it silently.
+	flushBatch := func() bool {
 		if len(batch) == 0 {
-			return
+			return true
 		}
 
-		// Send all messages in batch
-		for _, msg := range batch {
-			c.broadcast(msg.subject, msg.message, msg.record.Topic, msg.record.Partition, msg.record.Offset)
-			c.committer.MarkCommitRecords(msg.record)
-			c.incrementProcessed(msg.topic)
+		// Send all messages in batch; on ctx cancellation mid-delivery the
+		// undelivered tail is left unmarked so it redelivers (at-least-once).
+		if !c.deliverBatch(batch) {
+			batch = batch[:0]
+			return false
 		}
 
 		c.incrementBatches()
@@ -641,6 +727,7 @@ func (c *Consumer) consumeLoop() {
 
 		// Clear batch (reuse backing array)
 		batch = batch[:0]
+		return true
 	}
 
 	flushTimer := time.NewTimer(c.batchTimeout)
@@ -649,26 +736,42 @@ func (c *Consumer) consumeLoop() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			flushBatch()
+			flushBatch() // best-effort final flush; abort here just means shutdown with an unmarked tail
 			return
 
 		case <-flushTimer.C:
 			// Fires every batchTimeout regardless of traffic — resetting even on an empty flush keeps
 			// it firing, so an accumulated partial batch is never left waiting.
-			flushBatch()
+			if !flushBatch() {
+				return // aborted: stop consuming so no later record can mark past the abandoned one
+			}
 			flushTimer.Reset(c.batchTimeout)
 
 		case record := <-recordCh:
-			msg, ctxCanceled := c.prepareMessage(record)
-			if msg != nil {
+			msg, noMark := c.prepareMessage(record)
+			switch {
+			case msg != nil:
 				batch = append(batch, *msg)
 				if len(batch) >= c.batchSize {
-					flushBatch() // full-batch flush; the timer keeps its own cadence (may fire on an empty batch — a no-op)
+					if !flushBatch() { // full-batch flush; the timer keeps its own cadence (may fire on an empty batch — a no-op)
+						return // aborted: stop consuming so no later record can mark past the abandoned one
+					}
 				}
-			} else if !ctxCanceled {
+			case noMark && c.ctx.Err() != nil:
+				// Consumer context canceled (CPU brake interrupted): the record
+				// is abandoned unmarked. Stop consuming NOW — the next select
+				// arm could otherwise pull a deliberate-drop record whose mark
+				// commits past this one. Flush first: the pending batch
+				// precedes the abandoned record, so marking it cannot cover
+				// the abandonment.
+				flushBatch()
+				return
+			case noMark:
+				// Registry miss: leave unmarked and keep consuming (see
+				// logUnknownTopicDrop for the honest redelivery contract).
+			default:
 				// Deliberate drop (rate-limit, malformed, DLQ): mark so the offset is not
-				// re-delivered after rebalance. CPU-brake ctx cancel is not marked — the record
-				// must be re-delivered after rebalance.
+				// re-delivered after rebalance.
 				c.committer.MarkCommitRecords(record)
 			}
 		}
@@ -693,11 +796,30 @@ func (c *Consumer) consumeLoopUnbatched() {
 			}
 
 			// Process records one by one
-			fetches.EachRecord(func(record *kgo.Record) {
-				c.processRecord(record)
-			})
+			if aborted := c.consumeFetchRecords(fetches); aborted {
+				return
+			}
 		}
 	}
+}
+
+// consumeFetchRecords processes every record in fetches in order. It returns
+// true when processing aborted (consumer context canceled while a record was
+// stuck in broadcast retry or in the CPU brake): the abandoned record is
+// unmarked, and under cumulative commit (kgo.AutoCommitMarks) ANY later mark
+// on that partition — including a deliberate-drop mark — would commit past it
+// and lose it silently. Once a record aborts, the remaining records in the
+// fetch are skipped (same stopped-flag pattern as the batched poller), and the
+// caller MUST stop consuming.
+func (c *Consumer) consumeFetchRecords(fetches kgo.Fetches) bool {
+	aborted := false
+	fetches.EachRecord(func(record *kgo.Record) {
+		if aborted {
+			return
+		}
+		aborted = c.processRecord(record)
+	})
+	return aborted
 }
 
 // preparedMessage holds a validated, ready-to-broadcast Kafka message.
@@ -709,10 +831,13 @@ type preparedMessage struct {
 }
 
 // prepareMessage validates and prepares a message for batching.
-// Returns (msg, ctxCanceled):
+// Returns (msg, noMark):
 //   - (nil, false): deliberate drop (rate-limit, malformed, DLQ) — caller MUST mark the record
-//   - (nil, true): CPU-brake interrupted by ctx.Done() — caller MUST NOT mark (re-delivery expected)
-//   - (msg, false): ready to broadcast — caller MUST mark after broadcast
+//   - (nil, true): no-mark — either the CPU brake was interrupted by ctx.Done()
+//     (caller MUST stop consuming; the abandoned record must not be covered by
+//     a later mark) or a registry miss (caller keeps consuming). The caller
+//     distinguishes the two via c.ctx.Err().
+//   - (msg, false): ready to broadcast — caller MUST mark only after a successful broadcast
 func (c *Consumer) prepareMessage(record *kgo.Record) (*preparedMessage, bool) {
 	// ============================================================================
 	// LAYER 1: RATE LIMITING
@@ -753,7 +878,7 @@ func (c *Consumer) prepareMessage(record *kgo.Record) (*preparedMessage, bool) {
 
 			select {
 			case <-c.ctx.Done():
-				return nil, true // context canceled during brake — do NOT mark; record will be re-delivered
+				return nil, true // context canceled during brake — do NOT mark; caller must stop consuming (abort)
 			case <-time.After(c.backpressureCheckInterval):
 				// Check CPU again
 			}
@@ -774,7 +899,13 @@ func (c *Consumer) prepareMessage(record *kgo.Record) (*preparedMessage, bool) {
 		}
 		c.incrementFailed()
 		c.logUnknownTopicDrop(record)
-		return nil, true // registry miss — do NOT mark; redeliver once the registry catches up
+		// Registry miss — do NOT mark (reuses the no-mark result; the caller
+		// distinguishes it from a ctx-cancel abort via c.ctx.Err()). NOTE: no
+		// mark only forces redelivery across a rebalance/restart; within the
+		// session the fetch position has moved on, and the first later mark on
+		// this partition commits past this offset — the record is then
+		// effectively lost (see logUnknownTopicDrop for the honest contract).
+		return nil, true
 	}
 	if reason != "" {
 		c.routeToDLQ(record, tenant, reason)
@@ -790,6 +921,99 @@ func (c *Consumer) prepareMessage(record *kgo.Record) (*preparedMessage, bool) {
 	}, false
 }
 
+// broadcastWithRetry delivers one record's message to the broadcast bus,
+// retrying the SAME record with capped exponential backoff (§IV) until the
+// publish succeeds or the consumer context is canceled. Returns true on
+// success; false when the context was canceled first — the caller MUST NOT
+// mark the record, so it redelivers after restart/rebalance (at-least-once).
+//
+// Why retry-in-place (not pause/resume, not skip): franz-go advances the fetch
+// position independently of the committed offset — a record polled but never
+// marked is NOT redelivered within a live session (redelivery happens only on
+// rebalance, restart, or an explicit seek). Pausing and resuming the poll loop
+// would therefore lose exactly the records that failed to broadcast; the only
+// shapes that keep them are holding the record here until the bus takes it, or
+// seeking back to the committed offset. Retry-in-place is the simpler of the
+// two and preserves batch ordering for free.
+//
+// §VII (Message Pipeline Protection) note: blocking here is deliberate and
+// safe. §VII protects the DELIVERY path (broadcast bus → shard fan-out →
+// per-client write pump → transport write); this is the Kafka CONSUME loop,
+// and pausing ingestion is ordinary bounded backpressure — the same blessed
+// pattern as the CPU emergency brake (LAYER 2 in prepareMessage/processRecord),
+// which also blocks this loop until pressure clears. The block is bounded by
+// bus recovery: Kafka buffers meanwhile (consumer lag grows, nothing is lost),
+// and duplicates on recovery are acceptable — every copy of a message carries
+// the same mid, enabling cross-copy dedup.
+func (c *Consumer) broadcastWithRetry(subject string, message []byte, record *kgo.Record) bool {
+	backoff := c.broadcastRetryInitial
+	var retryStart time.Time
+
+	for attempt := 0; ; attempt++ {
+		err := c.broadcast(subject, message, record.Topic, record.Partition, record.Offset)
+		if err == nil {
+			if attempt > 0 {
+				blocked := time.Since(retryStart)
+				c.broadcastBlockedSeconds.Add(blocked.Seconds())
+				c.logger.Info().
+					Int("attempts", attempt+1).
+					Dur("blocked", blocked).
+					Str(LabelTopic, record.Topic).
+					Int32(LogFieldPartition, record.Partition).
+					Int64(LogFieldOffset, record.Offset).
+					Msg("Broadcast bus recovered - message delivered after retry")
+			}
+			return true
+		}
+
+		if attempt == 0 {
+			// Log once per retry episode, not per attempt (an outage produces
+			// thousands of attempts; the recovery log closes the episode).
+			retryStart = time.Now()
+			c.logger.Warn().
+				Err(err).
+				Str(LabelTopic, record.Topic).
+				Int32(LogFieldPartition, record.Partition).
+				Int64(LogFieldOffset, record.Offset).
+				Msg("Broadcast bus unavailable - entering backpressure mode (retrying record until the bus recovers)")
+		}
+		c.broadcastRetryCounter.Inc()
+
+		select {
+		case <-c.ctx.Done():
+			c.broadcastBlockedSeconds.Add(time.Since(retryStart).Seconds())
+			c.logger.Warn().
+				Str(LabelTopic, record.Topic).
+				Int32(LogFieldPartition, record.Partition).
+				Int64(LogFieldOffset, record.Offset).
+				Msg("Context canceled during broadcast retry - record left unmarked for redelivery")
+			return false
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, c.broadcastRetryMax)
+	}
+}
+
+// deliverBatch broadcasts each prepared message in order, marking each record
+// for commit only AFTER its broadcast succeeded (broadcastWithRetry blocks on
+// transient bus failures, so a failure at record i also withholds the marks
+// for i+1..n on the partition — ordering is preserved and the committed
+// offset never advances past an undelivered record). Returns false when the
+// consumer context was canceled mid-delivery — the caller must abandon the
+// remaining batch without marking it (those records redeliver after
+// restart/rebalance, preserving at-least-once delivery).
+func (c *Consumer) deliverBatch(batch []preparedMessage) bool {
+	for i := range batch {
+		msg := &batch[i]
+		if !c.broadcastWithRetry(msg.subject, msg.message, msg.record) {
+			return false
+		}
+		c.committer.MarkCommitRecords(msg.record)
+		c.incrementProcessed(msg.topic)
+	}
+	return true
+}
+
 // processRecord handles a single Kafka record with three-layer protection
 //
 // LAYER 1: Rate limiting (caps consumption at configured rate, e.g., 25 msg/sec)
@@ -798,7 +1022,13 @@ func (c *Consumer) prepareMessage(record *kgo.Record) (*preparedMessage, bool) {
 //
 // This achieves 12K connections @ 30% CPU with minimal overhead.
 // Without these protections, Kafka consumer blocks synchronously, causing plateau at 2.2K connections.
-func (c *Consumer) processRecord(record *kgo.Record) {
+//
+// Returns abort=true when the consumer context was canceled mid-processing
+// (CPU brake or broadcast retry) and the record was abandoned UNMARKED. The
+// caller MUST stop consuming: under cumulative commit any later mark on the
+// partition — including a deliberate-drop mark — would commit past the
+// abandoned record and lose it silently.
+func (c *Consumer) processRecord(record *kgo.Record) (abort bool) {
 	// ============================================================================
 	// LAYER 1: RATE LIMITING
 	// ============================================================================
@@ -819,7 +1049,7 @@ func (c *Consumer) processRecord(record *kgo.Record) {
 		}
 		// Deliberate drop — mark so offset is not re-delivered after rebalance.
 		c.committer.MarkCommitRecords(record)
-		return
+		return false
 	}
 
 	// ============================================================================
@@ -848,9 +1078,10 @@ func (c *Consumer) processRecord(record *kgo.Record) {
 
 			select {
 			case <-c.ctx.Done():
-				// Context canceled during CPU brake — do NOT mark; record will be re-delivered
-				// after rebalance (same constraint as ctxCanceled=true path in prepareMessage).
-				return
+				// Context canceled during CPU brake — do NOT mark, and ABORT:
+				// the caller must stop consuming so no later record marks past
+				// this abandoned offset (redelivery happens after rebalance).
+				return true
 			case <-time.After(c.backpressureCheckInterval):
 				// Check CPU again after short wait
 			}
@@ -872,18 +1103,33 @@ func (c *Consumer) processRecord(record *kgo.Record) {
 		}
 		c.incrementFailed()
 		c.logUnknownTopicDrop(record)
-		// Registry miss — do NOT mark; the record redelivers once the registry catches up.
-		return
+		// Registry miss — do NOT mark. NOTE: this only forces redelivery across
+		// a rebalance/restart; within the session the fetch position has moved
+		// on, and the first later mark on this partition commits past this
+		// offset — the record is then effectively lost (see logUnknownTopicDrop
+		// for the honest contract and observability). Consumption continues:
+		// registry misses are routine during provisioning races and must not
+		// stall the partition.
+		return false
 	}
 	if reason != "" {
 		c.routeToDLQ(record, tenant, reason)
 		c.incrementFailed()
 		// Deliberate drop — mark so offset is not re-delivered after rebalance.
 		c.committer.MarkCommitRecords(record)
-		return
+		return false
 	}
 
-	c.broadcast(channel, record.Value, record.Topic, record.Partition, record.Offset)
+	// Mark ONLY after a successful broadcast: marking past a record whose
+	// broadcast failed is permanent data loss — franz-go's fetch position has
+	// already moved on, so a committed offset past an undelivered message means
+	// no client ever receives it (no rebalance/restart, no redelivery).
+	if !c.broadcastWithRetry(channel, record.Value, record) {
+		// Context canceled mid-retry: leave unmarked for redelivery and ABORT —
+		// the caller must stop consuming (a later deliberate-drop mark would
+		// commit past this abandoned offset under cumulative commit).
+		return true
+	}
 	c.committer.MarkCommitRecords(record)
 	c.incrementProcessed(record.Topic)
 
@@ -891,6 +1137,7 @@ func (c *Consumer) processRecord(record *kgo.Record) {
 		Str("channel", channel).
 		Str(LabelTopic, record.Topic).
 		Msg("Consumed Kafka message")
+	return false
 }
 
 // routeToDLQ submits a record to the dead-letter queue using a non-blocking send.
@@ -1057,7 +1304,7 @@ func (c *Consumer) logUnknownTopicDrop(record *kgo.Record) {
 		c.logger.Warn().
 			Str(LabelTopic, record.Topic).
 			Int32(LogFieldPartition, record.Partition).
-			Int64("offset", record.Offset).
+			Int64(LogFieldOffset, record.Offset).
 			Uint64("unknown_topic_drops", n).
 			Msg("record dropped: topic not in tenant registry map — not redelivered in-session")
 	}

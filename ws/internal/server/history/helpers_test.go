@@ -172,7 +172,7 @@ func (b *mockBus) getUnsubscribeAllCount() int {
 	return b.unsubscribeAllCalls
 }
 
-func (b *mockBus) Publish(msg *broadcast.Message) {
+func (b *mockBus) Publish(msg *broadcast.Message) error {
 	b.mu.Lock()
 	b.publishLog = append(b.publishLog, msg)
 	if sub, ok := b.tenantSubs[msg.TenantID]; ok {
@@ -188,6 +188,7 @@ func (b *mockBus) Publish(msg *broadcast.Message) {
 		}
 	}
 	b.mu.Unlock()
+	return nil
 }
 
 func (b *mockBus) Run()                                  {}

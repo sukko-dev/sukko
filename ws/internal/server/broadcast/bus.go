@@ -15,8 +15,11 @@
 //	// Start receiving
 //	bus.Run()
 //
-//	// Publish messages (fire-and-forget)
-//	bus.Publish(&broadcast.Message{Subject: "BTC.trade", TenantID: "tenant-id", Payload: data})
+//	// Publish messages (fail-fast: the returned error tells the caller the
+//	// message was NOT delivered; retry policy belongs to the caller)
+//	if err := bus.Publish(&broadcast.Message{Subject: "BTC.trade", TenantID: "tenant-id", Payload: data}); err != nil {
+//	    // handle: retry, drop-and-count, or surface to the client
+//	}
 //
 //	// Unsubscribe when done
 //	bus.Unsubscribe("tenant-id", ch)
@@ -25,6 +28,8 @@ package broadcast
 import (
 	"context"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/sukko-dev/sukko/internal/shared/license"
 )
@@ -38,9 +43,16 @@ import (
 type Bus interface {
 	// Publish sends a message to all pods subscribed to the tenant's channel.
 	// Validates that msg.TenantID is non-empty and contains no reserved separator.
-	// Fire-and-forget: errors are logged internally and tracked via metrics.
-	// Non-blocking and safe for concurrent use.
-	Publish(msg *Message)
+	//
+	// Fail-fast: Publish never blocks on retries and never buffers. A non-nil
+	// error means the message was NOT delivered to the backend — retry policy
+	// is the caller's responsibility. ErrPublishUnavailable (wrapped with the
+	// cause) marks the transient backend-down class and is the only error worth
+	// retrying; ErrEmptyTenantID, ErrInvalidTenantID, and serialization errors
+	// are permanent rejects. Errors are also logged internally and tracked via
+	// metrics, so callers that deliberately drop need only count the drop.
+	// Safe for concurrent use.
+	Publish(msg *Message) error
 
 	// Subscribe returns a new independent buffered channel for the given tenant.
 	// Multiple callers with the same tenantID each receive their own channel and
@@ -147,6 +159,12 @@ type Config struct {
 
 	// ShutdownTimeout is the maximum time to wait for graceful shutdown
 	ShutdownTimeout time.Duration
+
+	// Registerer overrides the Prometheus registry; nil uses the default
+	// registerer (production). Tests pass an isolated registry so multiple bus
+	// instances in one binary do not collide on registration (same pattern as
+	// kafka.ConsumerConfig.Registerer, §XVIII).
+	Registerer prometheus.Registerer
 
 	// Valkey-specific configuration
 	Valkey ValkeyConfig

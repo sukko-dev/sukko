@@ -61,13 +61,22 @@ func (db *DirectBackend) Publish(_ context.Context, _ int64, tenantID, channel s
 	}
 	mid := mintMid()
 	start := time.Now()
-	db.bus.Publish(&broadcast.Message{
+	err := db.bus.Publish(&broadcast.Message{
 		Subject:  channel,
 		Payload:  data,
 		TenantID: tenantID,
 		Mid:      mid,
 	})
 	metrics.RecordBackendPublishLatency(backendName, time.Since(start).Seconds())
+	if err != nil {
+		// Fail-fast toward the client (this is a client-publish path, not the
+		// Kafka ingest path): surface the failure so the caller can retry —
+		// no ack is sent for a message that never reached the bus. Error metric
+		// recorded here per the backend contract (handlers delegate publish
+		// metrics to each backend — same shape as kafkabackend, §XVIII).
+		metrics.RecordBackendPublishError(backendName)
+		return "", fmt.Errorf("%w: broadcast bus publish: %w", backend.ErrPublishFailed, err)
+	}
 	metrics.RecordBackendPublish(backendName)
 	return mid, nil
 }

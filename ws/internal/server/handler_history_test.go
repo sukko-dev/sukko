@@ -70,7 +70,7 @@ func (b *noopBus) SubscribeAll() (<-chan *broadcast.Message, error) {
 }
 func (b *noopBus) Unsubscribe(_ string, _ <-chan *broadcast.Message) error { return nil }
 func (b *noopBus) UnsubscribeAll(_ <-chan *broadcast.Message) error        { return nil }
-func (b *noopBus) Publish(_ *broadcast.Message)                            {}
+func (b *noopBus) Publish(_ *broadcast.Message) error                      { return nil }
 func (b *noopBus) Run()                                                    {}
 func (b *noopBus) Shutdown()                                               {}
 func (b *noopBus) ShutdownWithContext(_ context.Context)                   {}

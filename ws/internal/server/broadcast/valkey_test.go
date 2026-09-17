@@ -159,6 +159,9 @@ func newTestBusMetrics(suffix string) *busMetrics {
 		reconcileCorrectionsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "test_reconcile_" + suffix,
 		}),
+		publishFailuresTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "test_publish_failures_" + suffix,
+		}),
 	}
 }
 
@@ -302,18 +305,21 @@ func TestValkeyBus_PublishValidation(t *testing.T) {
 		tenantID    string
 		wantLabel   string
 		wantDropped float64
+		wantErr     error
 	}{
 		{
 			name:        "empty tenant ID",
 			tenantID:    "",
 			wantLabel:   metricTenantLabelEmpty,
 			wantDropped: 1,
+			wantErr:     ErrEmptyTenantID,
 		},
 		{
 			name:        "tenant ID contains separator",
 			tenantID:    "bad:tenant",
 			wantLabel:   metricTenantLabelInvalid,
 			wantDropped: 1,
+			wantErr:     ErrInvalidTenantID,
 		},
 	}
 
@@ -328,7 +334,10 @@ func TestValkeyBus_PublishValidation(t *testing.T) {
 				// client is nil intentionally — validation paths return before any client call
 			}
 
-			b.Publish(&Message{Subject: "test", TenantID: tt.tenantID, Payload: []byte("x")})
+			err := b.Publish(&Message{Subject: "test", TenantID: tt.tenantID, Payload: []byte("x")})
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("Publish error: got %v, want %v (permanent reject must be returned, not swallowed)", err, tt.wantErr)
+			}
 
 			got := testutil.ToFloat64(m.droppedTotal.WithLabelValues(tt.wantLabel))
 			if got != tt.wantDropped {

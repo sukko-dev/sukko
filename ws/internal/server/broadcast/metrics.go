@@ -7,6 +7,7 @@ import (
 
 const (
 	metricDroppedTotal              = "ws_broadcast_bus_dropped_total"
+	metricPublishFailuresTotal      = "ws_broadcast_publish_failures_total"
 	metricSubscribeCommandsTotal    = "ws_broadcast_subscribe_commands_total"
 	metricReconcileCorrectionsTotal = "ws_broadcast_reconcile_corrections_total"
 
@@ -31,6 +32,13 @@ type busMetrics struct {
 
 	subscribeCommandsTotal    *prometheus.CounterVec
 	reconcileCorrectionsTotal prometheus.Counter
+
+	// publishFailuresTotal makes a Valkey publish outage visible on dashboards
+	// (§VI): before it existed, failed PUBLISH commands were tracked only by an
+	// atomic surfaced through GetMetrics(), invisible to Prometheus alerting.
+	// No tenant label — a bus outage is global, and the failure cause is not
+	// per-tenant (validation rejects are counted in droppedTotal instead).
+	publishFailuresTotal prometheus.Counter
 }
 
 func newBusMetrics(reg prometheus.Registerer) *busMetrics {
@@ -46,6 +54,10 @@ func newBusMetrics(reg prometheus.Registerer) *busMetrics {
 		reconcileCorrectionsTotal: promauto.With(reg).NewCounter(prometheus.CounterOpts{
 			Name: metricReconcileCorrectionsTotal,
 			Help: "Number of subscriptions re-issued by the periodic reconciliation tick (detected as missing from Valkey but expected).",
+		}),
+		publishFailuresTotal: promauto.With(reg).NewCounter(prometheus.CounterOpts{
+			Name: metricPublishFailuresTotal,
+			Help: "Broadcast messages that failed to publish to the backend (Valkey PUBLISH command failure or serialization failure).",
 		}),
 	}
 }

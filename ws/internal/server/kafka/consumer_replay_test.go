@@ -47,7 +47,7 @@ func newReplayTestConsumer(t *testing.T, cluster *kfake.Cluster) *Consumer {
 		ConsumerGroup:         "replay-test-group",
 		Topics:                []string{replayTestTopic},
 		Logger:                &logger,
-		Broadcast:             func(string, []byte, string, int32, int64) {},
+		Broadcast:             func(string, []byte, string, int32, int64) error { return nil },
 		ResourceGuard:         &mockResourceGuardFixed{allowKafka: true},
 		TenantResolver:        func(string) (string, bool) { return replayTestTenant, true },
 		ConsumerType:          ConsumerTypeKindShared,

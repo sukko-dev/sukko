@@ -69,12 +69,13 @@ func TestRebalance_CommitOnLeaveGroup(t *testing.T) {
 	// Signal channel to track broadcast delivery
 	broadcastCount := atomic.Int32{}
 	broadcastSignal := make(chan struct{}, 1)
-	broadcastFn := func(_ string, _ []byte, _ string, _ int32, _ int64) {
+	broadcastFn := func(_ string, _ []byte, _ string, _ int32, _ int64) error {
 		broadcastCount.Add(1)
 		select {
 		case broadcastSignal <- struct{}{}:
 		default:
 		}
+		return nil
 	}
 
 	// Create Consumer
