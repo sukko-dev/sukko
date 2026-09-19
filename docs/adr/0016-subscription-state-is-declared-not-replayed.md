@@ -1,6 +1,6 @@
 # ADR-0016: Subscription state is declared, not replayed
 
-**Status**: Accepted
+**Status**: Accepted (client-driven recovery superseded by ADR-0017; all other decisions stand)
 **Date**: 2026-09-17
 **Ticket**: —
 
