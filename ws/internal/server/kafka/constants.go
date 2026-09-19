@@ -59,6 +59,7 @@ const (
 // Structured log field keys used across kafka and orchestration packages.
 const (
 	LogFieldPartition = "partition" // pre-existing call sites in consumer.go and producer.go
+	LogFieldOffset    = "offset"    // record offset within a partition
 )
 
 // Log message constants for broker-deleted-topic and fetch error events.
@@ -83,6 +84,14 @@ const (
 const (
 	MetricRevokeCommitTotal           = "ws_consumer_revoke_commit_total"
 	MetricRevokeCommitDurationSeconds = "ws_consumer_revoke_commit_duration_seconds"
+)
+
+// Prometheus metric names for broadcast publish retry (the at-least-once guard:
+// a record is retried in place while the broadcast bus is down instead of being
+// committed past — see Consumer.broadcastWithRetry).
+const (
+	MetricBroadcastRetriesTotal        = "ws_consumer_broadcast_retries_total"
+	MetricBroadcastBlockedSecondsTotal = "ws_consumer_broadcast_blocked_seconds_total"
 )
 
 // Label key and values for ws_consumer_revoke_commit_total{result=...}.

@@ -130,9 +130,10 @@ func TestValkeyBus_ResubscribesAfterOutage(t *testing.T) {
 	// every in-flight and subsequent command fails with connection refused.
 	mr.Close()
 
-	// Let the reconnect path run against a dead server. The disconnect handler
-	// re-enqueues a resubscribe each cycle, so this is where the tenant gets
-	// parked and the retry timer gets disarmed.
+	// Let the reconnect path run against a dead server. Under the old
+	// replayed-events design this window was where the tenant got parked in
+	// the retry slot and the retry timer got disarmed; today it exercises the
+	// disconnect-triggered convergence passes failing against a dead backend.
 	time.Sleep(1500 * time.Millisecond)
 
 	// Discard anything buffered from before the outage — see awaitDelivery.

@@ -66,12 +66,13 @@ func TestConsumeLoop_PartialBatchNotStranded(t *testing.T) {
 
 	var broadcastCount atomic.Int32
 	firstBroadcast := make(chan struct{}, 1)
-	broadcastFn := func(_ string, _ []byte, _ string, _ int32, _ int64) {
+	broadcastFn := func(_ string, _ []byte, _ string, _ int32, _ int64) error {
 		broadcastCount.Add(1)
 		select {
 		case firstBroadcast <- struct{}{}:
 		default:
 		}
+		return nil
 	}
 
 	logger := zerolog.Nop()

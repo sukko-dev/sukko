@@ -159,6 +159,15 @@ func newTestBusMetrics(suffix string) *busMetrics {
 		reconcileCorrectionsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "test_reconcile_" + suffix,
 		}),
+		subscriptionsDesired: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "test_subs_desired_" + suffix,
+		}),
+		subscriptionsEstablished: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "test_subs_established_" + suffix,
+		}),
+		publishFailuresTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "test_publish_failures_" + suffix,
+		}),
 	}
 }
 
@@ -169,7 +178,7 @@ func TestValkeyBus_ErrSubscriberNotFound(t *testing.T) {
 	b := &valkeyBus{
 		tenantSubscribers: make(map[string][]subscriberEntry),
 		subRefCounts:      make(map[string]int),
-		subCmdCh:          make(chan subCmd, subCmdChCapacity),
+		subWakeCh:         make(chan struct{}, 1),
 		bufferSize:        8,
 		logger:            zerolog.Nop(),
 		metrics:           newTestBusMetrics("notfound"),
@@ -193,7 +202,7 @@ func TestValkeyBus_PerCallerIsolation(t *testing.T) {
 	b := &valkeyBus{
 		tenantSubscribers: make(map[string][]subscriberEntry),
 		subRefCounts:      make(map[string]int),
-		subCmdCh:          make(chan subCmd, subCmdChCapacity),
+		subWakeCh:         make(chan struct{}, 1),
 		bufferSize:        8,
 		logger:            zerolog.Nop(),
 		metrics:           newTestBusMetrics("isolation"),
@@ -231,7 +240,7 @@ func TestValkeyBus_FanOutDropIsolation(t *testing.T) {
 	b := &valkeyBus{
 		tenantSubscribers: make(map[string][]subscriberEntry),
 		subRefCounts:      make(map[string]int),
-		subCmdCh:          make(chan subCmd, subCmdChCapacity),
+		subWakeCh:         make(chan struct{}, 1),
 		bufferSize:        1, // 1-slot buffer to make it easy to fill
 		logger:            zerolog.Nop(),
 		metrics:           newTestBusMetrics("dropisolation"),
@@ -276,7 +285,7 @@ func TestValkeyBus_SubscribeValidation(t *testing.T) {
 	b := &valkeyBus{
 		tenantSubscribers: make(map[string][]subscriberEntry),
 		subRefCounts:      make(map[string]int),
-		subCmdCh:          make(chan subCmd, subCmdChCapacity),
+		subWakeCh:         make(chan struct{}, 1),
 		bufferSize:        8,
 		logger:            zerolog.Nop(),
 		metrics:           newTestBusMetrics("validation"),
@@ -302,18 +311,21 @@ func TestValkeyBus_PublishValidation(t *testing.T) {
 		tenantID    string
 		wantLabel   string
 		wantDropped float64
+		wantErr     error
 	}{
 		{
 			name:        "empty tenant ID",
 			tenantID:    "",
 			wantLabel:   metricTenantLabelEmpty,
 			wantDropped: 1,
+			wantErr:     ErrEmptyTenantID,
 		},
 		{
 			name:        "tenant ID contains separator",
 			tenantID:    "bad:tenant",
 			wantLabel:   metricTenantLabelInvalid,
 			wantDropped: 1,
+			wantErr:     ErrInvalidTenantID,
 		},
 	}
 
@@ -328,7 +340,10 @@ func TestValkeyBus_PublishValidation(t *testing.T) {
 				// client is nil intentionally — validation paths return before any client call
 			}
 
-			b.Publish(&Message{Subject: "test", TenantID: tt.tenantID, Payload: []byte("x")})
+			err := b.Publish(&Message{Subject: "test", TenantID: tt.tenantID, Payload: []byte("x")})
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("Publish error: got %v, want %v (permanent reject must be returned, not swallowed)", err, tt.wantErr)
+			}
 
 			got := testutil.ToFloat64(m.droppedTotal.WithLabelValues(tt.wantLabel))
 			if got != tt.wantDropped {

@@ -97,14 +97,19 @@ func (m *mockTenantRegistry) SnapshotReceived() bool { return true }
 type mockBroadcastBus struct {
 	messages     []*broadcast.Message
 	publishCount int64
+	publishErr   error // returned by Publish when non-nil (message not recorded)
 	mu           sync.Mutex
 }
 
-func (m *mockBroadcastBus) Publish(msg *broadcast.Message) {
+func (m *mockBroadcastBus) Publish(msg *broadcast.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.publishErr != nil {
+		return m.publishErr
+	}
 	m.messages = append(m.messages, msg)
 	m.publishCount++
+	return nil
 }
 
 func (m *mockBroadcastBus) Subscribe(_ string) (<-chan *broadcast.Message, error) {
@@ -1110,7 +1115,7 @@ func TestHandleBrokerDeletedTopic_BlocksResubscriptionIncrementalPath(t *testing
 		ConsumerGroup:         "test-block-incremental",
 		Topics:                []string{"topic-B"},
 		Logger:                &logger,
-		Broadcast:             func(_ string, _ []byte, _ string, _ int32, _ int64) {},
+		Broadcast:             func(_ string, _ []byte, _ string, _ int32, _ int64) error { return nil },
 		ResourceGuard:         &mockResourceGuard{},
 		ConsumerType:          kafka.ConsumerTypeKindShared,
 		CommitOnRevokeTimeout: 5 * time.Second,
@@ -1182,7 +1187,7 @@ func TestUpdateSharedConsumer_BlockedTopicNotAddedIncrementalPath(t *testing.T) 
 		ConsumerGroup:         "test-blocked-incremental",
 		Topics:                []string{"topic-B"},
 		Logger:                &logger,
-		Broadcast:             func(_ string, _ []byte, _ string, _ int32, _ int64) {},
+		Broadcast:             func(_ string, _ []byte, _ string, _ int32, _ int64) error { return nil },
 		ResourceGuard:         &mockResourceGuard{},
 		ConsumerType:          kafka.ConsumerTypeKindShared,
 		CommitOnRevokeTimeout: 5 * time.Second,
@@ -1234,7 +1239,7 @@ func TestUpdateSharedConsumer_ToAddGuardBlocksLateBlock(t *testing.T) {
 		ConsumerGroup:         "test-toctou-direct",
 		Topics:                []string{"topic-B"},
 		Logger:                &logger,
-		Broadcast:             func(_ string, _ []byte, _ string, _ int32, _ int64) {},
+		Broadcast:             func(_ string, _ []byte, _ string, _ int32, _ int64) error { return nil },
 		ResourceGuard:         &mockResourceGuard{},
 		ConsumerType:          kafka.ConsumerTypeKindShared,
 		CommitOnRevokeTimeout: 5 * time.Second,
@@ -1288,7 +1293,7 @@ func TestUpdateDedicatedConsumers_DeprovisionedTenantGoesToToStop(t *testing.T) 
 		ConsumerGroup:         "test-tostop-tenant1",
 		Topics:                []string{"prod.tenant1.trade"},
 		Logger:                &logger,
-		Broadcast:             func(_ string, _ []byte, _ string, _ int32, _ int64) {},
+		Broadcast:             func(_ string, _ []byte, _ string, _ int32, _ int64) error { return nil },
 		ResourceGuard:         &mockResourceGuard{},
 		ConsumerType:          kafka.ConsumerTypeKindDedicated,
 		CommitOnRevokeTimeout: 5 * time.Second,

@@ -85,6 +85,44 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check broadcast bus state (ADR-0016). DEGRADED ONLY — never an error:
+	// /health is the LIVENESS probe (Helm livenessProbe path), and a bus outage
+	// or a converging subscription set is not fixed by restarting the pod.
+	// Failing liveness here would restart pods fleet-wide during a recoverable
+	// Valkey blip; failing readiness would pull the whole fleet from the load
+	// balancer. Both amplify a blip into a total outage, so bus state is
+	// reported in the body and in metrics but never flips isHealthy. Readiness
+	// (/ready) does not consult the bus at all.
+	broadcastCheck := map[string]any{"status": "not_configured", "healthy": true}
+	if s.broadcastBus != nil {
+		bm := s.broadcastBus.GetMetrics()
+		busStatus := "healthy"
+		if !bm.PublishHealthy || !bm.SubscriptionsConverged {
+			busStatus = "degraded"
+		}
+		broadcastCheck = map[string]any{
+			"status":                    busStatus,
+			"healthy":                   bm.Healthy,
+			"publish_healthy":           bm.PublishHealthy,
+			"subscriptions_converged":   bm.SubscriptionsConverged,
+			"subscriptions_desired":     bm.SubscriptionsDesired,
+			"subscriptions_established": bm.SubscriptionsEstablished,
+		}
+		if !bm.SubscriptionsConverged {
+			warnings = append(warnings, fmt.Sprintf(
+				"Broadcast subscriptions not converged (established %d < desired %d) — some broadcasts are not being received on this pod",
+				bm.SubscriptionsEstablished, bm.SubscriptionsDesired))
+			s.logger.Warn().
+				Int("desired", bm.SubscriptionsDesired).
+				Int("established", bm.SubscriptionsEstablished).
+				Msg("Health check degraded: broadcast subscriptions not converged")
+		}
+		if !bm.PublishHealthy {
+			warnings = append(warnings, "Broadcast bus publish path unhealthy")
+			s.logger.Warn().Msg("Health check degraded: broadcast bus publish path unhealthy")
+		}
+	}
+
 	// Check CPU (against configured reject threshold)
 	cpuHealthy := true
 	if cpuPercent > s.config.CPURejectThreshold {
@@ -176,6 +214,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 				"status":  backendStatus,
 				"healthy": backendHealthy,
 			},
+			"broadcast": broadcastCheck,
 			"capacity": map[string]any{
 				"current":    currentConns,
 				"max":        maxConns,

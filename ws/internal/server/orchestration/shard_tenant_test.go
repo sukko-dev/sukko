@@ -61,7 +61,7 @@ func (m *tenantMockBus) SubscribeAll() (<-chan *broadcast.Message, error) {
 	return make(chan *broadcast.Message, 8), nil
 }
 func (m *tenantMockBus) UnsubscribeAll(_ <-chan *broadcast.Message) error { return nil }
-func (m *tenantMockBus) Publish(_ *broadcast.Message)                     {}
+func (m *tenantMockBus) Publish(_ *broadcast.Message) error               { return nil }
 func (m *tenantMockBus) Run()                                             {}
 func (m *tenantMockBus) Shutdown()                                        {}
 func (m *tenantMockBus) ShutdownWithContext(_ context.Context)            {}

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 
 	"github.com/sukko-dev/sukko/internal/server/backend"
@@ -18,14 +19,19 @@ var _ backend.MessageBackend = (*DirectBackend)(nil)
 
 // mockBus implements broadcast.Bus and records Publish calls for assertions.
 type mockBus struct {
-	mu       sync.Mutex
-	messages []*broadcast.Message
+	mu         sync.Mutex
+	messages   []*broadcast.Message
+	publishErr error // returned by Publish when non-nil (message not recorded)
 }
 
-func (m *mockBus) Publish(msg *broadcast.Message) {
+func (m *mockBus) Publish(msg *broadcast.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.publishErr != nil {
+		return m.publishErr
+	}
 	m.messages = append(m.messages, msg)
+	return nil
 }
 
 func (m *mockBus) Subscribe(_ string) (<-chan *broadcast.Message, error) {
@@ -334,5 +340,66 @@ func TestPublish_MidsAreUnique(t *testing.T) {
 	}
 	if a == b {
 		t.Errorf("two publishes produced the same mid %q", a)
+	}
+}
+
+// backendPublishErrorsValue reads the current value of
+// ws_backend_publish_errors_total{backend="direct"} from the default gatherer
+// (the metric lives behind unexported package globals in server/metrics, so the
+// public Gather API is the only sanctioned way to observe it). Returns 0 when
+// the series does not exist yet.
+func backendPublishErrorsValue(t *testing.T) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != "ws_backend_publish_errors_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "backend" && lp.GetValue() == "direct" {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// TestPublish_BusFailureReturnsError pins the fail-fast contract on the
+// client-publish path: when the broadcast bus rejects the message (e.g. Valkey
+// down), Publish MUST return an error wrapping backend.ErrPublishFailed and no
+// mid — acknowledging a message that never reached the bus would be silent
+// data loss toward the publishing client. The failure must also be recorded on
+// ws_backend_publish_errors_total{backend="direct"} (backends own their publish
+// metrics — same contract as kafkabackend).
+func TestPublish_BusFailureReturnsError(t *testing.T) {
+	t.Parallel()
+
+	bus := &mockBus{publishErr: broadcast.ErrPublishUnavailable}
+	db, err := New(bus, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	errorsBefore := backendPublishErrorsValue(t)
+	mid, err := db.Publish(context.Background(), 1, "test-tenant", "BTC.trade", []byte(`{}`))
+	if err == nil {
+		t.Fatal("expected error when the bus rejects the publish, got nil")
+	}
+	if !errors.Is(err, backend.ErrPublishFailed) {
+		t.Errorf("error = %v, want wrapping %v", err, backend.ErrPublishFailed)
+	}
+	if !errors.Is(err, broadcast.ErrPublishUnavailable) {
+		t.Errorf("error = %v, want wrapping the bus cause %v", err, broadcast.ErrPublishUnavailable)
+	}
+	if mid != "" {
+		t.Errorf("mid = %q, want empty (no ack identity for an undelivered message)", mid)
+	}
+	if got := backendPublishErrorsValue(t) - errorsBefore; got != 1 {
+		t.Errorf("ws_backend_publish_errors_total{backend=%q} delta: got %.0f, want 1", "direct", got)
 	}
 }

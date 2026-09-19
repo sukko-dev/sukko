@@ -634,14 +634,27 @@ func (p *MultiTenantConsumerPool) resolveTenant(topic string) (string, bool) {
 // routeMessage is called by consumers for each message.
 // It publishes the message to the BroadcastBus for distribution to WebSocket clients.
 // topicName, partition, offset are used by the history writer to populate stream metadata.
-func (p *MultiTenantConsumerPool) routeMessage(subject string, message []byte, topicName string, partition int32, offset int64) {
-	p.messagesRouted.Add(1)
-
-	// Report to Prometheus via callback
-	if p.metrics != nil {
-		p.metrics.OnMessageRouted()
-	}
-
+//
+// Return contract (BroadcastFunc): a non-nil error is returned ONLY for the
+// transient backend-down class (broadcast.ErrPublishUnavailable) — the consumer
+// then retries the same record before marking its offset, which is what keeps
+// at-least-once delivery intact across a Valkey outage. Permanent publish
+// rejects are logged and counted here and return nil so an undeliverable
+// record cannot wedge the partition. Two permanent classes exist: for
+// serialization failures and separator-containing tenant IDs a retry truly
+// cannot succeed; for a registry-race empty tenant a retry WOULD succeed once
+// the registry snapshot catches up (seconds), so dropping it is a DEFERRED
+// DECISION with a tiny window, not an impossibility — consistent with how the
+// consumer currently handles the same race one layer down (unknown-topic
+// no-mark in prepareMessage/processRecord), and the owner may revisit both
+// together.
+//
+// The consumer re-enters this function on EVERY retry of the same record, so
+// all per-message accounting (messagesRouted, the Prometheus routing callback,
+// tenant-visible analytics, the channel→topic map) fires only AFTER a
+// successful publish — otherwise a stuck head record would count one phantom
+// message per attempt.
+func (p *MultiTenantConsumerPool) routeMessage(subject string, message []byte, topicName string, partition int32, offset int64) error {
 	// Tenant resolved from the registry map (#179 P3) — routeMessage runs only after extractChannel
 	// accepted the record, so the topic is normally present; a miss (rare rebalance race) yields "".
 	tenantID, ok := p.resolveTenant(topicName)
@@ -655,26 +668,42 @@ func (p *MultiTenantConsumerPool) routeMessage(subject string, message []byte, t
 	// is what makes mid a cross-copy dedup/correlation key (ADR-0008).
 	mid := kafkashared.MessageID(topicName, partition, offset)
 
-	// Record analytics message throughput. channelPrefix = first segment before ".".
-	if p.config.AnalyticsCollector != nil && tenantID != "" {
-		// provider = platform label: "web"/"android"/"ios", not push library name
-		p.config.AnalyticsCollector.IncrementMessages(tenantID, bareChannel, 1, 0, 0, 0)
-	}
-
-	func() {
-		p.topicMu.Lock()
-		defer p.topicMu.Unlock()
-		p.channelTopics[subject] = topicName
-	}()
-
-	p.broadcastBus.Publish(&broadcast.Message{
+	if err := p.broadcastBus.Publish(&broadcast.Message{
 		Subject:  subject,
 		Payload:  message,
 		TenantID: tenantID,
 		Pos:      pos,
 		Mid:      mid,
 		Channel:  bareChannel,
-	})
+	}); err != nil {
+		if errors.Is(err, broadcast.ErrPublishUnavailable) {
+			// Transient: the bus is down. Propagate so the consumer retries the
+			// same record instead of committing past an undelivered message.
+			// No accounting here — the retry re-enters this function.
+			return fmt.Errorf("route message for topic %q: %w", topicName, err)
+		}
+		// Permanent reject (already logged and metered inside the bus). §III
+		// deliberate-ignore: counted as dropped and consumption moves on. See
+		// the function comment for the two permanent classes — the
+		// registry-race case is a deferred decision, not an impossibility.
+		p.messagesDropped.Add(1)
+		return nil
+	}
+
+	// --- Delivered: per-message accounting (never per attempt) ---
+	p.messagesRouted.Add(1)
+	if p.metrics != nil {
+		p.metrics.OnMessageRouted()
+	}
+	// Record analytics message throughput (tenant-visible, feeds usage views).
+	if p.config.AnalyticsCollector != nil && tenantID != "" {
+		p.config.AnalyticsCollector.IncrementMessages(tenantID, bareChannel, 1, 0, 0, 0)
+	}
+	func() {
+		p.topicMu.Lock()
+		defer p.topicMu.Unlock()
+		p.channelTopics[subject] = topicName
+	}()
 
 	// Log periodic metrics (sample every Nth message to avoid log spam)
 	const logRoutingMetricsInterval = 1000
@@ -684,6 +713,8 @@ func (p *MultiTenantConsumerPool) routeMessage(subject string, message []byte, t
 			Uint64("dropped", p.messagesDropped.Load()).
 			Msg("Multi-tenant pool routing metrics")
 	}
+
+	return nil
 }
 
 // handleBrokerDeletedTopic removes a broker-deleted topic from the pool and blocks re-subscription until deprovisioned.

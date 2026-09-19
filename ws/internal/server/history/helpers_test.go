@@ -109,7 +109,8 @@ type mockBus struct {
 	mu                  sync.Mutex
 	tenantSubs          map[string]chan *broadcast.Message // per-tenant subscriber channels
 	allSubs             []chan *broadcast.Message          // SubscribeAll subscriber channels
-	healthy             bool
+	healthy             bool                               // publish-path health (mirrors valkeyBus.publishHealthy)
+	converged           bool                               // subscription convergence (mirrors desired==confirmed, ADR-0016)
 	publishLog          []*broadcast.Message
 	subscribeAllCount   int // number of SubscribeAll calls
 	unsubscribeAllCalls int // number of UnsubscribeAll calls
@@ -119,6 +120,7 @@ func newMockBus() *mockBus {
 	return &mockBus{
 		tenantSubs: make(map[string]chan *broadcast.Message),
 		healthy:    true,
+		converged:  true,
 	}
 }
 
@@ -172,7 +174,7 @@ func (b *mockBus) getUnsubscribeAllCount() int {
 	return b.unsubscribeAllCalls
 }
 
-func (b *mockBus) Publish(msg *broadcast.Message) {
+func (b *mockBus) Publish(msg *broadcast.Message) error {
 	b.mu.Lock()
 	b.publishLog = append(b.publishLog, msg)
 	if sub, ok := b.tenantSubs[msg.TenantID]; ok {
@@ -188,17 +190,39 @@ func (b *mockBus) Publish(msg *broadcast.Message) {
 		}
 	}
 	b.mu.Unlock()
+	return nil
 }
 
 func (b *mockBus) Run()                                  {}
 func (b *mockBus) Shutdown()                             {}
 func (b *mockBus) ShutdownWithContext(_ context.Context) {}
-func (b *mockBus) IsHealthy() bool                       { b.mu.Lock(); defer b.mu.Unlock(); return b.healthy }
-func (b *mockBus) GetMetrics() broadcast.Metrics         { return broadcast.Metrics{} }
+
+// IsHealthy mirrors the real bus (ADR-0016): publish health AND convergence.
+func (b *mockBus) IsHealthy() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.healthy && b.converged
+}
+
+func (b *mockBus) GetMetrics() broadcast.Metrics {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return broadcast.Metrics{
+		Healthy:                b.healthy && b.converged,
+		PublishHealthy:         b.healthy,
+		SubscriptionsConverged: b.converged,
+	}
+}
 
 func (b *mockBus) setHealthy(v bool) {
 	b.mu.Lock()
 	b.healthy = v
+	b.mu.Unlock()
+}
+
+func (b *mockBus) setConverged(v bool) {
+	b.mu.Lock()
+	b.converged = v
 	b.mu.Unlock()
 }
 

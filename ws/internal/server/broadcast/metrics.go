@@ -7,8 +7,11 @@ import (
 
 const (
 	metricDroppedTotal              = "ws_broadcast_bus_dropped_total"
+	metricPublishFailuresTotal      = "ws_broadcast_publish_failures_total"
 	metricSubscribeCommandsTotal    = "ws_broadcast_subscribe_commands_total"
 	metricReconcileCorrectionsTotal = "ws_broadcast_reconcile_corrections_total"
+	metricSubscriptionsDesired      = "ws_broadcast_subscriptions_desired"
+	metricSubscriptionsEstablished  = "ws_broadcast_subscriptions_established"
 
 	metricTenantLabelAll     = "_all"
 	metricTenantLabelEmpty   = ""
@@ -16,7 +19,6 @@ const (
 
 	metricResultSuccess = "success"
 	metricResultRetry   = "retry"
-	metricResultDropped = "dropped"
 )
 
 // busMetrics holds all Prometheus instruments for valkeyBus.
@@ -31,6 +33,20 @@ type busMetrics struct {
 
 	subscribeCommandsTotal    *prometheus.CounterVec
 	reconcileCorrectionsTotal prometheus.Counter
+
+	// subscriptionsDesired / subscriptionsEstablished make the silent-dark
+	// failure mode visible (§VI, ADR-0016): the failure this pair exposes is
+	// publishes succeeding while established sits below desired. One unit per
+	// tenant SUBSCRIBE plus one for the all-tenant PSUBSCRIBE when active.
+	subscriptionsDesired     prometheus.Gauge
+	subscriptionsEstablished prometheus.Gauge
+
+	// publishFailuresTotal makes a Valkey publish outage visible on dashboards
+	// (§VI): before it existed, failed PUBLISH commands were tracked only by an
+	// atomic surfaced through GetMetrics(), invisible to Prometheus alerting.
+	// No tenant label — a bus outage is global, and the failure cause is not
+	// per-tenant (validation rejects are counted in droppedTotal instead).
+	publishFailuresTotal prometheus.Counter
 }
 
 func newBusMetrics(reg prometheus.Registerer) *busMetrics {
@@ -41,11 +57,28 @@ func newBusMetrics(reg prometheus.Registerer) *busMetrics {
 		}, []string{"tenant_id"}),
 		subscribeCommandsTotal: promauto.With(reg).NewCounterVec(prometheus.CounterOpts{
 			Name: metricSubscribeCommandsTotal,
-			Help: "SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE commands issued by the subscription management goroutine, by result (success, retry, dropped).",
+			// The retry label counts individual command failures inside a
+			// convergence pass; the failed command is retried by the next pass
+			// (capped exponential backoff). Historically this label counted
+			// "failed and became the sole retry candidate" — the single retry
+			// slot is gone (ADR-0016), so every failure now leads to a retry.
+			Help: "SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE commands issued by the subscription convergence loop, by result (success, retry).",
 		}, []string{"result"}),
 		reconcileCorrectionsTotal: promauto.With(reg).NewCounter(prometheus.CounterOpts{
 			Name: metricReconcileCorrectionsTotal,
-			Help: "Number of subscriptions re-issued by the periodic reconciliation tick (detected as missing from Valkey but expected).",
+			Help: "Subscription commands actually issued by the periodic reconciliation backstop tick (divergence the event-driven convergence path had not already fixed).",
+		}),
+		subscriptionsDesired: promauto.With(reg).NewGauge(prometheus.GaugeOpts{
+			Name: metricSubscriptionsDesired,
+			Help: "Valkey subscriptions this pod wants: active tenant channels plus the all-tenant pattern subscription when in use.",
+		}),
+		subscriptionsEstablished: promauto.With(reg).NewGauge(prometheus.GaugeOpts{
+			Name: metricSubscriptionsEstablished,
+			Help: "Valkey subscriptions confirmed on the current pub/sub connection. Established below desired means this pod is not receiving some broadcasts even though publishes succeed.",
+		}),
+		publishFailuresTotal: promauto.With(reg).NewCounter(prometheus.CounterOpts{
+			Name: metricPublishFailuresTotal,
+			Help: "Broadcast messages that failed to publish to the backend (Valkey PUBLISH command failure or serialization failure).",
 		}),
 	}
 }
