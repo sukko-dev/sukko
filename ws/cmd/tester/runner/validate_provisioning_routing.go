@@ -16,9 +16,10 @@ import (
 	"github.com/sukko-dev/sukko/internal/shared/routing"
 )
 
-// maxTopicsPerRule is the default MAX_TOPICS_PER_RULE cap (shared/platform/provisioning_config.go).
-// The `routing rule validation` too-many-topics probe sends maxTopicsPerRule+1 identical
-// suffixes so only the COUNT trips (all "default", already provisioned).
+// maxTopicsPerRule is the default MAX_TOPICS_PER_RULE cap on total destinations
+// per rule — 1 delivery + N egress (shared/platform/provisioning_config.go). The
+// `routing rule validation` too-many-topics probe sends 1 delivery + maxTopicsPerRule
+// distinct egress suffixes so only the COUNT trips.
 const maxTopicsPerRule = 10
 
 // routingRulesMaxPageLimit mirrors the handler's per-page cap for routing rules
@@ -55,8 +56,15 @@ func provRoutingCheck(name string, fn func() error) metrics.CheckResult {
 }
 
 // routingRule builds a single routing-rule map for the raw client methods.
-func routingRule(pattern string, topics []string, priority int) map[string]any {
-	return map[string]any{"pattern": pattern, "topics": topics, "priority": priority}
+// ingressTopic is the rule's single consumed topic (ADR-0018); probes needing
+// egress topics use routingRuleWithEgress.
+func routingRule(pattern, ingressTopic string, priority int) map[string]any {
+	return map[string]any{"pattern": pattern, "ingress_topic": ingressTopic, "priority": priority}
+}
+
+// routingRuleWithEgress builds a routing-rule map carrying egress topics.
+func routingRuleWithEgress(pattern, ingressTopic string, egress []string, priority int) map[string]any {
+	return map[string]any{"pattern": pattern, "ingress_topic": ingressTopic, "egress_topics": egress, "priority": priority}
 }
 
 // validateProvisioningRouting runs the e2e-unique routing-rules coverage checks:
@@ -96,13 +104,13 @@ func validateProvisioningRouting(
 	checks = append(checks, provRoutingCheck("routing topic gate", func() error {
 		// Allowed case first (proves the write path works; differs only in the topic suffix).
 		okStatus, okErr := provClient.AddRoutingRuleRaw(ctx, tenantA,
-			routingRule("topic-gate-ok.**", []string{routing.DefaultTopicSuffix}, 10))
+			routingRule("topic-gate-ok.**", routing.DefaultTopicSuffix, 10))
 		if err := expectStatus("topic gate allowed", okStatus, okErr, http.StatusCreated); err != nil {
 			return err
 		}
 		// Negative: same shape, unprovisioned suffix.
 		badStatus, badErr := provClient.AddRoutingRuleRaw(ctx, tenantA,
-			routingRule("topic-gate-bad.**", []string{unprovisionedTopicSuffix}, 11))
+			routingRule("topic-gate-bad.**", unprovisionedTopicSuffix, 11))
 		return expectReject("topic gate rejected", badStatus, badErr, http.StatusBadRequest, errCodeTopicNotProvisioned)
 	}))
 	checks = appendReset(ctx, checks, provClient, tenantA, logger)
@@ -111,12 +119,12 @@ func validateProvisioningRouting(
 	// Allowed: distinct pattern → 201. Negative: same pattern again → 409 DUPLICATE_PATTERN.
 	checks = append(checks, provRoutingCheck("routing post duplicate pattern", func() error {
 		okStatus, okErr := provClient.AddRoutingRuleRaw(ctx, tenantA,
-			routingRule("dup-pattern.**", []string{routing.DefaultTopicSuffix}, 20))
+			routingRule("dup-pattern.**", routing.DefaultTopicSuffix, 20))
 		if err := expectStatus("dup-pattern allowed", okStatus, okErr, http.StatusCreated); err != nil {
 			return err
 		}
 		badStatus, badErr := provClient.AddRoutingRuleRaw(ctx, tenantA,
-			routingRule("dup-pattern.**", []string{routing.DefaultTopicSuffix}, 21))
+			routingRule("dup-pattern.**", routing.DefaultTopicSuffix, 21))
 		return expectReject("dup-pattern rejected", badStatus, badErr, http.StatusConflict, errCodeRoutingRuleDuplicatePattern)
 	}))
 	checks = appendReset(ctx, checks, provClient, tenantA, logger)
@@ -125,12 +133,12 @@ func validateProvisioningRouting(
 	// Allowed: distinct priority → 201. Negative: same priority, different pattern → 409.
 	checks = append(checks, provRoutingCheck("routing post duplicate priority", func() error {
 		okStatus, okErr := provClient.AddRoutingRuleRaw(ctx, tenantA,
-			routingRule("dup-priority-a.**", []string{routing.DefaultTopicSuffix}, 30))
+			routingRule("dup-priority-a.**", routing.DefaultTopicSuffix, 30))
 		if err := expectStatus("dup-priority allowed", okStatus, okErr, http.StatusCreated); err != nil {
 			return err
 		}
 		badStatus, badErr := provClient.AddRoutingRuleRaw(ctx, tenantA,
-			routingRule("dup-priority-b.**", []string{routing.DefaultTopicSuffix}, 30))
+			routingRule("dup-priority-b.**", routing.DefaultTopicSuffix, 30))
 		return expectReject("dup-priority rejected", badStatus, badErr, http.StatusConflict, errCodeRoutingRuleDuplicatePriority)
 	}))
 	checks = appendReset(ctx, checks, provClient, tenantA, logger)
@@ -146,15 +154,15 @@ func validateProvisioningRouting(
 	// Allowed: a valid two-rule PUT with distinct patterns → 200.
 	checks = append(checks, provRoutingCheck("routing put duplicate pattern", func() error {
 		okStatus, okErr := provClient.SetRoutingRulesRaw(ctx, tenantA, []map[string]any{
-			routingRule("put-ok-a.**", []string{routing.DefaultTopicSuffix}, 40),
-			routingRule("put-ok-b.**", []string{routing.DefaultTopicSuffix}, 41),
+			routingRule("put-ok-a.**", routing.DefaultTopicSuffix, 40),
+			routingRule("put-ok-b.**", routing.DefaultTopicSuffix, 41),
 		})
 		if err := expectStatus("put-dup allowed", okStatus, okErr, http.StatusOK); err != nil {
 			return err
 		}
 		badStatus, badErr := provClient.SetRoutingRulesRaw(ctx, tenantA, []map[string]any{
-			routingRule("put-dup.**", []string{routing.DefaultTopicSuffix}, 42),
-			routingRule("put-dup.**", []string{routing.DefaultTopicSuffix}, 43),
+			routingRule("put-dup.**", routing.DefaultTopicSuffix, 42),
+			routingRule("put-dup.**", routing.DefaultTopicSuffix, 43),
 		})
 		return expectReject("put-dup rejected", badStatus, badErr, http.StatusBadRequest, errCodeRoutingRuleValidation)
 	}))
@@ -164,25 +172,28 @@ func validateProvisioningRouting(
 	checks = append(checks, provRoutingCheck("routing rule validation", func() error {
 		// Allowed: a valid single-rule PUT → 200 (differs only in being well-formed).
 		okStatus, okErr := provClient.SetRoutingRulesRaw(ctx, tenantA, []map[string]any{
-			routingRule("valid.**", []string{routing.DefaultTopicSuffix}, 50),
+			routingRule("valid.**", routing.DefaultTopicSuffix, 50),
 		})
 		if err := expectStatus("validation allowed", okStatus, okErr, http.StatusOK); err != nil {
 			return err
 		}
-		// Empty topics → 400 ROUTING_RULE_VALIDATION_ERROR.
+		// Missing ingress topic → 400 ROUTING_RULE_VALIDATION_ERROR.
 		emptyStatus, emptyErr := provClient.SetRoutingRulesRaw(ctx, tenantA, []map[string]any{
-			routingRule("empty-topics.**", []string{}, 51),
+			routingRule("empty-topics.**", "", 51),
 		})
-		if err := expectReject("empty topics", emptyStatus, emptyErr, http.StatusBadRequest, errCodeRoutingRuleValidation); err != nil {
+		if err := expectReject("missing ingress topic", emptyStatus, emptyErr, http.StatusBadRequest, errCodeRoutingRuleValidation); err != nil {
 			return err
 		}
-		// Too many topics (> MAX_TOPICS_PER_RULE) → 400 ROUTING_RULE_VALIDATION_ERROR.
-		manyTopics := make([]string, maxTopicsPerRule+1)
-		for i := range manyTopics {
-			manyTopics[i] = routing.DefaultTopicSuffix // all provisioned — only the COUNT trips
+		// Too many destinations (1 delivery + egress > MAX_TOPICS_PER_RULE) →
+		// 400 ROUTING_RULE_VALIDATION_ERROR. Distinct unprovisioned suffixes: the
+		// per-rule COUNT check trips at the handler boundary before any
+		// duplicate/reserved/topic-existence check can.
+		manyEgress := make([]string, maxTopicsPerRule)
+		for i := range manyEgress {
+			manyEgress[i] = fmt.Sprintf("count-probe-%d", i)
 		}
 		manyStatus, manyErr := provClient.SetRoutingRulesRaw(ctx, tenantA, []map[string]any{
-			routingRule("many-topics.**", manyTopics, 52),
+			routingRuleWithEgress("many-topics.**", routing.DefaultTopicSuffix, manyEgress, 52),
 		})
 		if err := expectReject("too many topics", manyStatus, manyErr, http.StatusBadRequest, errCodeRoutingRuleValidation); err != nil {
 			return err
@@ -191,7 +202,7 @@ func validateProvisioningRouting(
 		// This asserts current server behavior; the server is stricter than the OpenAPI pattern regex
 		// (divergence — see follow-up #203).
 		badStatus, badErr := provClient.SetRoutingRulesRaw(ctx, tenantA, []map[string]any{
-			routingRule("INVALID_SEGMENT", []string{routing.DefaultTopicSuffix}, 53),
+			routingRule("INVALID_SEGMENT", routing.DefaultTopicSuffix, 53),
 		})
 		return expectReject("invalid pattern", badStatus, badErr, http.StatusBadRequest, errCodeRoutingRuleValidation)
 	}))
@@ -221,12 +232,12 @@ func validateProvisioningRouting(
 		// is inside the role gate (router.go:236-239), so a user token must be rejected.
 		checks = append(checks, provRoutingCheck("routing role gate write", func() error {
 			okStatus, okErr := provClient.AddRoutingRuleRaw(ctx, tenantA,
-				routingRule("role-gate.**", []string{routing.DefaultTopicSuffix}, 60))
+				routingRule("role-gate.**", routing.DefaultTopicSuffix, 60))
 			if err := expectStatus("role gate write (admin)", okStatus, okErr, http.StatusCreated); err != nil {
 				return err
 			}
 			badStatus, badErr := provClient.AddRoutingRuleRawWithToken(ctx, tenantA, userTokenA,
-				routingRule("role-gate-2.**", []string{routing.DefaultTopicSuffix}, 61))
+				routingRule("role-gate-2.**", routing.DefaultTopicSuffix, 61))
 			return expectReject("role gate write (user)", badStatus, badErr, http.StatusForbidden, errCodeInsufficientRole)
 		}))
 		checks = appendReset(ctx, checks, provClient, tenantA, logger)
@@ -308,9 +319,9 @@ func checkCrossTenantMismatch(
 // checkPagination verifies pagination honoring and the max-page-limit cap echo.
 func checkPagination(ctx context.Context, provClient *auth.ProvisioningClient, tenantID string) []metrics.CheckResult {
 	seed := []map[string]any{
-		routingRule("page-a.**", []string{routing.DefaultTopicSuffix}, 70),
-		routingRule("page-b.**", []string{routing.DefaultTopicSuffix}, 71),
-		routingRule("page-c.**", []string{routing.DefaultTopicSuffix}, 72),
+		routingRule("page-a.**", routing.DefaultTopicSuffix, 70),
+		routingRule("page-b.**", routing.DefaultTopicSuffix, 71),
+		routingRule("page-c.**", routing.DefaultTopicSuffix, 72),
 	}
 	if err := provClient.SetRoutingRules(ctx, tenantID, seed); err != nil {
 		fail := metrics.CheckResult{Name: "routing get pagination", Status: metrics.CheckStatusFail, Error: fmt.Sprintf("seed rules: %v", err)}
@@ -359,8 +370,8 @@ func checkPagination(ctx context.Context, provClient *auth.ProvisioningClient, t
 // checkPutEcho verifies the PUT response body echoes the request rules (items + total).
 func checkPutEcho(ctx context.Context, provClient *auth.ProvisioningClient, tenantID string) error {
 	rules := []map[string]any{
-		routingRule("echo-a.**", []string{routing.DefaultTopicSuffix}, 80),
-		routingRule("echo-b.**", []string{routing.DefaultTopicSuffix}, 81),
+		routingRule("echo-a.**", routing.DefaultTopicSuffix, 80),
+		routingRule("echo-b.**", routing.DefaultTopicSuffix, 81),
 	}
 	// Use the admin PUT and read the echo body via a follow-up GET (read-back via GET).
 	if status, err := provClient.SetRoutingRulesRaw(ctx, tenantID, rules); err != nil || status != http.StatusOK {
@@ -391,7 +402,7 @@ func checkPutEcho(ctx context.Context, provClient *auth.ProvisioningClient, tena
 // to "**" (NormalizePattern is applied on write; the stored/GET form is canonical).
 func checkStarNormalization(ctx context.Context, provClient *auth.ProvisioningClient, tenantID string) error {
 	rules := []map[string]any{
-		routingRule("*", []string{routing.DefaultTopicSuffix}, 90),
+		routingRule("*", routing.DefaultTopicSuffix, 90),
 	}
 	if status, err := provClient.SetRoutingRulesRaw(ctx, tenantID, rules); err != nil || status != http.StatusOK {
 		return fmt.Errorf("star normalization: expected 200, got status=%d err=%w", status, err)
@@ -434,7 +445,7 @@ func parseRoutingPage(body []byte) routingPage {
 // the raw client methods.
 func testRoutingRulesRaw() []map[string]any {
 	return []map[string]any{
-		routingRule("**", []string{routing.DefaultTopicSuffix}, routing.DefaultCatchAllPriority),
+		routingRule("**", routing.DefaultTopicSuffix, routing.DefaultCatchAllPriority),
 	}
 }
 

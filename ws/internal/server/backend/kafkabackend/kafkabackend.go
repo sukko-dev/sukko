@@ -27,6 +27,7 @@ import (
 	kafkashared "github.com/sukko-dev/sukko/internal/shared/kafka"
 	"github.com/sukko-dev/sukko/internal/shared/logging"
 	"github.com/sukko-dev/sukko/internal/shared/provapi"
+	"github.com/sukko-dev/sukko/internal/shared/routing"
 )
 
 // backendName identifies this backend in metrics labels and logging.
@@ -41,6 +42,7 @@ type KafkaBackend struct {
 	adminClient   *kadm.Client
 	kgoClient     *kgo.Client // underlying kgo client for admin (closed separately)
 	topicRegistry *provapi.StreamTopicRegistry
+	rulesProvider kafka.RoutingRulesSource // rule-based channel→ingress-topic resolution (ChannelTopic, ADR-0018)
 	logger        zerolog.Logger
 	healthy       atomic.Bool
 	wg            sync.WaitGroup // tracks in-flight topic update goroutines
@@ -207,6 +209,7 @@ func New(cfg Config) (*KafkaBackend, error) {
 	defaultReplicationFactor := max(cfg.DefaultReplicationFactor, 1)
 
 	kb := &KafkaBackend{
+		rulesProvider:            cfg.RulesProvider,
 		logger:                   logger,
 		defaultPartitions:        defaultPartitions,
 		defaultReplicationFactor: defaultReplicationFactor,
@@ -528,6 +531,10 @@ func (kb *KafkaBackend) ensureTopicsExist() {
 	for _, dt := range dedicatedTenants {
 		allTopics = append(allTopics, dt.Topics...)
 	}
+	// Egress topics: created on the broker, never consumed (ADR-0018). The DLQ
+	// precedent — written to, never subscribed. They must never join a consumer's
+	// topic list; they are appended here for CREATION only.
+	allTopics = append(allTopics, kb.topicRegistry.CreateOnlyTopics()...)
 
 	if len(allTopics) == 0 {
 		return
@@ -581,13 +588,37 @@ func SplitBrokers(brokers string) []string {
 	return result
 }
 
-// ChannelTopic returns the Kafka topic for the given channel by delegating to the consumer pool.
-// Returns ok=false if no consumer has been registered for the channel.
+// ChannelTopic resolves a channel to its INGRESS topic from the tenant's routing
+// rules — deterministically, on every pod, with no dependence on observed traffic
+// (ADR-0018; the previous last-writer-wins traffic cache could not resolve any
+// channel on a pod that had routed nothing, failing replay/history there).
+//
+// Resolution: the first matching rule's ingress topic; a tenant with no rules or
+// no matching rule resolves to its default topic — where rule-less (Community
+// ingest) and externally-produced records live. Returns ok=false only when the
+// mapping is UNKNOWN: consumer disabled, no rules source, or the rules snapshot
+// not yet synced (degraded — callers report not-available rather than guessing).
 func (kb *KafkaBackend) ChannelTopic(channel string) (string, bool) {
-	if kb.pool == nil {
+	if kb.pool == nil || kb.rulesProvider == nil || !kb.rulesProvider.SnapshotReceived() {
 		return "", false
 	}
-	return kb.pool.ChannelTopic(channel)
+	tenant, err := kafka.ExtractTenant(channel)
+	if err != nil {
+		return "", false
+	}
+	if snap, ok := kb.rulesProvider.GetRoutingSnapshot(tenant); ok {
+		for _, rule := range snap.Rules {
+			matched, matchErr := routing.MatchRoutingPattern(rule.Pattern, channel)
+			if matchErr != nil || !matched {
+				continue
+			}
+			if rule.IngressTopic == "" {
+				continue // defense in depth (§II): validated at provisioning time
+			}
+			return kafkashared.BuildTopicName(kb.namespace, tenant, rule.IngressTopic), true
+		}
+	}
+	return kafkashared.BuildTopicName(kb.namespace, tenant, routing.DefaultTopicSuffix), true
 }
 
 // Compile-time interface check.

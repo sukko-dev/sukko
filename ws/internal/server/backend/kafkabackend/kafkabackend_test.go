@@ -12,8 +12,10 @@ import (
 
 	"github.com/sukko-dev/sukko/internal/server/backend"
 	"github.com/sukko-dev/sukko/internal/server/kafka"
+	"github.com/sukko-dev/sukko/internal/server/orchestration"
 	kafkashared "github.com/sukko-dev/sukko/internal/shared/kafka"
 	"github.com/sukko-dev/sukko/internal/shared/provapi"
+	"github.com/sukko-dev/sukko/internal/shared/types"
 )
 
 // Compile-time interface check.
@@ -325,5 +327,102 @@ func TestConvertReplayMessages_MidRecompute(t *testing.T) {
 		if m.Pos != in[i].Pos || m.Subject != in[i].Subject {
 			t.Errorf("[%d] Pos/Subject not passed through", i)
 		}
+	}
+}
+
+// =============================================================================
+// ChannelTopic — deterministic rule-based resolution (ADR-0018)
+// =============================================================================
+
+// routingStub is a configurable RoutingRulesSource for ChannelTopic tests.
+type routingStub struct {
+	snap   provapi.TenantRoutingSnapshot
+	found  bool
+	synced bool
+}
+
+func (s *routingStub) GetRoutingSnapshot(string) (provapi.TenantRoutingSnapshot, bool) {
+	return s.snap, s.found
+}
+func (s *routingStub) SnapshotReceived() bool { return s.synced }
+
+// TestChannelTopic_ResolvesFromRules pins the ADR-0018 replacement of the
+// observed-traffic channel→topic cache: resolution comes from the tenant's
+// routing rules DETERMINISTICALLY — critically, on a pod that has routed no
+// traffic at all (the two-replica deployment where one replica owned all
+// partitions failed 242 of 480 replay requests under the old cache).
+func TestChannelTopic_ResolvesFromRules(t *testing.T) {
+	t.Parallel()
+
+	pool := &orchestration.MultiTenantConsumerPool{} // consumer present; has routed NOTHING
+
+	tests := []struct {
+		name    string
+		rules   *routingStub
+		channel string
+		want    string
+		wantOK  bool
+	}{
+		{
+			name: "first matching rule's ingress topic wins",
+			rules: &routingStub{synced: true, found: true, snap: provapi.TenantRoutingSnapshot{Rules: []types.RoutingRule{
+				{Pattern: "acme.**.trade", IngressTopic: "trades", EgressTopics: []string{"audit"}, Priority: 1},
+				{Pattern: "acme.**", IngressTopic: "other", Priority: 2},
+			}}},
+			channel: "acme.BTC.trade",
+			want:    "prod.acme.trades",
+			wantOK:  true,
+		},
+		{
+			name: "no matching rule resolves to the tenant default topic",
+			rules: &routingStub{synced: true, found: true, snap: provapi.TenantRoutingSnapshot{Rules: []types.RoutingRule{
+				{Pattern: "acme.**.orders", IngressTopic: "orders", Priority: 1},
+			}}},
+			channel: "acme.BTC.trade",
+			want:    "prod.acme.default",
+			wantOK:  true,
+		},
+		{
+			name:    "rule-less tenant resolves to the tenant default topic (Community ingest)",
+			rules:   &routingStub{synced: true, found: false},
+			channel: "acme.BTC.trade",
+			want:    "prod.acme.default",
+			wantOK:  true,
+		},
+		{
+			name:    "rules snapshot not synced: mapping unknown, not guessed",
+			rules:   &routingStub{synced: false},
+			channel: "acme.BTC.trade",
+			wantOK:  false,
+		},
+		{
+			name:    "malformed channel (no tenant prefix) does not resolve",
+			rules:   &routingStub{synced: true, found: false},
+			channel: "nodots",
+			wantOK:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			kb := &KafkaBackend{pool: pool, rulesProvider: tt.rules, namespace: "prod"}
+			got, ok := kb.ChannelTopic(tt.channel)
+			if ok != tt.wantOK {
+				t.Fatalf("ChannelTopic(%q) ok = %v, want %v", tt.channel, ok, tt.wantOK)
+			}
+			if ok && got != tt.want {
+				t.Errorf("ChannelTopic(%q) = %q, want %q", tt.channel, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestChannelTopic_NoConsumer: connection-only mode (nil pool) has no topic mapping.
+func TestChannelTopic_NoConsumer(t *testing.T) {
+	t.Parallel()
+	kb := &KafkaBackend{rulesProvider: &routingStub{synced: true}, namespace: "prod"}
+	if _, ok := kb.ChannelTopic("acme.BTC.trade"); ok {
+		t.Error("ChannelTopic with nil pool: want ok=false")
 	}
 }

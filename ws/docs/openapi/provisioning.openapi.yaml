@@ -534,10 +534,28 @@ paths:
     get:
       operationId: getRoutingRules
       summary: Get routing rules
-      description: Returns channel-to-Kafka-topic routing rules for the tenant.
+      description: Returns channel-to-Kafka-topic routing rules for the tenant, paginated.
       tags: [Routing Rules]
       security:
         - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+          description: Maximum number of rules to return per page (clamped to 200).
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+          description: Number of rules to skip (pagination offset).
       responses:
         "200":
           description: Routing rules
@@ -552,7 +570,8 @@ paths:
         Adds a single routing rule without replacing existing rules. Requires admin or system role.
 
         The rule is stored with the normalized pattern (bare `*` → `**`). Returns 409 on duplicate
-        priority or duplicate pattern.
+        priority or duplicate pattern. Non-empty `egress_topics` require the Pro edition
+        (`403 EDITION_LIMIT`); a rule with only an `ingress_topic` is available on every edition.
       tags: [Routing Rules]
       security:
         - bearerAuth: []
@@ -583,7 +602,12 @@ paths:
                   summary: Schema validation failed
                   value:
                     code: ROUTING_RULE_VALIDATION_ERROR
-                    message: "invalid pattern, empty topics, topic not provisioned, or too many topics per rule"
+                    message: "invalid pattern, missing ingress topic, reserved or overlapping egress topic, duplicate egress topic, or too many topics per rule"
+                topic_not_provisioned:
+                  summary: A referenced topic does not exist
+                  value:
+                    code: TOPIC_NOT_PROVISIONED
+                    message: "topic not provisioned"
                 too_many_rules:
                   summary: Per-tenant rule limit exceeded
                   value:
@@ -591,17 +615,26 @@ paths:
                     message: "too many routing rules"
         "403":
           description: |
-            Edition rule-count cap reached. Routing rules are available on every edition,
-            but the per-tenant rule count is capped per edition (Community 10, Pro 100,
-            Enterprise unlimited). Returned when the edition cap is lower than the
-            configured `MAX_ROUTING_RULES_PER_TENANT` — otherwise the 400 above fires first.
+            Edition denial. Two distinct causes: the per-tenant rule COUNT cap
+            (Community 10, Pro 100, Enterprise unlimited — returned when the edition
+            cap is lower than the configured `MAX_ROUTING_RULES_PER_TENANT`, otherwise
+            the 400 above fires first), or the rule carries `egress_topics`, which
+            require the Pro edition (`EDITION_LIMIT`).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-              example:
-                code: EDITION_LIMIT_ROUTING_RULES_PER_TENANT
-                message: "routing_rules_per_tenant limit reached: 11/10 (community edition)"
+              examples:
+                rule_count_cap:
+                  summary: Per-edition rule count cap
+                  value:
+                    code: EDITION_LIMIT_ROUTING_RULES_PER_TENANT
+                    message: "routing_rules_per_tenant limit reached: 11/10 (community edition). Upgrade at https://docs.sukko.dev/editions/upgrade"
+                egress_gated:
+                  summary: Egress topics require Pro
+                  value:
+                    code: EDITION_LIMIT
+                    message: "egress topics requires pro edition (current: community). Upgrade at https://docs.sukko.dev/editions/upgrade"
         "409":
           description: Conflict — duplicate priority or duplicate pattern
           content:
@@ -615,11 +648,11 @@ paths:
       description: |
         Replaces all routing rules for the tenant. Requires admin or system role.
 
-        Rules are evaluated in ascending priority order — **first match wins**. Unmatched channels route to the dead-letter topic.
+        Rules are evaluated in ascending priority order — **first match wins**. Publishing to a channel no rule matches is rejected with `409 PUBLISH_NOT_ROUTABLE` — it is never silently routed or dead-lettered.
 
-        **Constraints**: No duplicate patterns or priorities. Patterns use `**` for multi-segment wildcard (`*` accepted, normalized to `**`).
+        **Constraints**: No duplicate patterns or priorities. Patterns use `**` for multi-segment wildcard (`*` accepted, normalized to `**`). No topic suffix may be both an ingress topic and an egress topic anywhere in the rule set, and `default`/`dead-letter` are reserved as egress destinations.
 
-        **Rule count** is capped by the lower of the configured `MAX_ROUTING_RULES_PER_TENANT` (default 100) and the edition cap (Community 10, Pro 100, Enterprise unlimited). Routing rules themselves are available on every edition.
+        **Rule count** is capped by the lower of the configured `MAX_ROUTING_RULES_PER_TENANT` (default 100) and the edition cap (Community 10, Pro 100, Enterprise unlimited). Routing rules themselves are available on every edition; non-empty `egress_topics` require Pro (`403 EDITION_LIMIT`).
       tags: [Routing Rules]
       security:
         - bearerAuth: []
@@ -637,23 +670,52 @@ paths:
               schema:
                 $ref: "#/components/schemas/RoutingRulesResponse"
         "400":
-          description: Validation error, or rule count above the configured maximum (`TOO_MANY_ROUTING_RULES`)
+          description: |
+            Validation error (`ROUTING_RULE_VALIDATION_ERROR`), a referenced topic
+            that does not exist (`TOPIC_NOT_PROVISIONED`), or rule count above the
+            configured maximum (`TOO_MANY_ROUTING_RULES`).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                validation_error:
+                  summary: Schema validation failed
+                  value:
+                    code: ROUTING_RULE_VALIDATION_ERROR
+                    message: "invalid pattern, missing ingress topic, reserved or overlapping egress topic, duplicate egress topic, or too many topics per rule"
+                topic_not_provisioned:
+                  summary: A referenced topic does not exist
+                  value:
+                    code: TOPIC_NOT_PROVISIONED
+                    message: "topic not provisioned"
+                too_many_rules:
+                  summary: Per-tenant rule limit exceeded
+                  value:
+                    code: TOO_MANY_ROUTING_RULES
+                    message: "too many routing rules"
         "403":
           description: |
-            Edition rule-count cap exceeded (Community 10, Pro 100, Enterprise unlimited).
-            Fires when the edition cap is lower than the configured
-            `MAX_ROUTING_RULES_PER_TENANT` — otherwise the 400 above fires first.
+            Edition denial. Two distinct causes: the per-tenant rule COUNT cap
+            (Community 10, Pro 100, Enterprise unlimited — returned when the edition
+            cap is lower than the configured `MAX_ROUTING_RULES_PER_TENANT`, otherwise
+            the 400 above fires first), or a rule carries `egress_topics`, which
+            require the Pro edition (`EDITION_LIMIT`).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-              example:
-                code: EDITION_LIMIT_ROUTING_RULES_PER_TENANT
-                message: "routing_rules_per_tenant limit reached: 11/10 (community edition)"
+              examples:
+                rule_count_cap:
+                  summary: Per-edition rule count cap
+                  value:
+                    code: EDITION_LIMIT_ROUTING_RULES_PER_TENANT
+                    message: "routing_rules_per_tenant limit reached: 11/10 (community edition). Upgrade at https://docs.sukko.dev/editions/upgrade"
+                egress_gated:
+                  summary: Egress topics require Pro
+                  value:
+                    code: EDITION_LIMIT
+                    message: "egress topics requires pro edition (current: community). Upgrade at https://docs.sukko.dev/editions/upgrade"
 
     delete:
       operationId: deleteRoutingRules
@@ -2603,32 +2665,41 @@ components:
 
     RoutingRule:
       type: object
-      required: [pattern, topics, priority]
+      required: [pattern, ingress_topic, priority]
       description: |
-        Maps a channel suffix pattern to one or more Kafka topic suffixes. Rules are evaluated in ascending priority order — first match wins. Unmatched channels are routed to the tenant's dead-letter topic.
+        Maps a channel suffix pattern to Kafka topic suffixes with two explicit, mutually exclusive roles. Rules are evaluated in ascending priority order — first match wins. Publishing to a channel no rule matches is rejected with `409 PUBLISH_NOT_ROUTABLE` — never silently routed or dead-lettered.
 
-        **Pattern syntax**: `**` matches any number of dot-separated segments (multi-segment wildcard). `*` is accepted as an alias and normalized to `**` on storage — GET responses always return `**`. For example, `trades.**` matches both `trades.BTC-USD` and `trades.spot.BTC-USD`. The `{}` placeholder syntax is NOT supported.
+        **Ingress topic**: the single topic the platform consumes for this rule's channels — its records are delivered to subscribers, replayed on reconnect, and served as message history. The publish ack's `mid` names the ingress record.
 
-        **Topic suffixes**: Each value is a topic suffix (not a full topic name). The full topic name is constructed as `{namespace}.{tenant_slug}.{suffix}`. Specifying multiple suffixes fans out the message to all listed topics simultaneously.
+        **Egress topics** (optional, Pro edition): additional topics that receive copies of each published message for external consumers (audit trails, analytics export, per-topic retention). Egress topics are created on the broker but NEVER consumed by the platform — an egress copy is never delivered to subscribers, never replayable, and carries no delivery identity. Egress writes happen after the publish ack and never affect it. Each write inherits the producer's bounded retry (`KAFKA_PRODUCER_RECORD_RETRIES`, default 8 attempts, exponential backoff from 100ms); once retries are exhausted — or immediately on a non-retryable error — the copy is dead-lettered to the tenant's `dead-letter` topic with `x-sukko-failure-kind` and `x-sukko-failure-cause` headers and counted. A full dead-letter queue means terminal loss of that copy, surfaced by `ws_routing_dlq_dropped_total`; on graceful shutdown the queued egress backlog is drained within `KAFKA_PRODUCER_SHUTDOWN_TIMEOUT` and anything undrained is counted in `ws_routing_fanout_dropped_total`. For audit-grade guarantees, derive the copy downstream from the ingress topic (e.g. a Kafka Connect sink with `read_committed`) instead — the ingress topic is the single source of truth.
+
+        **Constraints**: no topic suffix may be both an ingress topic and an egress topic anywhere in the tenant's rule set. `dead-letter` is reserved entirely; `default` is reserved as an egress destination (it is always consumed). Total destinations per rule (1 ingress + egress) are capped by `MAX_TOPICS_PER_RULE` (default 10).
+
+        **Pattern syntax**: patterns match by dot-separated **segments**, not characters. `**` matches one or more segments (multi-segment wildcard); at most one `**` is allowed per pattern. A bare `*` segment is accepted as an alias and normalized to `**` on storage (so it too matches one or more segments) — GET responses always return `**`. Literal (non-wildcard) segments must match `[a-z0-9-]+` (lowercase alphanumerics and hyphens; no uppercase or underscore). For example, `trades.**` matches both `trades.BTC-USD` and `trades.spot.BTC-USD`. The `{}` placeholder syntax is NOT supported.
 
         **Priority**: Rules are evaluated in ascending order (lower value = higher priority). Use lower priority values (e.g., 0–99) for tenant-specific rules; higher values (e.g., 100) work well for broad catch-all rules.
       properties:
         pattern:
           type: string
           maxLength: 256
-          pattern: "^[a-zA-Z0-9.*_-]{1,256}$"
-          description: "Channel suffix pattern. Use `**` for multi-segment wildcard (e.g., `trades.**`, `rooms.*.presence`). Bare `*` is accepted and normalized to `**` on storage."
+          pattern: "^[a-z0-9.*-]{1,256}$"
+          description: "Channel suffix pattern matched by dot-separated segments. Literal segments must be `[a-z0-9-]+`. Use `**` for a multi-segment wildcard (one or more segments; at most one per pattern), e.g. `trades.**`, `rooms.*.presence`. Bare `*` is accepted and normalized to `**` on storage."
           examples: ["trades.**", "rooms.*.presence", "**"]
-        topics:
+        ingress_topic:
+          type: string
+          maxLength: 128
+          pattern: "^[a-zA-Z0-9._-]{1,128}$"
+          description: "Kafka topic suffix the platform consumes and delivers from. Full topic name: `{namespace}.{tenant_slug}.{suffix}`. Must be a pre-provisioned topic."
+          examples: ["trades", "default"]
+        egress_topics:
           type: array
-          minItems: 1
-          maxItems: 10
+          maxItems: 9
           items:
             type: string
             maxLength: 128
             pattern: "^[a-zA-Z0-9._-]{1,128}$"
-          description: "One or more Kafka topic suffixes. Full topic name: `{namespace}.{tenant_slug}.{suffix}`. Must be pre-provisioned topics."
-          examples: [["trades"], ["trades", "audit-log"]]
+          description: "Kafka topic suffixes receiving copies for external consumers — written to (with the producer's bounded retry, then dead-lettered on terminal failure), never consumed. Requires Pro edition. Must be pre-provisioned topics, distinct from every ingress topic, and not `default` or `dead-letter`."
+          examples: [["audit-log"]]
         priority:
           type: integer
           minimum: 0
@@ -2666,6 +2737,7 @@ components:
       properties:
         rules:
           type: array
+          minItems: 1
           maxItems: 100
           items:
             $ref: "#/components/schemas/RoutingRule"

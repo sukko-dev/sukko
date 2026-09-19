@@ -38,6 +38,7 @@ type StreamTopicRegistry struct {
 	mu               sync.RWMutex
 	sharedTopics     []string
 	dedicatedTenants []types.TenantTopics
+	createOnlyTopics []string          // full topic names created on the broker but never consumed (routing-rule egress, ADR-0018)
 	topicTenants     map[string]string // topic name → owning tenant slug (shared + dedicated), #179 P3
 	namespace        string
 	onUpdate         func()
@@ -139,6 +140,18 @@ func (r *StreamTopicRegistry) GetDedicatedTenants(_ context.Context, _ string) (
 		}
 	}
 	return result, nil
+}
+
+// CreateOnlyTopics returns the full topic names that must exist on the broker
+// but are NEVER consumed — routing-rule egress topics (ADR-0018). Callers use
+// this for topic creation (ensureTopicsExist) only; these names MUST NOT be
+// added to any consumer's subscription.
+func (r *StreamTopicRegistry) CreateOnlyTopics() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]string, len(r.createOnlyTopics))
+	copy(result, r.createOnlyTopics)
+	return result
 }
 
 // SetOnUpdate sets the callback invoked when topics change.
@@ -249,6 +262,9 @@ func (r *StreamTopicRegistry) applyTopicUpdate(resp *provisioningv1.WatchTopicsR
 	// Copy proto response slices to avoid sharing backing arrays (defense in depth)
 	r.sharedTopics = make([]string, len(resp.GetSharedTopics()))
 	copy(r.sharedTopics, resp.GetSharedTopics())
+
+	r.createOnlyTopics = make([]string, len(resp.GetCreateOnlyTopics()))
+	copy(r.createOnlyTopics, resp.GetCreateOnlyTopics())
 
 	r.dedicatedTenants = make([]types.TenantTopics, 0, len(resp.GetDedicatedTenants()))
 	for _, dt := range resp.GetDedicatedTenants() {

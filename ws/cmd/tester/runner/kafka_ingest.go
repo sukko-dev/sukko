@@ -113,7 +113,7 @@ func validateKafkaIngest(ctx context.Context, run *TestRun, logger zerolog.Logge
 
 	// Direct-to-Kafka publisher (bypasses the gateway).
 	resolver := publisher.NewTopicResolver(run.kafkaNamespace, tenantID, []publisher.RoutingRule{
-		{Pattern: "**", Topics: []string{routing.DefaultTopicSuffix}},
+		{Pattern: "**", IngressTopic: routing.DefaultTopicSuffix},
 	})
 	pub, err := newKafkaPub(run.kafkaBrokers, resolver, run.kafkaSASL, run.kafkaTLS)
 	if err != nil {

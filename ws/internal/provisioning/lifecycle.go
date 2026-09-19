@@ -147,7 +147,7 @@ func (lm *LifecycleManager) deleteTenant(ctx context.Context, tenant *Tenant) er
 		} else {
 			seen := make(map[string]struct{})
 			for _, rule := range rules {
-				for _, suffix := range rule.Topics {
+				for _, suffix := range rule.AllTopicSuffixes() {
 					if _, ok := seen[suffix]; ok {
 						continue
 					}

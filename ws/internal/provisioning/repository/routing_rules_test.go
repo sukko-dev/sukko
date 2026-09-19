@@ -59,9 +59,9 @@ func TestRoutingRulesRepository_Add_Success(t *testing.T) {
 	f := newRoutingRulesFixture(t, "tenant-add-ok")
 
 	rule := provisioning.TopicRoutingRule{
-		Pattern:  "orders.**.trade",
-		Topics:   []string{"trades"},
-		Priority: 10,
+		Pattern:      "orders.**.trade",
+		IngressTopic: "trades",
+		Priority:     10,
 	}
 
 	if err := f.repo.Add(f.ctx, f.tenantID, rule); err != nil {
@@ -87,8 +87,8 @@ func TestRoutingRulesRepository_Add_DuplicatePriority(t *testing.T) {
 	t.Parallel()
 	f := newRoutingRulesFixture(t, "tenant-add-dup")
 
-	first := provisioning.TopicRoutingRule{Pattern: "**.trade", Topics: []string{"trades"}, Priority: 5}
-	second := provisioning.TopicRoutingRule{Pattern: "**.quote", Topics: []string{"quotes"}, Priority: 5} // same priority
+	first := provisioning.TopicRoutingRule{Pattern: "**.trade", IngressTopic: "trades", Priority: 5}
+	second := provisioning.TopicRoutingRule{Pattern: "**.quote", IngressTopic: "quotes", Priority: 5} // same priority
 
 	if err := f.repo.Add(f.ctx, f.tenantID, first); err != nil {
 		t.Fatalf("first Add() error = %v", err)
@@ -107,8 +107,8 @@ func TestRoutingRulesRepository_Add_DuplicatePattern(t *testing.T) {
 	t.Parallel()
 	f := newRoutingRulesFixture(t, "tenant-add-dup-pattern")
 
-	first := provisioning.TopicRoutingRule{Pattern: "trades.**", Topics: []string{"trades"}, Priority: 1}
-	second := provisioning.TopicRoutingRule{Pattern: "trades.**", Topics: []string{"audit"}, Priority: 2} // same pattern, different priority
+	first := provisioning.TopicRoutingRule{Pattern: "trades.**", IngressTopic: "trades", Priority: 1}
+	second := provisioning.TopicRoutingRule{Pattern: "trades.**", IngressTopic: "audit", Priority: 2} // same pattern, different priority
 
 	if err := f.repo.Add(f.ctx, f.tenantID, first); err != nil {
 		t.Fatalf("first Add() error = %v", err)
@@ -151,9 +151,9 @@ func TestRoutingRulesRepository_List_OrderByPriority(t *testing.T) {
 
 	// Insert in reverse priority order to confirm the DB orders by priority, not insertion order.
 	for _, rule := range []provisioning.TopicRoutingRule{
-		{Pattern: "**.c", Topics: []string{"c"}, Priority: 30},
-		{Pattern: "**.a", Topics: []string{"a"}, Priority: 10},
-		{Pattern: "**.b", Topics: []string{"b"}, Priority: 20},
+		{Pattern: "**.c", IngressTopic: "c", Priority: 30},
+		{Pattern: "**.a", IngressTopic: "a", Priority: 10},
+		{Pattern: "**.b", IngressTopic: "b", Priority: 20},
 	} {
 		if err := f.repo.Add(f.ctx, f.tenantID, rule); err != nil {
 			t.Fatalf("Add(priority=%d) error = %v", rule.Priority, err)
@@ -184,9 +184,9 @@ func TestRoutingRulesRepository_List_Pagination(t *testing.T) {
 	// Insert 5 rules with priorities 10, 20, 30, 40, 50.
 	for i := 1; i <= 5; i++ {
 		rule := provisioning.TopicRoutingRule{
-			Pattern:  fmt.Sprintf("**.rule%d", i),
-			Topics:   []string{fmt.Sprintf("topic%d", i)},
-			Priority: i * 10,
+			Pattern:      fmt.Sprintf("**.rule%d", i),
+			IngressTopic: fmt.Sprintf("topic%d", i),
+			Priority:     i * 10,
 		}
 		if err := f.repo.Add(f.ctx, f.tenantID, rule); err != nil {
 			t.Fatalf("Add(rule %d) error = %v", i, err)
@@ -235,8 +235,8 @@ func TestRoutingRulesRepository_Replace_ReplacesAll(t *testing.T) {
 
 	// Seed initial rules.
 	for _, r := range []provisioning.TopicRoutingRule{
-		{Pattern: "**.trade", Topics: []string{"trades"}, Priority: 1},
-		{Pattern: "**.quote", Topics: []string{"quotes"}, Priority: 2},
+		{Pattern: "**.trade", IngressTopic: "trades", Priority: 1},
+		{Pattern: "**.quote", IngressTopic: "quotes", Priority: 2},
 	} {
 		if err := f.repo.Add(f.ctx, f.tenantID, r); err != nil {
 			t.Fatalf("seed Add(priority=%d) error = %v", r.Priority, err)
@@ -245,7 +245,7 @@ func TestRoutingRulesRepository_Replace_ReplacesAll(t *testing.T) {
 
 	// Replace with a completely different set.
 	replacement := []provisioning.TopicRoutingRule{
-		{Pattern: "**.order", Topics: []string{"orders"}, Priority: 100},
+		{Pattern: "**.order", IngressTopic: "orders", Priority: 100},
 	}
 	if err := f.repo.Replace(f.ctx, f.tenantID, replacement); err != nil {
 		t.Fatalf("Replace() error = %v", err)
@@ -271,7 +271,7 @@ func TestRoutingRulesRepository_Replace_EmptyDeletesAll(t *testing.T) {
 	f := newRoutingRulesFixture(t, "tenant-replace-empty")
 
 	if err := f.repo.Add(f.ctx, f.tenantID, provisioning.TopicRoutingRule{
-		Pattern: "**.trade", Topics: []string{"trades"}, Priority: 1,
+		Pattern: "**.trade", IngressTopic: "trades", Priority: 1,
 	}); err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}
@@ -296,8 +296,8 @@ func TestRoutingRulesRepository_Replace_Atomicity(t *testing.T) {
 
 	// Seed initial rules at priorities 1 and 2.
 	for _, r := range []provisioning.TopicRoutingRule{
-		{Pattern: "**.trade", Topics: []string{"trades"}, Priority: 1},
-		{Pattern: "**.quote", Topics: []string{"quotes"}, Priority: 2},
+		{Pattern: "**.trade", IngressTopic: "trades", Priority: 1},
+		{Pattern: "**.quote", IngressTopic: "quotes", Priority: 2},
 	} {
 		if err := f.repo.Add(f.ctx, f.tenantID, r); err != nil {
 			t.Fatalf("seed Add(priority=%d) error = %v", r.Priority, err)
@@ -308,8 +308,8 @@ func TestRoutingRulesRepository_Replace_Atomicity(t *testing.T) {
 	// will fail with a unique-constraint violation, causing the transaction to abort.
 	// The pre-existing rules (priority 1 and 2) must survive unchanged.
 	bad := []provisioning.TopicRoutingRule{
-		{Pattern: "**.order", Topics: []string{"orders"}, Priority: 50},
-		{Pattern: "**.cancel", Topics: []string{"cancels"}, Priority: 50}, // duplicate
+		{Pattern: "**.order", IngressTopic: "orders", Priority: 50},
+		{Pattern: "**.cancel", IngressTopic: "cancels", Priority: 50}, // duplicate
 	}
 	err := f.repo.Replace(f.ctx, f.tenantID, bad)
 	if err == nil {
@@ -345,7 +345,7 @@ func TestRoutingRulesRepository_DeleteAll_Idempotent(t *testing.T) {
 
 	// Add a rule, then delete it.
 	if err := f.repo.Add(f.ctx, f.tenantID, provisioning.TopicRoutingRule{
-		Pattern: "**.trade", Topics: []string{"trades"}, Priority: 1,
+		Pattern: "**.trade", IngressTopic: "trades", Priority: 1,
 	}); err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}
@@ -388,12 +388,12 @@ func TestRoutingRulesRepository_DeleteAll_OnlyAffectsTargetTenant(t *testing.T) 
 	}
 
 	if err := repo.Add(ctx, tenantA, provisioning.TopicRoutingRule{
-		Pattern: "**.trade", Topics: []string{"trades"}, Priority: 1,
+		Pattern: "**.trade", IngressTopic: "trades", Priority: 1,
 	}); err != nil {
 		t.Fatalf("Add(tenantA) error = %v", err)
 	}
 	if err := repo.Add(ctx, tenantB, provisioning.TopicRoutingRule{
-		Pattern: "**.quote", Topics: []string{"quotes"}, Priority: 1,
+		Pattern: "**.quote", IngressTopic: "quotes", Priority: 1,
 	}); err != nil {
 		t.Fatalf("Add(tenantB) error = %v", err)
 	}
@@ -443,9 +443,9 @@ func TestRoutingRulesRepository_GetAll_OrderByPriority(t *testing.T) {
 
 	// Insert in non-priority order to confirm ordering is by column, not insertion.
 	for _, rule := range []provisioning.TopicRoutingRule{
-		{Pattern: "**.c", Topics: []string{"c"}, Priority: 30},
-		{Pattern: "**.a", Topics: []string{"a"}, Priority: 10},
-		{Pattern: "**.b", Topics: []string{"b"}, Priority: 20},
+		{Pattern: "**.c", IngressTopic: "c", Priority: 30},
+		{Pattern: "**.a", IngressTopic: "a", Priority: 10},
+		{Pattern: "**.b", IngressTopic: "b", Priority: 20},
 	} {
 		if err := f.repo.Add(f.ctx, f.tenantID, rule); err != nil {
 			t.Fatalf("Add(priority=%d) error = %v", rule.Priority, err)
@@ -486,8 +486,8 @@ func TestRoutingRulesRepository_GetAll_NormalizationApplied(t *testing.T) {
 
 	// Store pattern with bare * (unnormalized form).
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO tenant_routing_rules (tenant_id, pattern, topics, priority) VALUES ($1, $2, $3, $4)`,
-		tenantID, "orders.*.trade", []string{"trades"}, 1,
+		`INSERT INTO tenant_routing_rules (tenant_id, pattern, ingress_topic, egress_topics, priority) VALUES ($1, $2, $3, $4, $5)`,
+		tenantID, "orders.*.trade", "trades", []string{}, 1,
 	); err != nil {
 		t.Fatalf("direct insert unnormalized pattern: %v", err)
 	}
@@ -526,8 +526,8 @@ func TestRoutingRulesRepository_GetAll_InvalidPatternSkipped(t *testing.T) {
 
 	// Valid rule at priority 10.
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO tenant_routing_rules (tenant_id, pattern, topics, priority) VALUES ($1, $2, $3, $4)`,
-		tenantID, "**.trade", []string{"trades"}, 10,
+		`INSERT INTO tenant_routing_rules (tenant_id, pattern, ingress_topic, egress_topics, priority) VALUES ($1, $2, $3, $4, $5)`,
+		tenantID, "**.trade", "trades", []string{}, 10,
 	); err != nil {
 		t.Fatalf("insert valid rule: %v", err)
 	}
@@ -535,8 +535,8 @@ func TestRoutingRulesRepository_GetAll_InvalidPatternSkipped(t *testing.T) {
 	// Invalid pattern (two ** segments) at priority 20 — MatchRoutingPattern returns
 	// ErrMultipleDoubleWildcard, causing scanRows to skip this row.
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO tenant_routing_rules (tenant_id, pattern, topics, priority) VALUES ($1, $2, $3, $4)`,
-		tenantID, "**.**.foo", []string{"foo"}, 20,
+		`INSERT INTO tenant_routing_rules (tenant_id, pattern, ingress_topic, egress_topics, priority) VALUES ($1, $2, $3, $4, $5)`,
+		tenantID, "**.**.foo", "foo", []string{}, 20,
 	); err != nil {
 		t.Fatalf("insert invalid rule: %v", err)
 	}

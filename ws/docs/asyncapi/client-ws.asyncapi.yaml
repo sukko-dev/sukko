@@ -94,27 +94,28 @@ info:
 
     ## Topic Mapping Rules
 
-    Published messages are routed to Kafka topics via **topic routing rules** configured per-tenant through the provisioning API. Each rule maps a channel suffix pattern to one or more Kafka topic suffixes.
+    Published messages are routed to Kafka topics via **topic routing rules** configured per-tenant through the provisioning API. Each rule maps a channel suffix pattern to one **ingress topic** — the topic the platform consumes, whose records are delivered to subscribers, replayed, and served as history — plus optional **egress topics** (Pro edition), which receive best-effort copies for external consumers and are never consumed by the platform.
 
     | Field | Description | Example |
     |-------|-------------|---------|
-    | `pattern` | Channel suffix glob with `*` wildcards | `rooms.*.messages` |
-    | `topics` | Array of Kafka topic suffixes (no wildcards) | `["rooms.messages"]` |
+    | `pattern` | Channel suffix pattern with segment wildcards (`**`) | `rooms.*.presence` |
+    | `ingress_topic` | Kafka topic suffix the platform consumes and delivers from | `rooms.messages` |
+    | `egress_topics` | Optional topic suffixes receiving copies — written to, never consumed | `["audit-log"]` |
 
     **Evaluation**: Rules are evaluated in order — **first match wins**. If no rule matches, the publish is rejected.
 
-    **Wildcard syntax**: `*` matches any sequence of characters including dots. For example, `rooms.*.messages` matches both `rooms.general.messages` and `rooms.eng.general.messages`. The `{}` placeholder syntax is NOT supported in routing patterns (it is only used in channel permission patterns).
+    **Wildcard syntax**: patterns match by dot-separated **segments**, not characters. `**` matches one or more segments. A bare `*` segment is accepted and normalized to `**` on storage (so it too matches one or more segments); at most one `**` is allowed per pattern. For example, `rooms.*.presence` is stored as `rooms.**.presence` and matches both `rooms.general.presence` and `rooms.eng.general.presence`. The `{}` placeholder syntax is NOT supported in routing patterns (it is only used in channel permission patterns).
 
     **Example rules**:
     ```json
     [
-      {"pattern": "*.messages", "topics": ["messages"]},
-      {"pattern": "*.typing", "topics": ["typing"]},
-      {"pattern": "rooms.*.presence", "topics": ["rooms.presence"]}
+      {"pattern": "*.messages", "ingress_topic": "messages", "priority": 0},
+      {"pattern": "*.typing", "ingress_topic": "typing", "priority": 10},
+      {"pattern": "rooms.*.presence", "ingress_topic": "rooms.presence", "egress_topics": ["audit-log"], "priority": 20}
     ]
     ```
 
-    When a client publishes to `sukko.general.messages`, the gateway strips the tenant prefix (`general.messages`), matches against the first rule (`*.messages`), and routes to Kafka topic `sukko.messages` (tenant prefix + first matching topics entry).
+    When a client publishes to `sukko.general.messages`, the gateway strips the tenant prefix (`general.messages`), matches against the first rule (`*.messages`), and writes the message to Kafka topic `{namespace}.sukko.messages` (the `{namespace}.{tenant}.{suffix}` format — namespace + tenant + the matched rule's `ingress_topic`). Subscribers receive exactly ONE copy of the message regardless of how many egress topics the rule lists — egress copies leave the platform and never re-enter delivery. The publish ack's `mid` is the ingress record's identity; egress writes happen after the ack with the producer's bounded retry (default 8 attempts, exponential backoff) — a terminally failed copy is dead-lettered and counted, never failing the publish.
 
     ## Rate Limits and Constraints
 
@@ -904,9 +905,9 @@ components:
           maxLength: 64
           description: >
             Stable message identity assigned to the published message — the same `mid` subscribers
-            receive on the delivered envelope. Opaque, at most 64 characters. Omitted when the
-            publish fans out to multiple topics (one publish then produces multiple messages,
-            each with its own mid).
+            receive on the delivered envelope. Opaque, at most 64 characters. In kafka mode it is
+            the ingress record's identity and is present whether or not the matched routing rule
+            also writes egress copies (egress copies carry no delivery identity).
       examples:
         - type: publish_ack
           channel: "sukko.general.messages"

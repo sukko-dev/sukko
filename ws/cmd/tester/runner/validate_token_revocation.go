@@ -422,7 +422,7 @@ func checkSSERevocation(ctx context.Context, gwURL, provURL string, minter *auth
 	// scenario asserts force-disconnect on revocation, not delivery, so any valid topic suffices;
 	// this mirrors validate_sse.go / validate_pubsub.go's testRoutingRules.
 	if err := provClient.SetRoutingRules(ctx, tenantID, []map[string]any{
-		{"pattern": "revoke-test", "topics": []string{routing.DefaultTopicSuffix}, "priority": 1},
+		{"pattern": "revoke-test", "ingress_topic": routing.DefaultTopicSuffix, "priority": 1},
 	}); err != nil {
 		return append(checks, metrics.CheckResult{Name: "sse-force-disconnect", Status: metrics.CheckStatusFail, Error: fmt.Sprintf("set routing rules: %v", err)})
 	}

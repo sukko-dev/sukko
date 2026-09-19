@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rs/zerolog"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -117,5 +119,43 @@ func TestDLQPool_ContextCancelledDuringBackoff_ShutsDown(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("DLQ pool did not shut down within timeout after context cancel")
+	}
+}
+
+// TestDLQPool_DrainAbandoned_CountsQueuedJobs pins the ADR-0018 "surfaced, never
+// silent" rule for shutdown: when the pool stops with jobs still queued, each is
+// counted (and logged), not dropped invisibly. The producer's Close cancels the
+// DLQ context only after the fan-out pool has drained, so no sender races this.
+func TestDLQPool_DrainAbandoned_CountsQueuedJobs(t *testing.T) {
+	t.Parallel()
+
+	counter := prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "test_dlq_drop_total"},
+		[]string{LabelTenant, LabelReason},
+	)
+	pool := &DLQPool{
+		jobs:               make(chan dlqJob, 8),
+		logger:             zerolog.Nop(),
+		writeFailedCounter: counter,
+	}
+
+	// Queue jobs that will never be processed — the worker is shutting down.
+	pool.jobs <- dlqJob{record: &kgo.Record{Topic: "t"}, tenant: "acme", reason: ReasonFanoutTopicWriteFailed}
+	pool.jobs <- dlqJob{record: &kgo.Record{Topic: "t"}, tenant: "acme", reason: ReasonFanoutTopicWriteFailed}
+	pool.jobs <- dlqJob{record: &kgo.Record{Topic: "t"}, tenant: "beta", reason: ReasonFanoutTopicWriteFailed}
+
+	pool.drainAbandoned()
+
+	if got := testutil.ToFloat64(counter.WithLabelValues("acme", ReasonFanoutTopicWriteFailed)); got != 2 {
+		t.Errorf("acme drop count = %v, want 2 — abandoned jobs must be counted", got)
+	}
+	if got := testutil.ToFloat64(counter.WithLabelValues("beta", ReasonFanoutTopicWriteFailed)); got != 1 {
+		t.Errorf("beta drop count = %v, want 1", got)
+	}
+	// Channel must be fully drained (non-blocking receive returns nothing).
+	select {
+	case j := <-pool.jobs:
+		t.Errorf("drainAbandoned left a job queued: %+v", j)
+	default:
 	}
 }

@@ -19,7 +19,6 @@ import (
 	"github.com/sukko-dev/sukko/internal/provisioning/revocation"
 	"github.com/sukko-dev/sukko/internal/shared/kafka"
 	"github.com/sukko-dev/sukko/internal/shared/logging"
-	"github.com/sukko-dev/sukko/internal/shared/routing"
 	"github.com/sukko-dev/sukko/internal/shared/types"
 )
 
@@ -619,23 +618,21 @@ func (s *Server) loadTopicsUpdate(ctx context.Context, namespace string) (*provi
 	var sharedTopics []string
 	var sharedTopicTenants []*provisioningv1.SharedTopic
 	var dedicatedTenants []*provisioningv1.DedicatedTenant
+	var createOnlyTopics []string
 
 	for _, tenant := range tenants {
 		if tenant.Status != provisioning.StatusActive {
 			continue
 		}
 
-		// ADR-0006: the consume/create set = the tenant's deterministic default
-		// topic ∪ the suffixes its routing rules reference. Every active tenant
-		// contributes its default topic — routing rules (ChannelTopicRouting, ungated)
-		// only ever EXTEND the set, never gate membership. Deriving membership from
-		// rules alone (the previous #179 P3 coupling) made Community ingest
-		// structurally dead: rule-less tenants' topics were never physically
-		// created (ensureTopicsExist) nor consumed. The DLQ is deliberately not in
-		// this set — it is written to, never consumed.
-		topics := []string{kafka.BuildTopicName(namespace, tenant.Slug, routing.DefaultTopicSuffix)}
-		seenSuffixes := map[string]struct{}{routing.DefaultTopicSuffix: {}}
-
+		// ADR-0006/ADR-0018: the consume set = the tenant's deterministic default
+		// topic ∪ its rules' INGRESS topics. Every active tenant contributes its
+		// default topic — routing rules (ChannelTopicRouting, ungated) only ever
+		// EXTEND the set via ingress topics, never gate membership. Egress topics
+		// are excluded by construction: they join create_only_topics below —
+		// created on the broker, never consumed — following the DLQ precedent
+		// (written to, never consumed; the DLQ itself stays out of both sets, it
+		// is created by the provisioning service directly).
 		rules, err := s.service.GetRoutingRules(ctx, tenant.Slug)
 		if err != nil {
 			// No rules is not exclusion: the tenant still ingests via its default
@@ -644,14 +641,12 @@ func (s *Server) loadTopicsUpdate(ctx context.Context, namespace string) (*provi
 				Msg("Tenant has no routing rules; contributing default topic only")
 			rules = nil
 		}
-		for _, rule := range rules {
-			for _, suffix := range rule.Topics {
-				if _, ok := seenSuffixes[suffix]; ok {
-					continue
-				}
-				seenSuffixes[suffix] = struct{}{}
-				topics = append(topics, kafka.BuildTopicName(namespace, tenant.Slug, suffix))
-			}
+		var topics []string
+		for _, suffix := range provisioning.ConsumeTopicSuffixes(rules) {
+			topics = append(topics, kafka.BuildTopicName(namespace, tenant.Slug, suffix))
+		}
+		for _, suffix := range provisioning.CreateOnlyTopicSuffixes(rules) {
+			createOnlyTopics = append(createOnlyTopics, kafka.BuildTopicName(namespace, tenant.Slug, suffix))
 		}
 
 		switch tenant.ConsumerType {
@@ -675,6 +670,7 @@ func (s *Server) loadTopicsUpdate(ctx context.Context, namespace string) (*provi
 		SharedTopics:       sharedTopics,
 		SharedTopicTenants: sharedTopicTenants,
 		DedicatedTenants:   dedicatedTenants,
+		CreateOnlyTopics:   createOnlyTopics,
 	}, nil
 }
 
@@ -702,21 +698,13 @@ func convertRoutingRules(rules []provisioning.TopicRoutingRule) []*provisioningv
 	result := make([]*provisioningv1.TopicRoutingRule, 0, len(rules))
 	for _, r := range rules {
 		result = append(result, &provisioningv1.TopicRoutingRule{
-			Pattern:     r.Pattern,
-			TopicSuffix: firstOrEmpty(r.Topics), // deprecated field — backward compat
-			Topics:      r.Topics,
-			Priority:    int32(r.Priority), //nolint:gosec // G115: priority is validated at write time to be a small positive integer, never exceeds int32 max
+			Pattern:      r.Pattern,
+			IngressTopic: r.IngressTopic,
+			EgressTopics: r.EgressTopics,
+			Priority:     int32(r.Priority), //nolint:gosec // G115: priority is validated at write time to be a small positive integer, never exceeds int32 max
 		})
 	}
 	return result
-}
-
-// firstOrEmpty returns the first element of s, or empty string if s is empty.
-func firstOrEmpty(s []string) string {
-	if len(s) == 0 {
-		return ""
-	}
-	return s[0]
 }
 
 // convertAPIKeys converts provisioning API keys to proto APIKeyInfo messages.

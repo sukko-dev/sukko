@@ -376,9 +376,9 @@ func (x *TenantConfig) GetPreviousSlug() string {
 type TopicRoutingRule struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Pattern       string                 `protobuf:"bytes,1,opt,name=pattern,proto3" json:"pattern,omitempty"`
-	TopicSuffix   string                 `protobuf:"bytes,2,opt,name=topic_suffix,json=topicSuffix,proto3" json:"topic_suffix,omitempty"` // deprecated: use topics instead
-	Topics        []string               `protobuf:"bytes,3,rep,name=topics,proto3" json:"topics,omitempty"`
 	Priority      int32                  `protobuf:"varint,4,opt,name=priority,proto3" json:"priority,omitempty"`
+	IngressTopic  string                 `protobuf:"bytes,5,opt,name=ingress_topic,json=ingressTopic,proto3" json:"ingress_topic,omitempty"` // topic suffix whose records are consumed and delivered to subscribers
+	EgressTopics  []string               `protobuf:"bytes,6,rep,name=egress_topics,json=egressTopics,proto3" json:"egress_topics,omitempty"` // topic suffixes written to but NEVER consumed (external egress copies)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -420,25 +420,25 @@ func (x *TopicRoutingRule) GetPattern() string {
 	return ""
 }
 
-func (x *TopicRoutingRule) GetTopicSuffix() string {
-	if x != nil {
-		return x.TopicSuffix
-	}
-	return ""
-}
-
-func (x *TopicRoutingRule) GetTopics() []string {
-	if x != nil {
-		return x.Topics
-	}
-	return nil
-}
-
 func (x *TopicRoutingRule) GetPriority() int32 {
 	if x != nil {
 		return x.Priority
 	}
 	return 0
+}
+
+func (x *TopicRoutingRule) GetIngressTopic() string {
+	if x != nil {
+		return x.IngressTopic
+	}
+	return ""
+}
+
+func (x *TopicRoutingRule) GetEgressTopics() []string {
+	if x != nil {
+		return x.EgressTopics
+	}
+	return nil
 }
 
 type ChannelRules struct {
@@ -623,8 +623,12 @@ type WatchTopicsResponse struct {
 	DedicatedTenants []*DedicatedTenant `protobuf:"bytes,3,rep,name=dedicated_tenants,json=dedicatedTenants,proto3" json:"dedicated_tenants,omitempty"`
 	// Shared topics carrying their owning tenant, so consumers need no reverse-parse (#179 P3).
 	SharedTopicTenants []*SharedTopic `protobuf:"bytes,4,rep,name=shared_topic_tenants,json=sharedTopicTenants,proto3" json:"shared_topic_tenants,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Full topic names that must exist on the broker but are NEVER consumed —
+	// routing-rule egress topics. Creation insurance only (ensureTopicsExist);
+	// membership here MUST NOT add a topic to any consumer's subscription.
+	CreateOnlyTopics []string `protobuf:"bytes,5,rep,name=create_only_topics,json=createOnlyTopics,proto3" json:"create_only_topics,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *WatchTopicsResponse) Reset() {
@@ -681,6 +685,13 @@ func (x *WatchTopicsResponse) GetDedicatedTenants() []*DedicatedTenant {
 func (x *WatchTopicsResponse) GetSharedTopicTenants() []*SharedTopic {
 	if x != nil {
 		return x.SharedTopicTenants
+	}
+	return nil
+}
+
+func (x *WatchTopicsResponse) GetCreateOnlyTopics() []string {
+	if x != nil {
+		return x.CreateOnlyTopics
 	}
 	return nil
 }
@@ -1590,12 +1601,12 @@ const file_sukko_provisioning_v1_provisioning_proto_rawDesc = "" +
 	"\rrouting_rules\x18\x04 \x03(\v2'.sukko.provisioning.v1.TopicRoutingRuleR\froutingRules\x12\x1f\n" +
 	"\vtenant_uuid\x18\x05 \x01(\tR\n" +
 	"tenantUuid\x12#\n" +
-	"\rprevious_slug\x18\x06 \x01(\tR\fpreviousSlugJ\x04\b\x02\x10\x03\"\x83\x01\n" +
+	"\rprevious_slug\x18\x06 \x01(\tR\fpreviousSlugJ\x04\b\x02\x10\x03\"\xb4\x01\n" +
 	"\x10TopicRoutingRule\x12\x18\n" +
-	"\apattern\x18\x01 \x01(\tR\apattern\x12!\n" +
-	"\ftopic_suffix\x18\x02 \x01(\tR\vtopicSuffix\x12\x16\n" +
-	"\x06topics\x18\x03 \x03(\tR\x06topics\x12\x1a\n" +
-	"\bpriority\x18\x04 \x01(\x05R\bpriority\"\xff\x04\n" +
+	"\apattern\x18\x01 \x01(\tR\apattern\x12\x1a\n" +
+	"\bpriority\x18\x04 \x01(\x05R\bpriority\x12#\n" +
+	"\ringress_topic\x18\x05 \x01(\tR\fingressTopic\x12#\n" +
+	"\regress_topics\x18\x06 \x03(\tR\fegressTopicsJ\x04\b\x02\x10\x03J\x04\b\x03\x10\x04R\ftopic_suffixR\x06topics\"\xff\x04\n" +
 	"\fChannelRules\x12'\n" +
 	"\x0fpublic_channels\x18\x01 \x03(\tR\x0epublicChannels\x12]\n" +
 	"\x0egroup_mappings\x18\x02 \x03(\v26.sukko.provisioning.v1.ChannelRules.GroupMappingsEntryR\rgroupMappings\x12)\n" +
@@ -1612,13 +1623,14 @@ const file_sukko_provisioning_v1_provisioning_proto_rawDesc = "" +
 	"\rGroupChannels\x12\x1a\n" +
 	"\bchannels\x18\x01 \x03(\tR\bchannels\"2\n" +
 	"\x12WatchTopicsRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\"\x86\x02\n" +
+	"\tnamespace\x18\x01 \x01(\tR\tnamespace\"\xb4\x02\n" +
 	"\x13WatchTopicsResponse\x12\x1f\n" +
 	"\vis_snapshot\x18\x01 \x01(\bR\n" +
 	"isSnapshot\x12#\n" +
 	"\rshared_topics\x18\x02 \x03(\tR\fsharedTopics\x12S\n" +
 	"\x11dedicated_tenants\x18\x03 \x03(\v2&.sukko.provisioning.v1.DedicatedTenantR\x10dedicatedTenants\x12T\n" +
-	"\x14shared_topic_tenants\x18\x04 \x03(\v2\".sukko.provisioning.v1.SharedTopicR\x12sharedTopicTenants\"J\n" +
+	"\x14shared_topic_tenants\x18\x04 \x03(\v2\".sukko.provisioning.v1.SharedTopicR\x12sharedTopicTenants\x12,\n" +
+	"\x12create_only_topics\x18\x05 \x03(\tR\x10createOnlyTopics\"J\n" +
 	"\x0fDedicatedTenant\x12\x1f\n" +
 	"\vtenant_slug\x18\x01 \x01(\tR\n" +
 	"tenantSlug\x12\x16\n" +

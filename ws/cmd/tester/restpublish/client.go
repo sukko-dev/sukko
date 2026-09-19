@@ -25,7 +25,7 @@ type Request struct {
 type Response struct {
 	Status  string `json:"status"`
 	Channel string `json:"channel"`
-	Mid     string `json:"mid"` // stable message identity of the published message; empty for multi-topic fan-out
+	Mid     string `json:"mid"` // stable message identity of the published message (the ingress record's identity, ADR-0018)
 }
 
 // AuthConfig holds authentication credentials for publish requests.

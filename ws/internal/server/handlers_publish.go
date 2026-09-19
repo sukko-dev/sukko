@@ -136,8 +136,9 @@ func publishErrorToClientCode(err error) (protocol.ErrorCode, bool) {
 
 // sendPublishAck sends a publish acknowledgment to the client. mid is the
 // stable message identity assigned by the backend — echoed so the publisher
-// can correlate/dedup against delivered copies; omitted when empty (multi-topic
-// fan-out publishes carry no single identity).
+// can correlate/dedup against delivered copies. In kafka mode it names the
+// ingress record and is always present (ADR-0018); the empty-mid guard remains
+// for backends without message identity.
 func (s *Server) sendPublishAck(c *Client, channel, mid string) {
 	ack := map[string]any{
 		"type":    protocol.RespTypePublishAck,
