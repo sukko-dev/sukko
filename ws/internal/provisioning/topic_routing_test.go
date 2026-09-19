@@ -4,7 +4,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sukko-dev/sukko/internal/provisioning"
 )
@@ -27,39 +26,39 @@ func TestValidateRoutingRules(t *testing.T) {
 		{
 			name: "valid_single_rule",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
+				{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
 			},
 		},
 		{
 			name: "valid_multiple_rules",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "crypto.**.trade", Topics: []string{"crypto-trade"}, Priority: 1},
-				{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 2},
-				{Pattern: "**.analytics", Topics: []string{"analytics"}, Priority: 3},
+				{Pattern: "crypto.**.trade", IngressTopic: "crypto-trade", Priority: 1},
+				{Pattern: "**.trade", IngressTopic: "trade", Priority: 2},
+				{Pattern: "**.analytics", IngressTopic: "analytics", Priority: 3},
 			},
 		},
 		{
-			name: "valid_multi_topic_fan_out",
+			name: "valid_delivery_plus_egress",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{"trade", "trade-replica"}, Priority: 1},
+				{Pattern: "**.trade", IngressTopic: "trade", EgressTopics: []string{"trade-replica"}, Priority: 1},
 			},
 		},
 		{
 			name: "valid_exact_literal_segments",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "btc.trade", Topics: []string{"btc-trade"}, Priority: 1},
+				{Pattern: "btc.trade", IngressTopic: "btc-trade", Priority: 1},
 			},
 		},
 		{
 			name: "valid_single_wildcard",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme.*.trade", Topics: []string{"trades"}, Priority: 1},
+				{Pattern: "acme.*.trade", IngressTopic: "trades", Priority: 1},
 			},
 		},
 		{
 			name: "valid_double_wildcard",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme.**.trade", Topics: []string{"trades"}, Priority: 1},
+				{Pattern: "acme.**.trade", IngressTopic: "trades", Priority: 1},
 			},
 		},
 		{
@@ -75,46 +74,116 @@ func TestValidateRoutingRules(t *testing.T) {
 		{
 			name: "empty_pattern",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "", Topics: []string{"trade"}, Priority: 1},
+				{Pattern: "", IngressTopic: "trade", Priority: 1},
 			},
 			wantSentinel: provisioning.ErrEmptyRoutingPattern,
 		},
 		{
-			name: "empty_topics_slice",
+			name: "missing_ingress_topic",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{}, Priority: 1},
+				{Pattern: "**.trade", IngressTopic: "", Priority: 1},
 			},
-			wantSentinel: provisioning.ErrEmptyTopics,
+			wantSentinel: provisioning.ErrMissingIngressTopic,
 		},
 		{
-			name: "nil_topics_slice",
+			name: "missing_ingress_topic_with_egress_present",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: nil, Priority: 1},
+				{Pattern: "**.trade", EgressTopics: []string{"audit"}, Priority: 1},
 			},
-			wantSentinel: provisioning.ErrEmptyTopics,
+			wantSentinel: provisioning.ErrMissingIngressTopic,
 		},
 		{
-			name:      "too_many_topics",
+			name:      "too_many_topics_delivery_plus_egress",
 			maxTopics: 2,
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{"t1", "t2", "t3"}, Priority: 1},
+				{Pattern: "**.trade", IngressTopic: "t1", EgressTopics: []string{"t2", "t3"}, Priority: 1},
 			},
 			wantSentinel: provisioning.ErrTooManyTopics,
+		},
+		{
+			name:      "delivery_plus_egress_at_cap_is_valid",
+			maxTopics: 3,
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "t1", EgressTopics: []string{"t2", "t3"}, Priority: 1},
+			},
 		},
 		{
 			name:      "zero_maxTopicsPerRule_skips_limit",
 			maxTopics: 0,
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{"t1", "t2", "t3", "t4", "t5"}, Priority: 1},
+				{Pattern: "**.trade", IngressTopic: "t1", EgressTopics: []string{"t2", "t3", "t4", "t5"}, Priority: 1},
+			},
+		},
+		{
+			name: "duplicate_egress_topic",
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "trade", EgressTopics: []string{"audit", "audit"}, Priority: 1},
+			},
+			wantSentinel: provisioning.ErrDuplicateEgressTopic,
+		},
+		{
+			name: "empty_egress_topic_rejected",
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "trade", EgressTopics: []string{""}, Priority: 1},
+			},
+			wantSentinel: provisioning.ErrReservedTopicSuffix,
+		},
+		{
+			name: "dlq_suffix_rejected_as_delivery",
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "dead-letter", Priority: 1},
+			},
+			wantSentinel: provisioning.ErrReservedTopicSuffix,
+		},
+		{
+			name: "dlq_suffix_rejected_as_egress",
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "trade", EgressTopics: []string{"dead-letter"}, Priority: 1},
+			},
+			wantSentinel: provisioning.ErrReservedTopicSuffix,
+		},
+		{
+			name: "default_suffix_rejected_as_egress",
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "trade", EgressTopics: []string{"default"}, Priority: 1},
+			},
+			wantSentinel: provisioning.ErrReservedTopicSuffix,
+		},
+		{
+			name: "default_suffix_allowed_as_delivery",
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "default", Priority: 1},
+			},
+		},
+		{
+			name: "egress_equal_to_own_delivery_rejected",
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "trade", EgressTopics: []string{"trade"}, Priority: 1},
+			},
+			wantSentinel: provisioning.ErrEgressIngressOverlap,
+		},
+		{
+			name: "egress_equal_to_another_rules_delivery_rejected",
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "trade", EgressTopics: []string{"orders"}, Priority: 1},
+				{Pattern: "**.order", IngressTopic: "orders", Priority: 2},
+			},
+			wantSentinel: provisioning.ErrEgressIngressOverlap,
+		},
+		{
+			name: "same_egress_topic_across_rules_is_valid",
+			rules: []provisioning.TopicRoutingRule{
+				{Pattern: "**.trade", IngressTopic: "trade", EgressTopics: []string{"audit"}, Priority: 1},
+				{Pattern: "**.order", IngressTopic: "orders", EgressTopics: []string{"audit"}, Priority: 2},
 			},
 		},
 		{
 			name:     "too_many_rules",
 			maxRules: 2,
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
-				{Pattern: "**.orderbook", Topics: []string{"ob"}, Priority: 2},
-				{Pattern: "**.analytics", Topics: []string{"an"}, Priority: 3},
+				{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
+				{Pattern: "**.orderbook", IngressTopic: "ob", Priority: 2},
+				{Pattern: "**.analytics", IngressTopic: "an", Priority: 3},
 			},
 			wantSentinel: provisioning.ErrTooManyRoutingRules,
 		},
@@ -122,60 +191,60 @@ func TestValidateRoutingRules(t *testing.T) {
 			name:     "zero_maxRules_skips_count_check",
 			maxRules: 0,
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
-				{Pattern: "**.ob", Topics: []string{"ob"}, Priority: 2},
-				{Pattern: "**.an", Topics: []string{"an"}, Priority: 3},
+				{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
+				{Pattern: "**.ob", IngressTopic: "ob", Priority: 2},
+				{Pattern: "**.an", IngressTopic: "an", Priority: 3},
 			},
 		},
 		{
 			name: "duplicate_pattern",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
-				{Pattern: "**.trade", Topics: []string{"trade-alt"}, Priority: 2},
+				{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
+				{Pattern: "**.trade", IngressTopic: "trade-alt", Priority: 2},
 			},
 			wantSentinel: provisioning.ErrDuplicateRoutingPattern,
 		},
 		{
 			name: "duplicate_priority_distinct_patterns",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme.trade", Topics: []string{"t1"}, Priority: 1},
-				{Pattern: "acme.quote", Topics: []string{"t2"}, Priority: 1},
+				{Pattern: "acme.trade", IngressTopic: "t1", Priority: 1},
+				{Pattern: "acme.quote", IngressTopic: "t2", Priority: 1},
 			},
 			wantSentinel: provisioning.ErrDuplicatePriority,
 		},
 		{
 			name: "invalid_pattern_multiple_double_wildcards",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "a.**.b.**", Topics: []string{"trade"}, Priority: 1},
+				{Pattern: "a.**.b.**", IngressTopic: "trade", Priority: 1},
 			},
 			wantSentinel: provisioning.ErrInvalidRoutingPattern,
 		},
 		{
 			name: "invalid_pattern_bad_segment_char",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.Trade!", Topics: []string{"trade"}, Priority: 1},
+				{Pattern: "**.Trade!", IngressTopic: "trade", Priority: 1},
 			},
 			wantSentinel: provisioning.ErrInvalidRoutingPattern,
 		},
 		{
 			name: "invalid_pattern_uppercase_literal",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "BTC.trade", Topics: []string{"trade"}, Priority: 1},
+				{Pattern: "BTC.trade", IngressTopic: "trade", Priority: 1},
 			},
 			wantSentinel: provisioning.ErrInvalidRoutingPattern,
 		},
 		{
 			name: "invalid_pattern_underscore_in_segment",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme_corp.trade", Topics: []string{"trade"}, Priority: 1},
+				{Pattern: "acme_corp.trade", IngressTopic: "trade", Priority: 1},
 			},
 			wantSentinel: provisioning.ErrInvalidRoutingPattern,
 		},
 		{
 			name: "second_rule_invalid_reports_rule_index",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
-				{Pattern: "", Topics: []string{"analytics"}, Priority: 2},
+				{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
+				{Pattern: "", IngressTopic: "analytics", Priority: 2},
 			},
 			wantSentinel: provisioning.ErrEmptyRoutingPattern,
 			wantContains: "routing rule 1",
@@ -212,139 +281,55 @@ func TestValidateRoutingRules(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ResolveTopics
+// ValidateEgressDisjoint — tenant-wide bidirectional invariant
 // ---------------------------------------------------------------------------
 
-func TestResolveTopics(t *testing.T) {
+func TestValidateEgressDisjoint(t *testing.T) {
 	t.Parallel()
-
-	// Shared ordered ruleset (caller is responsible for priority ordering).
-	// Rules are listed in ascending priority order (lower = higher priority),
-	// as a real caller would sort them before calling ResolveTopics.
-	sharedRules := []provisioning.TopicRoutingRule{
-		{Pattern: "acme.crypto.**.trade", Topics: []string{"crypto-trade"}, Priority: 1},
-		{Pattern: "acme.nft.**.trade", Topics: []string{"nft-trade"}, Priority: 2},
-		{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 3},
-		{Pattern: "**.analytics", Topics: []string{"analytics"}, Priority: 4},
-	}
 
 	tests := []struct {
 		name    string
 		rules   []provisioning.TopicRoutingRule
-		channel string
-		want    []string
-		wantNil bool
+		wantErr bool
 	}{
 		{
-			name:    "specific_match_returns_correct_topics",
-			rules:   sharedRules,
-			channel: "acme.crypto.btc.trade",
-			want:    []string{"crypto-trade"},
-		},
-		{
-			name:    "nft_match",
-			rules:   sharedRules,
-			channel: "acme.nft.punk.trade",
-			want:    []string{"nft-trade"},
-		},
-		{
-			name:    "catch_all_trade",
-			rules:   sharedRules,
-			channel: "acme.forex.eur.trade",
-			want:    []string{"trade"},
-		},
-		{
-			name:    "analytics_match",
-			rules:   sharedRules,
-			channel: "acme.crypto.btc.analytics",
-			want:    []string{"analytics"},
-		},
-		{
-			name:    "no_match_returns_nil",
-			rules:   sharedRules,
-			channel: "acme.unknown.data",
-			wantNil: true,
-		},
-		{
-			name:    "empty_rules_returns_nil",
-			rules:   []provisioning.TopicRoutingRule{},
-			channel: "acme.btc.trade",
-			wantNil: true,
-		},
-		{
-			name: "fan_out_multiple_topics",
+			name: "disjoint_sets_valid",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "**.trade", Topics: []string{"trade", "trade-replica"}, Priority: 1},
+				{Pattern: "a.**", IngressTopic: "trade", EgressTopics: []string{"audit"}, Priority: 1},
+				{Pattern: "b.**", IngressTopic: "orders", EgressTopics: []string{"analytics"}, Priority: 2},
 			},
-			channel: "acme.btc.trade",
-			want:    []string{"trade", "trade-replica"},
 		},
 		{
-			// Rules are iterated in slice order; caller sorts by priority.
-			// The first rule in slice order wins when multiple rules match.
-			name: "first_priority_wins_when_multiple_could_match",
+			name: "new_rules_egress_hits_existing_delivery",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme.**.trade", Topics: []string{"high-priority"}, Priority: 1},
-				{Pattern: "**.trade", Topics: []string{"low-priority"}, Priority: 2},
+				{Pattern: "a.**", IngressTopic: "trade", Priority: 1},
+				{Pattern: "b.**", IngressTopic: "orders", EgressTopics: []string{"trade"}, Priority: 2},
 			},
-			channel: "acme.nyse.trade",
-			want:    []string{"high-priority"},
+			wantErr: true,
 		},
 		{
-			name: "second_rule_matches_when_first_does_not",
+			name: "new_rules_delivery_hits_existing_egress",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme.quote", Topics: []string{"quotes"}, Priority: 1},
-				{Pattern: "acme.**.trade", Topics: []string{"trades"}, Priority: 2},
+				{Pattern: "a.**", IngressTopic: "trade", EgressTopics: []string{"orders"}, Priority: 1},
+				{Pattern: "b.**", IngressTopic: "orders", Priority: 2},
 			},
-			channel: "acme.nyse.trade",
-			want:    []string{"trades"},
+			wantErr: true,
 		},
 		{
-			// An invalid-pattern rule must be silently skipped;
-			// subsequent valid rules must still be evaluated.
-			name: "invalid_pattern_rule_skipped_silently",
-			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "a.**.b.**", Topics: []string{"bad"}, Priority: 1},
-				{Pattern: "acme.trade", Topics: []string{"trades"}, Priority: 2},
-			},
-			channel: "acme.trade",
-			want:    []string{"trades"},
-		},
-		{
-			// Single-wildcard pattern requires exactly one segment per position —
-			// a 2-segment channel must NOT match a 3-segment pattern.
-			name: "single_wildcard_segment_count_mismatch_no_match",
-			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme.*.trade", Topics: []string{"trades"}, Priority: 1},
-			},
-			channel: "acme.trade",
-			wantNil: true,
+			name:  "empty_rules_valid",
+			rules: nil,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
-			got, err := provisioning.ResolveTopics(tt.rules, tt.channel)
-			if err != nil {
-				t.Fatalf("ResolveTopics() unexpected error: %v", err)
+			err := provisioning.ValidateEgressDisjoint(tt.rules)
+			if tt.wantErr && !errors.Is(err, provisioning.ErrEgressIngressOverlap) {
+				t.Errorf("ValidateEgressDisjoint() = %v, want ErrEgressIngressOverlap", err)
 			}
-
-			if tt.wantNil {
-				if got != nil {
-					t.Errorf("ResolveTopics() = %v, want nil", got)
-				}
-				return
-			}
-
-			if len(got) != len(tt.want) {
-				t.Fatalf("ResolveTopics() returned %d topics, want %d; got %v", len(got), len(tt.want), got)
-			}
-			for i, topic := range got {
-				if topic != tt.want[i] {
-					t.Errorf("ResolveTopics()[%d] = %q, want %q", i, topic, tt.want[i])
-				}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ValidateEgressDisjoint() unexpected error: %v", err)
 			}
 		})
 	}
@@ -366,8 +351,8 @@ func TestErrDuplicatePrioritySentinel(t *testing.T) {
 		{
 			name: "errors_is_detects_duplicate_priority",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme.trade", Topics: []string{"t1"}, Priority: 5},
-				{Pattern: "acme.quote", Topics: []string{"t2"}, Priority: 5},
+				{Pattern: "acme.trade", IngressTopic: "t1", Priority: 5},
+				{Pattern: "acme.quote", IngressTopic: "t2", Priority: 5},
 			},
 			target: provisioning.ErrDuplicatePriority,
 			want:   true,
@@ -375,8 +360,8 @@ func TestErrDuplicatePrioritySentinel(t *testing.T) {
 		{
 			name: "errors_is_false_for_distinct_priorities",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme.trade", Topics: []string{"t1"}, Priority: 1},
-				{Pattern: "acme.quote", Topics: []string{"t2"}, Priority: 2},
+				{Pattern: "acme.trade", IngressTopic: "t1", Priority: 1},
+				{Pattern: "acme.quote", IngressTopic: "t2", Priority: 2},
 			},
 			target: provisioning.ErrDuplicatePriority,
 			want:   false,
@@ -384,10 +369,10 @@ func TestErrDuplicatePrioritySentinel(t *testing.T) {
 		{
 			name: "duplicate_priority_does_not_match_unrelated_sentinel",
 			rules: []provisioning.TopicRoutingRule{
-				{Pattern: "acme.trade", Topics: []string{"t1"}, Priority: 7},
-				{Pattern: "acme.quote", Topics: []string{"t2"}, Priority: 7},
+				{Pattern: "acme.trade", IngressTopic: "t1", Priority: 7},
+				{Pattern: "acme.quote", IngressTopic: "t2", Priority: 7},
 			},
-			target: provisioning.ErrEmptyTopics,
+			target: provisioning.ErrMissingIngressTopic,
 			want:   false,
 		},
 	}
@@ -402,49 +387,5 @@ func TestErrDuplicatePrioritySentinel(t *testing.T) {
 				t.Errorf("errors.Is(err, %v) = %v, want %v (err = %v)", tt.target, got, tt.want, err)
 			}
 		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Benchmark
-// ---------------------------------------------------------------------------
-
-func BenchmarkResolveTopics(b *testing.B) {
-	// Build a 100-rule ruleset where the matching rule is last (worst-case scan).
-	// Non-matching rules use a literal pattern so each comparison is cheap but
-	// still exercises real pattern evaluation logic.
-	const numRules = 100
-	rules := make([]provisioning.TopicRoutingRule, numRules)
-	for i := range numRules {
-		rules[i] = provisioning.TopicRoutingRule{
-			// Distinct literal patterns that will NOT match the benchmark channel.
-			Pattern:  "no-match.segment",
-			Topics:   []string{"bucket"},
-			Priority: i + 1,
-		}
-	}
-	// The last rule uses a ** wildcard and matches the benchmark channel — it is
-	// reached only after all 99 non-matching rules are evaluated.
-	rules[numRules-1] = provisioning.TopicRoutingRule{
-		Pattern:  "bench.**.event",
-		Topics:   []string{"events", "audit"},
-		Priority: numRules,
-	}
-
-	channel := "bench.us.east.event"
-
-	b.ResetTimer()
-
-	n := 0
-	for b.Loop() {
-		_, _ = provisioning.ResolveTopics(rules, channel)
-		n++
-	}
-
-	if n > 0 {
-		perOp := b.Elapsed() / time.Duration(n)
-		if perOp > time.Millisecond {
-			b.Fatalf("ResolveTopics too slow: %v per op (want ≤1ms)", perOp)
-		}
 	}
 }

@@ -70,9 +70,11 @@ message TenantConfig {
 
 message TopicRoutingRule {
   string pattern = 1;
-  string topic_suffix = 2; // deprecated: use topics instead
-  repeated string topics = 3;
+  reserved 2, 3;                          // was: topic_suffix, topics (pre-split flat list)
+  reserved "topic_suffix", "topics";
   int32 priority = 4;
+  string ingress_topic = 5;              // topic suffix whose records are consumed and delivered to subscribers
+  repeated string egress_topics = 6;      // topic suffixes written to but NEVER consumed (external egress copies)
 }
 
 message ChannelRules {
@@ -101,6 +103,10 @@ message WatchTopicsResponse {
   repeated DedicatedTenant dedicated_tenants = 3;
   // Shared topics carrying their owning tenant, so consumers need no reverse-parse (#179 P3).
   repeated SharedTopic shared_topic_tenants = 4;
+  // Full topic names that must exist on the broker but are NEVER consumed —
+  // routing-rule egress topics. Creation insurance only (ensureTopicsExist);
+  // membership here MUST NOT add a topic to any consumer's subscription.
+  repeated string create_only_topics = 5;
 }
 
 message DedicatedTenant {

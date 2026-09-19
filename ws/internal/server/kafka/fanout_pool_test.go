@@ -3,7 +3,6 @@ package kafka
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
@@ -94,8 +93,9 @@ func consumeTopic(t *testing.T, brokers []string, topic string, want int, timeou
 	return got
 }
 
-// TestFanout_DeliversToAllTopics: a matched multi-topic rule fans a single publish out to
-// every rule topic; each target gets exactly one record and the breaker stays Closed (P1b-C3).
+// TestFanout_DeliversToAllTopics: a matched rule with egress topics writes one record to the
+// ingress topic (synchronously — its coordinates name the mid) and one egress copy per egress
+// topic; each target gets exactly one record and the breaker stays Closed (P1b-C3).
 func TestFanout_DeliversToAllTopics(t *testing.T) {
 	t.Parallel()
 	cluster, err := kfake.NewCluster(kfake.SeedTopics(1,
@@ -110,8 +110,8 @@ func TestFanout_DeliversToAllTopics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
-	if fanoutMid != "" {
-		t.Errorf("fan-out Publish mid = %q, want empty (N records → N mids; the ack carries none)", fanoutMid)
+	if fanoutMid == "" {
+		t.Error("Publish with egress topics returned empty mid — the ack must always carry the ingress record's identity (ADR-0018)")
 	}
 
 	for _, suffix := range []string{"trades", "audit"} {
@@ -218,11 +218,12 @@ func headerValue(r *kgo.Record, key string) string {
 	return ""
 }
 
-// TestFanout_PartialFailure_DeadLetters: when one fan-out topic write fails but another
-// succeeds, Publish still returns nil (2xx, P1b-C9) and a record lands on the tenant DLQ topic
-// carrying the fan-out-failure reason + failed/succeeded headers (P1b-C3/C4). The breaker stays
-// Closed — a partial failure is not broker unavailability (P1b-C1).
-func TestFanout_PartialFailure_DeadLetters(t *testing.T) {
+// TestFanout_EgressFailure_AcksAndDeadLetters pins the ADR-0018 partial-failure
+// semantics: the INGRESS write alone determines the ack, so a failed egress write
+// still returns success + mid, and the missed egress copy is dead-lettered with
+// the fan-out-failure reason + failed-topic header (surfaced, never silent). The
+// breaker stays Closed — an egress failure is not broker unavailability (P1b-C1).
+func TestFanout_EgressFailure_AcksAndDeadLetters(t *testing.T) {
 	t.Parallel()
 	cluster, err := kfake.NewCluster(kfake.SeedTopics(1,
 		fullTopic("trades"), fullTopic("audit"), fullTopic(routing.DeadLetterTopicSuffix)))
@@ -230,14 +231,17 @@ func TestFanout_PartialFailure_DeadLetters(t *testing.T) {
 		t.Fatalf("kfake: %v", err)
 	}
 	defer cluster.Close()
-	failProduceForTopics(t, cluster, fullTopic("audit")) // audit fails, trades + DLQ succeed
+	failProduceForTopics(t, cluster, fullTopic("audit")) // egress fails; ingress + DLQ succeed
 
-	// Single fan-out worker → the two topic produces are sequential (separate ProduceRequests),
-	// so the control hook can fail "audit" in isolation. With >1 worker franz-go may batch both
-	// topics into one request, which the hook would fail wholesale.
+	// Single fan-out worker → produces are sequential (separate ProduceRequests),
+	// so the control hook can fail "audit" in isolation.
 	p := newKfakeProducer(t, cluster, 1)
-	if _, err := p.Publish(context.Background(), 1, fanoutTestChannel, []byte(`{"x":1}`)); err != nil {
-		t.Fatalf("Publish: partial failure must still return nil (>=1 topic ok), got %v", err)
+	mid, err := p.Publish(context.Background(), 1, fanoutTestChannel, []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Publish: egress failure must not fail the ack (ingress succeeded), got %v", err)
+	}
+	if mid == "" {
+		t.Error("Publish mid empty — the ingress record's identity must be returned even when egress fails")
 	}
 
 	if recs := consumeTopic(t, cluster.ListenAddrs(), fullTopic("trades"), 1, 3*time.Second); len(recs) != 1 {
@@ -253,11 +257,45 @@ func TestFanout_PartialFailure_DeadLetters(t *testing.T) {
 	if headerValue(dlq[0], HeaderFailedTopics) != fullTopic("audit") {
 		t.Errorf("DLQ failed_topics = %q, want %q", headerValue(dlq[0], HeaderFailedTopics), fullTopic("audit"))
 	}
-	if headerValue(dlq[0], HeaderSucceededTopics) != fullTopic("trades") {
-		t.Errorf("DLQ succeeded_topics = %q, want %q", headerValue(dlq[0], HeaderSucceededTopics), fullTopic("trades"))
+	// TopicAuthorizationFailed is non-retriable — the client fails fast rather
+	// than exhausting retries, and the triage header must say which (ADR-0018).
+	if got := headerValue(dlq[0], HeaderFailureKind); got != FailureKindNonRetryable {
+		t.Errorf("DLQ failure-kind header = %q, want %q", got, FailureKindNonRetryable)
+	}
+	if headerValue(dlq[0], HeaderFailureCause) == "" {
+		t.Error("DLQ failure-cause header empty — want the terminal produce error")
 	}
 	if got := p.CircuitBreakerState(); got != gobreaker.StateClosed {
-		t.Errorf("breaker = %v, want Closed (partial failure must not trip)", got)
+		t.Errorf("breaker = %v, want Closed (egress failure must not trip)", got)
+	}
+}
+
+// TestPublish_IngressFailure_Errors pins the other half of ADR-0018: when the
+// INGRESS write fails, Publish returns an error (→ 500, §III — never a false 2xx)
+// even though the egress topic is healthy, and no egress copy is written (egress
+// is submitted only after ingress success, so an egress topic never holds a copy
+// of an un-acked message).
+func TestPublish_IngressFailure_Errors(t *testing.T) {
+	t.Parallel()
+	cluster, err := kfake.NewCluster(kfake.SeedTopics(1,
+		fullTopic("trades"), fullTopic("audit"), fullTopic(routing.DeadLetterTopicSuffix)))
+	if err != nil {
+		t.Fatalf("kfake: %v", err)
+	}
+	defer cluster.Close()
+	failProduceForTopics(t, cluster, fullTopic("trades")) // ingress fails; egress would succeed
+
+	p := newKfakeProducer(t, cluster, 1)
+	mid, err := p.Publish(context.Background(), 1, fanoutTestChannel, []byte(`{"x":1}`))
+	if err == nil {
+		t.Fatal("Publish: ingress write failure must error, got nil")
+	}
+	if mid != "" {
+		t.Errorf("mid = %q, want empty on ingress failure", mid)
+	}
+	// The healthy egress topic must NOT have received a copy of the failed publish.
+	if recs := consumeTopic(t, cluster.ListenAddrs(), fullTopic("audit"), 1, time.Second); len(recs) != 0 {
+		t.Errorf("audit: got %d records, want 0 — egress must only be written after ingress success", len(recs))
 	}
 }
 
@@ -270,7 +308,6 @@ func TestIsBreakerNeutralErr(t *testing.T) {
 		err  error
 	}{
 		{"producer closed", ErrProducerClosed},
-		{"all fan-out failed", errFanoutAllFailed},
 		{"client canceled (disconnect)", context.Canceled},
 		{"unknown topic (misconfig)", kerr.UnknownTopicOrPartition},
 		{"topic auth failed (misconfig)", kerr.TopicAuthorizationFailed},
@@ -297,38 +334,37 @@ func TestIsBreakerNeutralErr(t *testing.T) {
 	}
 }
 
-// TestDoProduce_DLQQueueFull_IncrementsDropped: when a failed fan-out topic cannot be enqueued
-// to the DLQ pool (queue full), the producer counts it in ws_routing_dlq_dropped_total (P1b-C4,
+// TestFanout_DLQQueueFull_IncrementsDropped: when a failed egress write cannot be enqueued
+// to the DLQ pool (queue full), the pool counts it in ws_routing_dlq_dropped_total (P1b-C4,
 // §VII — the terminal-loss leg must be observable). Uses an undrained (unbuffered, no-worker)
 // DLQ queue so TrySubmit always returns false.
-func TestDoProduce_DLQQueueFull_IncrementsDropped(t *testing.T) {
+func TestFanout_DLQQueueFull_IncrementsDropped(t *testing.T) {
 	t.Parallel()
-	client := newFailingKgoClient(t) // all fan-out writes fail → all route to DLQ
+	client := newFailingKgoClient(t) // every egress write fails → routes to DLQ
 	t.Cleanup(client.Close)
 
 	pm := newPoolMetrics(prometheus.NewRegistry())
-	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	fanout := newTestFanoutPool(2, 8, client)
+	fanout := newTestFanoutPool(0, 8, client)
 	fanout.dlq = &DLQPool{jobs: make(chan dlqJob), logger: zerolog.Nop()} // unbuffered, undrained → TrySubmit false
-	fanout.Start(ctx, &wg)
+	fanout.dlqDropped = pm.dlqDropped
 
-	p := &Producer{topicNamespace: fanoutTestNamespace, ctx: ctx, fanout: fanout, dlqDropped: pm.dlqDropped}
-	_, _ = p.doProduce(context.Background(), 1, fanoutTestChannel, fanoutTestTenant,
-		[]string{fullTopic("trades"), fullTopic("audit")}, []byte(`{"x":1}`))
-
-	cancel()
-	wg.Wait()
+	// Process synchronously (no workers): the produce fails, dead-letter is
+	// attempted, the full DLQ queue rejects it — the drop must be counted.
+	fanout.process(context.Background(), fanoutJob{
+		topic:  fullTopic("audit"),
+		tenant: fanoutTestTenant,
+		record: &kgo.Record{Value: []byte(`{"x":1}`)},
+	})
 
 	if got := testutil.ToFloat64(pm.dlqDropped.WithLabelValues(fanoutTestTenant)); got != 1 {
 		t.Errorf("ws_routing_dlq_dropped_total{tenant} = %v, want 1", got)
 	}
 }
 
-// TestFanout_CloseDuringInFlight_Unblocks: Close() during an in-flight multi-topic Publish must
-// return promptly (cancel → wg.Wait → client.Close, P1b-C3) — the fan-out workers abort their
-// blocked ProduceSync on ctx cancel and the in-flight Publish unblocks via the p.ctx collect-loop
-// arm. A hang here would mean a goroutine leak.
+// TestFanout_CloseDuringInFlight_Unblocks: Close() during an in-flight Publish must return
+// promptly (cancel → wg.Wait (bounded) → client.Close, P1b-C3) — closing the client aborts the
+// blocked ingress ProduceSync so the in-flight Publish unblocks, and the egress workers exit on
+// ctx cancel. A hang here would mean a goroutine leak.
 //
 //nolint:paralleltest // timing-sensitive: blocks a produce via SleepControl then races Close
 func TestFanout_CloseDuringInFlight_Unblocks(t *testing.T) {
@@ -367,8 +403,8 @@ func TestFanout_CloseDuringInFlight_Unblocks(t *testing.T) {
 	}
 	select {
 	case err := <-pubDone:
-		// ErrProducerClosed (p.ctx arm) is the expected verdict; a fan-out aggregate error is
-		// also acceptable if the workers' ProduceSync aborted first. The point is: it RETURNED.
+		// Any error verdict is acceptable (client-closed abort of the ingress
+		// ProduceSync is typical). The point is: it RETURNED.
 		t.Logf("in-flight Publish returned: %v", err)
 	case <-time.After(5 * time.Second):
 		close(release)
@@ -377,32 +413,26 @@ func TestFanout_CloseDuringInFlight_Unblocks(t *testing.T) {
 	close(release)
 }
 
-// TestDoProduce_ZeroSuccessFanout: when every fan-out topic write fails, doProduce returns an
-// error wrapping both backend.ErrPublishFailed (→ 500, §III — not a false 2xx) and
-// errFanoutAllFailed (breaker-neutral, P1b-C1). Uses a fast-failing client (all produces fail
-// in 100ms) so no retry loop / broker needed.
-func TestDoProduce_ZeroSuccessFanout(t *testing.T) {
+// TestDoProduce_IngressFailure_NoEgressSubmitted: when the ingress write fails,
+// doProduce errors (→ 500, §III — not a false 2xx) and does NOT submit any egress
+// job — an egress topic must never hold a copy of an un-acked message (ADR-0018).
+// Uses a fast-failing client (all produces fail in 100ms) so no broker is needed.
+func TestDoProduce_IngressFailure_NoEgressSubmitted(t *testing.T) {
 	t.Parallel()
 	client := newFailingKgoClient(t)
 	t.Cleanup(client.Close)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	fanout := newTestFanoutPool(2, 8, client) // dlq nil → DLQ submission skipped
-	fanout.Start(ctx, &wg)
+	fanout := newTestFanoutPool(0, 8, client) // no workers: submitted jobs would park in handoff
 
-	p := &Producer{topicNamespace: fanoutTestNamespace, ctx: ctx, fanout: fanout}
+	p := &Producer{topicNamespace: fanoutTestNamespace, ctx: context.Background(), client: client, fanout: fanout}
 	_, err := p.doProduce(context.Background(), 1, fanoutTestChannel, fanoutTestTenant,
-		[]string{fullTopic("trades"), fullTopic("audit")}, []byte(`{"x":1}`))
+		producePlan{ingressTopic: fullTopic("trades"), egressTopics: []string{fullTopic("audit")}}, []byte(`{"x":1}`))
 
-	cancel()
-	wg.Wait()
-
-	if !errors.Is(err, errFanoutAllFailed) {
-		t.Errorf("err = %v, want errors.Is(errFanoutAllFailed)", err)
+	if err == nil {
+		t.Fatal("doProduce: ingress failure must error, got nil")
 	}
-	if !errors.Is(err, backend.ErrPublishFailed) {
-		t.Errorf("err = %v, want errors.Is(ErrPublishFailed) (→ gateway 500)", err)
+	if len(fanout.handoff) != 0 {
+		t.Errorf("egress jobs submitted after ingress failure: %d, want 0", len(fanout.handoff))
 	}
 }
 

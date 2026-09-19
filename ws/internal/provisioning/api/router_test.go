@@ -722,8 +722,8 @@ func TestRouter_RoutingRules_CRUD(t *testing.T) {
 	// 2. PUT routing rules
 	rules := provisioning.ReplaceRoutingRulesRequest{
 		Rules: []provisioning.TopicRoutingRule{
-			{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
-			{Pattern: "**.orderbook", Topics: []string{"orderbook"}, Priority: 2},
+			{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
+			{Pattern: "**.orderbook", IngressTopic: "orderbook", Priority: 2},
 		},
 	}
 	body, _ := json.Marshal(rules)
@@ -798,7 +798,7 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 				_ = k.CreateTopic(context.Background(), "test.t1.trade", 1, 1, nil)
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
-				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 5},
+				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", IngressTopic: "trade", Priority: 5},
 			},
 			wantStatus: http.StatusCreated,
 		},
@@ -810,7 +810,7 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 				rs.AddErr = provisioning.ErrDuplicatePriority
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
-				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 5},
+				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", IngressTopic: "trade", Priority: 5},
 			},
 			wantStatus: http.StatusConflict,
 			wantCode:   "ROUTING_RULE_DUPLICATE_PRIORITY",
@@ -823,7 +823,7 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 				rs.AddErr = provisioning.ErrDuplicateRoutingPattern
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
-				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 10},
+				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", IngressTopic: "trade", Priority: 10},
 			},
 			wantStatus: http.StatusConflict,
 			wantCode:   "ROUTING_RULE_DUPLICATE_PATTERN",
@@ -834,18 +834,18 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 				_ = ts.Create(context.Background(), testutil.NewTestTenant("t1"))
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
-				Rule: provisioning.TopicRoutingRule{Pattern: "**.**.bad", Topics: []string{"trade"}, Priority: 1},
+				Rule: provisioning.TopicRoutingRule{Pattern: "**.**.bad", IngressTopic: "trade", Priority: 1},
 			},
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "ROUTING_RULE_VALIDATION_ERROR",
 		},
 		{
-			name: "400 empty topics",
+			name: "400 missing ingress topic",
 			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, _ *testutil.MockRoutingRulesStore) {
 				_ = ts.Create(context.Background(), testutil.NewTestTenant("t1"))
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
-				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", Topics: []string{}, Priority: 1},
+				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", IngressTopic: "", Priority: 1},
 			},
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "ROUTING_RULE_VALIDATION_ERROR",
@@ -857,7 +857,7 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 				// topic "trade" not created in kafka — TopicExists returns false
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
-				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 5},
+				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", IngressTopic: "trade", Priority: 5},
 			},
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "TOPIC_NOT_PROVISIONED",
@@ -924,8 +924,8 @@ func TestRouter_ReplaceRoutingRules_DuplicatePattern(t *testing.T) {
 	// The handler's boundary validation passes (raw strings differ); the service catches the duplicate.
 	rules := provisioning.ReplaceRoutingRulesRequest{
 		Rules: []provisioning.TopicRoutingRule{
-			{Pattern: "trades.*", Topics: []string{"trades"}, Priority: 1},
-			{Pattern: "trades.**", Topics: []string{"trades"}, Priority: 2},
+			{Pattern: "trades.*", IngressTopic: "trades", Priority: 1},
+			{Pattern: "trades.**", IngressTopic: "trades", Priority: 2},
 		},
 	}
 	b, _ := json.Marshal(rules)
@@ -1232,14 +1232,14 @@ func TestRouter_RoutingRules_RequiresAdminRole(t *testing.T) {
 			case http.MethodPut:
 				rules := provisioning.ReplaceRoutingRulesRequest{
 					Rules: []provisioning.TopicRoutingRule{
-						{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
+						{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
 					},
 				}
 				b, _ := json.Marshal(rules)
 				body = bytes.NewReader(b)
 			case http.MethodPost:
 				req := provisioning.AddRoutingRuleRequest{
-					Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
+					Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
 				}
 				b, _ := json.Marshal(req)
 				body = bytes.NewReader(b)
@@ -2098,9 +2098,9 @@ func routingRulesBody(n int) []byte {
 	rules := make([]map[string]any, 0, n)
 	for i := range n {
 		rules = append(rules, map[string]any{
-			"pattern":  fmt.Sprintf("test.%d.**", i),
-			"topics":   []string{"trade"},
-			"priority": i + 1,
+			"pattern":       fmt.Sprintf("test.%d.**", i),
+			"ingress_topic": "trade",
+			"priority":      i + 1,
 		})
 	}
 	b, _ := json.Marshal(map[string]any{"rules": rules})
@@ -2165,7 +2165,7 @@ func TestRoutingRules_CommunityAccessAndQuota(t *testing.T) {
 		t.Fatalf("reset to %d rules = %d; body: %s", communityMaxRules, rec.Code, rec.Body.String())
 	}
 	addBody, _ := json.Marshal(map[string]any{"rule": map[string]any{
-		"pattern": "test.overflow.**", "topics": []string{"trade"}, "priority": 999,
+		"pattern": "test.overflow.**", "ingress_topic": "trade", "priority": 999,
 	}})
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 		"/api/v1/tenants/test-tenant/routing-rules", bytes.NewReader(addBody))

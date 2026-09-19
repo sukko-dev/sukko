@@ -378,8 +378,9 @@ paths:
                     description: >
                       Stable message identity assigned to the published message — the same `mid`
                       subscribers receive on the delivered envelope. Opaque, at most 64 characters.
-                      Omitted when the publish fans out to multiple topics (one publish then
-                      produces multiple messages, each with its own mid).
+                      In kafka mode it is the ingress record's identity and is present whether or
+                      not the matched routing rule also writes egress copies (egress copies carry
+                      no delivery identity).
               example:
                 status: "accepted"
                 channel: "sukko.general.messages"

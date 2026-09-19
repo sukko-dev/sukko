@@ -192,7 +192,9 @@ suite channels or every subscribe will be filtered to an empty list.
 catch-all routing rule at setup so publishes are topic-routed on the Kafka
 backend. Routing rules are ungated (`ChannelTopicRouting`, ADR-0014) — as is
 the Kafka backend itself (ADR-0009) — so the setup is expected to SUCCEED on
-every edition, Community included. The per-edition rule COUNT is the wall
+every edition, Community included. Every suite rule is ingress-only
+(`ingress_topic`, no `egress_topics`), which never trips the Pro `EgressTopics`
+gate (ADR-0018). The per-edition rule COUNT is the wall
 (Community 10, Pro 100, Enterprise unlimited); the edition-gate-tolerant
 "treat 403 as rules-not-needed" path is gone, so a routing-rules failure at
 setup now fails the suite on every edition.
@@ -553,8 +555,8 @@ stripped by the gateway's channel filter (HTTP 400).
 
 After the WS delivery check passes, the suite additionally asserts **`rest publish mid
 equality`**: the REST response's `mid` (stable message identity, ADR-0008) must be present —
-the suite's routing rule is single-topic wherever rules apply, and the direct backend always
-mints one — and byte-equal to the delivered envelope's `mid`. The check is emitted only in
+in kafka mode the ack always carries the ingress record's identity (ADR-0018), and the
+direct backend always mints one — and byte-equal to the delivered envelope's `mid`. The check is emitted only in
 the ws-receive-pass branch, so a failed delivery leaves it absent (and `REQUIRE_PASS` reds
 the cell rather than letting it green vacuously).
 
@@ -1299,7 +1301,7 @@ until the full channel-routing feature ships.
 curl -sX POST $BASE/api/v1/tenants/acme/routing-rules \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"pattern":"trades.*","topics":["default"],"priority":10}' | jq
+  -d '{"pattern":"trades.*","ingress_topic":"default","priority":10}' | jq
 # Expected error if pattern not allowed: HTTP 400 ROUTING_RULE_VALIDATION_ERROR
 
 # List
@@ -1310,7 +1312,7 @@ curl -s $BASE/api/v1/tenants/acme/routing-rules \
 curl -sX PUT $BASE/api/v1/tenants/acme/routing-rules \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"rules":[{"pattern":"*","topics":["default"],"priority":1}]}' | jq
+  -d '{"rules":[{"pattern":"*","ingress_topic":"default","priority":1}]}' | jq
 
 # Delete all rules
 curl -sX DELETE $BASE/api/v1/tenants/acme/routing-rules \

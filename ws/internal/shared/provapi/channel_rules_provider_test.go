@@ -228,7 +228,7 @@ func TestGetRoutingSnapshot_FoundAfterUpdate(t *testing.T) {
 			{
 				TenantSlug: "acme",
 				RoutingRules: []*provisioningv1.TopicRoutingRule{
-					{Pattern: "acme.*.trade", Topics: []string{"trades"}, Priority: 1},
+					{Pattern: "acme.*.trade", IngressTopic: "trades", Priority: 1},
 				},
 			},
 		},
@@ -256,7 +256,7 @@ func TestSnapshotReplace_COWDoesNotMutatePrior(t *testing.T) {
 		Tenants: []*provisioningv1.TenantConfig{{
 			TenantSlug: "acme",
 			RoutingRules: []*provisioningv1.TopicRoutingRule{
-				{Pattern: "acme.*.trade", Topics: []string{"trades"}, Priority: 1},
+				{Pattern: "acme.*.trade", IngressTopic: "trades", Priority: 1},
 			},
 		}},
 	})
@@ -269,7 +269,7 @@ func TestSnapshotReplace_COWDoesNotMutatePrior(t *testing.T) {
 		Tenants: []*provisioningv1.TenantConfig{{
 			TenantSlug: "acme",
 			RoutingRules: []*provisioningv1.TopicRoutingRule{
-				{Pattern: "acme.*.orders", Topics: []string{"orders"}, Priority: 1},
+				{Pattern: "acme.*.orders", IngressTopic: "orders", Priority: 1},
 			},
 		}},
 	})
@@ -277,10 +277,10 @@ func TestSnapshotReplace_COWDoesNotMutatePrior(t *testing.T) {
 	after, _ := r.GetRoutingSnapshot("acme")
 
 	// The previously handed-out snapshot must not have been mutated in place.
-	if len(before.Rules) != 1 || before.Rules[0].Topics[0] != "trades" {
+	if len(before.Rules) != 1 || before.Rules[0].IngressTopic != "trades" {
 		t.Errorf("before.Rules = %+v, want the original trades rule (COW must not mutate the old map)", before.Rules)
 	}
-	if len(after.Rules) != 1 || after.Rules[0].Topics[0] != "orders" {
+	if len(after.Rules) != 1 || after.Rules[0].IngressTopic != "orders" {
 		t.Errorf("after.Rules = %+v, want the replaced orders rule", after.Rules)
 	}
 }
@@ -330,7 +330,7 @@ func TestUpdateTenantConfigs_ConcurrentWithReads_NoRace(t *testing.T) {
 				Tenants: []*provisioningv1.TenantConfig{{
 					TenantSlug: "acme",
 					RoutingRules: []*provisioningv1.TopicRoutingRule{
-						{Pattern: "acme.*.trade", Topics: []string{topic}, Priority: 1},
+						{Pattern: "acme.*.trade", IngressTopic: topic, Priority: 1},
 					},
 				}},
 			})

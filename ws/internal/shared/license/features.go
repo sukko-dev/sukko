@@ -68,6 +68,8 @@ const (
 	// channel→topic mapping (no convention fallback, #179), so gating them
 	// would leave the Community Kafka backend unusable for publish.
 	// MaxRoutingRulesPerTenant in limits.go is the wall (Community 10).
+	// The rule's ingress_topic mapping is Community; EGRESS topics on a rule
+	// are the separate Pro-gated EgressTopics feature (ADR-0018).
 	ChannelTopicRouting Feature = "CHANNEL_TOPIC_ROUTING" // Implemented — ungated
 
 	// ── Pro Features ─────────────────────────────────────────────────────
@@ -85,8 +87,13 @@ const (
 	ConnectionsAPI              Feature = "connections management API"      // Implemented
 	WebPush                     Feature = "web push notifications"          // Implemented
 	AnalyticsPush               Feature = "real-time analytics for push"    // Implemented
-	ChannelPatternsCEL          Feature = "channel patterns (CEL)"          // Future
-	DeltaCompression            Feature = "delta compression"               // Future
+	// EgressTopics gates the egress_topics field on routing rules (ADR-0018):
+	// best-effort copies of published messages to additional Kafka topics the
+	// platform never consumes (audit/analytics export). A rule with only an
+	// ingress_topic never trips this gate — Community keeps full routing.
+	EgressTopics       Feature = "egress topics"          // Implemented
+	ChannelPatternsCEL Feature = "channel patterns (CEL)" // Future
+	DeltaCompression   Feature = "delta compression"      // Future
 
 	// ── Enterprise Features ──────────────────────────────────────────────
 
@@ -128,6 +135,7 @@ var featureEditions = map[Feature]Edition{
 	ConnectionsAPI:              Pro,
 	WebPush:                     Pro,
 	AnalyticsPush:               Pro,
+	EgressTopics:                Pro,
 	ChannelPatternsCEL:          Pro,
 	DeltaCompression:            Pro,
 
@@ -158,12 +166,13 @@ var featureMetadata = map[Feature]FeatureInfo{
 	TenantLifecycleManager:      {Description: "Tenant suspend/reactivate lifecycle management", Status: StatusImplemented, Priority: PriorityNone},
 	ConnectionTracing:           {Description: "OpenTelemetry distributed tracing for connections", Status: StatusImplemented, Priority: PriorityNone},
 	SSETransport:                {Description: "SSE transport", Status: StatusImplemented, Priority: PriorityNone},
-	ChannelTopicRouting:         {Description: "Per-tenant routing rules for channel-to-topic mapping, multi-topic fan-out, and header-based consumer routing", Status: StatusImplemented, Priority: PriorityNone},
+	ChannelTopicRouting:         {Description: "Per-tenant routing rules mapping channels to a ingress topic, with optional egress-only topic copies and header-based consumer routing", Status: StatusImplemented, Priority: PriorityNone},
 	TokenRevocation:             {Description: "Revoke individual JWT tokens (not just keys)", Status: StatusImplemented, Priority: PriorityNone},
 	ConnectionsAPI:              {Description: "Inspect and force-disconnect live connections per tenant", Status: StatusImplemented, Priority: PriorityNone},
 	AdminUI:                     {Description: "Web-based tenant management interface", Status: StatusImplemented, Priority: PriorityNone},
 	Analytics:                   {Description: "Real-time per-tenant usage analytics (connections, messages)", Status: StatusImplemented, Priority: PriorityNone},
 	Webhooks:                    {Description: "HTTP webhook delivery as alternative to WebSocket", Status: StatusImplemented, Priority: PriorityNone},
+	EgressTopics:                {Description: "Egress topics on routing rules — best-effort copies of published messages to additional Kafka topics for external consumers", Status: StatusImplemented, Priority: PriorityNone},
 	WebPush:                     {Description: "Web Push notifications (VAPID) to browsers", Status: StatusImplemented, Priority: PriorityNone},
 	AnalyticsPush:               {Description: "Real-time push delivery analytics (platform breakdown, failure reasons)", Status: StatusImplemented, Priority: PriorityNone},
 

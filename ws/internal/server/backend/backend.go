@@ -31,8 +31,9 @@ type MessageBackend interface {
 	// (either directly via broadcast bus or through the backend's consume loop).
 	// On success it returns the stable message identity (mid) assigned to the
 	// message — echoed to the publisher in the ack and identical on every
-	// delivered copy. A multi-topic fan-out publish returns "" (N records → N
-	// mids; the ack carries none).
+	// delivered copy. In kafka mode the mid names the ingress record; rules
+	// with egress topics still return it (ADR-0018 — egress copies are
+	// asynchronous side-copies that never carry delivery identity).
 	Publish(ctx context.Context, clientID int64, tenantID string, channel string, data []byte) (mid string, err error)
 
 	// Replay returns messages from the specified positions for client reconnection.
@@ -52,9 +53,11 @@ type MessageBackend interface {
 	// Shutdown gracefully stops the backend.
 	Shutdown(ctx context.Context) error
 
-	// ChannelTopic returns the Kafka topic name for a given channel name.
-	// Returns ok=false for backends that don't have a topic mapping (Direct)
-	// or when the channel has no registered consumer.
+	// ChannelTopic returns the Kafka INGRESS topic for a given channel name,
+	// resolved deterministically from the tenant's routing rules (first match
+	// wins; no rules or no match → the tenant default topic). Returns ok=false
+	// for backends without a topic mapping (Direct) or while the mapping is
+	// unknown (rules snapshot not yet synced — degraded, not "no mapping").
 	ChannelTopic(channel string) (topic string, ok bool)
 }
 

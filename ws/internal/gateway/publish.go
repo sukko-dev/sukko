@@ -206,7 +206,8 @@ func (gw *Gateway) HandlePublish(w http.ResponseWriter, r *http.Request) {
 		"status":  resp.GetStatus(),
 		"channel": resp.GetChannel(),
 	}
-	// Stable message identity (empty for multi-topic fan-out publishes).
+	// Stable message identity: the ingress record's mid (ADR-0018), always
+	// carried in kafka mode. Egress copies never carry delivery identity.
 	if resp.GetMid() != "" {
 		respBody["mid"] = resp.GetMid()
 	}

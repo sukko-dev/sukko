@@ -44,18 +44,7 @@ type SubscribeData struct {
 
 // PublishData is the client-facing payload for publish messages.
 // This struct is deserialized from raw client WebSocket frames.
-// It MUST NOT contain internal routing fields — use InternalPublishData for gateway→server.
 type PublishData struct {
 	Channel string          `json:"channel"`
 	Data    json.RawMessage `json:"data"`
-}
-
-// InternalPublishData is the gateway→server publish payload with resolved routing.
-// The gateway parses the client's PublishData, resolves routing rules, and constructs
-// this struct for forwarding to the server. The server MUST only read TopicSuffix from
-// InternalPublishData, never from raw client messages.
-type InternalPublishData struct {
-	Channel     string          `json:"channel"`
-	Data        json.RawMessage `json:"data"`
-	TopicSuffix string          `json:"topic_suffix"` // Resolved from tenant routing rules
 }

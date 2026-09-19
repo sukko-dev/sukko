@@ -553,8 +553,8 @@ func TestService_DeprovisionTenant_WithRoutingRules(t *testing.T) {
 	_ = kafkaAdmin.CreateTopic(context.Background(), "test.acme-corp.orderbook", 1, 1, nil)
 
 	_ = svc.ReplaceRoutingRules(context.Background(), "acme-corp", []provisioning.TopicRoutingRule{
-		{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
-		{Pattern: "**.orderbook", Topics: []string{"orderbook"}, Priority: 2},
+		{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
+		{Pattern: "**.orderbook", IngressTopic: "orderbook", Priority: 2},
 	})
 
 	// Deprovision (exercises the retention-update code path for routing rules)
@@ -714,8 +714,8 @@ func TestService_SetRoutingRules(t *testing.T) {
 
 	// Set routing rules
 	rules := []provisioning.TopicRoutingRule{
-		{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
-		{Pattern: "**.orderbook", Topics: []string{"orderbook"}, Priority: 2},
+		{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
+		{Pattern: "**.orderbook", IngressTopic: "orderbook", Priority: 2},
 	}
 	err := svc.ReplaceRoutingRules(context.Background(), "acme-corp", rules)
 	if err != nil {
@@ -743,7 +743,7 @@ func TestService_SetRoutingRules_SuspendedTenant(t *testing.T) {
 
 	// Try to set routing rules
 	rules := []provisioning.TopicRoutingRule{
-		{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
+		{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
 	}
 	err := svc.ReplaceRoutingRules(context.Background(), "acme-corp", rules)
 	if err == nil {
@@ -762,7 +762,7 @@ func TestService_DeleteRoutingRules(t *testing.T) {
 	tenant := testutil.NewTestTenant("acme-corp")
 	_ = tenantStore.Create(context.Background(), tenant)
 	_ = svc.ReplaceRoutingRules(context.Background(), "acme-corp", []provisioning.TopicRoutingRule{
-		{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
+		{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
 	})
 
 	// Delete rules
@@ -1033,9 +1033,9 @@ func TestService_SetRoutingRules_ExceedsMaxLimit(t *testing.T) {
 	rules := make([]provisioning.TopicRoutingRule, 6)
 	for i := range rules {
 		rules[i] = provisioning.TopicRoutingRule{
-			Pattern:  fmt.Sprintf("**.suffix%d", i),
-			Topics:   []string{fmt.Sprintf("topic%d", i)},
-			Priority: i + 1,
+			Pattern:      fmt.Sprintf("**.suffix%d", i),
+			IngressTopic: fmt.Sprintf("topic%d", i),
+			Priority:     i + 1,
 		}
 	}
 
@@ -1057,7 +1057,7 @@ func TestService_SetRoutingRules_InvalidRulesPropagated(t *testing.T) {
 
 	// Empty pattern should fail validation
 	rules := []provisioning.TopicRoutingRule{
-		{Pattern: "", Topics: []string{"trade"}, Priority: 1},
+		{Pattern: "", IngressTopic: "trade", Priority: 1},
 	}
 
 	err := svc.ReplaceRoutingRules(context.Background(), "acme-corp", rules)
@@ -1095,7 +1095,7 @@ func TestService_SetRoutingRules_NilStore(t *testing.T) {
 	}
 
 	rules := []provisioning.TopicRoutingRule{
-		{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
+		{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
 	}
 
 	setErr := svc.ReplaceRoutingRules(context.Background(), "acme-corp", rules)
@@ -1138,7 +1138,7 @@ func TestService_SetRoutingRules_NonexistentTenant(t *testing.T) {
 	svc, _, _, _ := newTestService()
 
 	rules := []provisioning.TopicRoutingRule{
-		{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
+		{Pattern: "**.trade", IngressTopic: "trade", Priority: 1},
 	}
 
 	err := svc.ReplaceRoutingRules(context.Background(), "nonexistent", rules)
@@ -1158,9 +1158,9 @@ func TestService_AddRoutingRule_TopicExistsError(t *testing.T) {
 	svc := newTestServiceWithKafka(kafka, ts)
 
 	err := svc.AddRoutingRule(context.Background(), "acme-corp", provisioning.TopicRoutingRule{
-		Pattern:  "**.trade",
-		Topics:   []string{"trade"},
-		Priority: 1,
+		Pattern:      "**.trade",
+		IngressTopic: "trade",
+		Priority:     1,
 	})
 	if err == nil {
 		t.Fatal("expected error when TopicExists fails, got nil")

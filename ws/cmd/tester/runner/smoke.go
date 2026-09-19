@@ -128,7 +128,7 @@ func runSmoke(ctx context.Context, run *TestRun, logger zerolog.Logger) (*metric
 		// Error ignored: if this fails, the publish round-trip check below will
 		// fail with "message not received within timeout" — no silent degradation.
 		_ = run.authResult.ProvClient.SetRoutingRules(ctx, run.authResult.TenantID, []map[string]any{
-			{"pattern": "**", "topics": []string{routing.DefaultTopicSuffix}, "priority": routing.DefaultCatchAllPriority},
+			{"pattern": "**", "ingress_topic": routing.DefaultTopicSuffix, "priority": routing.DefaultCatchAllPriority},
 		})
 
 		engine := NewPubSubEngine(PubSubEngineConfig{

@@ -4,13 +4,30 @@ package kafka
 // HeaderChannel, HeaderSource, and HeaderTimestamp are the cross-service wire
 // contract and live in internal/shared/kafka (referenced here as kafkashared.*).
 const (
-	HeaderReason          = "x-sukko-reason"
-	HeaderFailedTopics    = "x-sukko-failed-topics"
-	HeaderSucceededTopics = "x-sukko-succeeded-topics"
+	HeaderReason       = "x-sukko-reason"
+	HeaderFailedTopics = "x-sukko-failed-topics"
+
+	// Egress-failure triage headers on dead-lettered records (ADR-0018) —
+	// mirrors EventBridge's RETRY_ATTEMPTS/EXHAUSTED_RETRY_CONDITION shape.
+	// franz-go exposes no per-record attempt count, so the KIND is the fact:
+	// the classification of how the write terminated, plus the terminal error.
+	HeaderFailureKind  = "x-sukko-failure-kind"
+	HeaderFailureCause = "x-sukko-failure-cause"
 
 	// Client message provenance stamped by the producer on every outbound record.
 	// HeaderClientID and SourceWSClient are server-specific; the source/timestamp
 	// header keys are shared (kafkashared.HeaderSource / kafkashared.HeaderTimestamp).
+	// Failure-kind values for HeaderFailureKind.
+	//   retries_exhausted — the shared client's bounded retry policy
+	//     (KAFKA_PRODUCER_RECORD_RETRIES, default 8, exponential backoff from
+	//     100ms) was exhausted, or the produce hit a terminal transport error.
+	//   non_retryable — Kafka classified the error as non-retriable
+	//     (authorization, unknown topic); the client failed fast, no retries.
+	//   not_attempted — the write was never attempted (egress queue overflow).
+	FailureKindRetriesExhausted = "retries_exhausted"
+	FailureKindNonRetryable     = "non_retryable"
+	FailureKindNotAttempted     = "not_attempted"
+
 	HeaderClientID = "client_id"
 	SourceWSClient = "ws-client"
 )
@@ -48,6 +65,15 @@ const (
 	LabelTenant = "tenant"
 	LabelTopic  = "topic"
 	LabelReason = "reason"
+)
+
+// Fan-out dropped-copy reason label values for MetricFanoutDroppedTotal. They
+// distinguish RECOVERABLE loss (queue-full copies are still dead-lettered) from
+// TERMINAL loss (both shutdown legs), so alerts can act on the difference (ADR-0018).
+const (
+	FanoutDropReasonQueueFull    = "queue_full"         // handoff full; copy dead-lettered, not lost
+	FanoutDropReasonShutdown     = "shutdown_undrained" // undrained when the pool timed out at shutdown
+	FanoutDropReasonPostShutdown = "post_shutdown"      // submitted after shutdown began; not attempted
 )
 
 // Consumer type identifiers used as Prometheus label values and log field values.

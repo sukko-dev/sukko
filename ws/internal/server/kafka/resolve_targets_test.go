@@ -49,14 +49,14 @@ func syncedProvider(rules ...types.RoutingRule) *stubRulesProvider {
 	}
 }
 
-func rule(pattern string, topics ...string) types.RoutingRule {
-	return types.RoutingRule{Pattern: pattern, Topics: topics, Priority: 1}
+func rule(pattern, ingress string, egress ...string) types.RoutingRule {
+	return types.RoutingRule{Pattern: pattern, IngressTopic: ingress, EgressTopics: egress, Priority: 1}
 }
 
-// TestPublish_MultiTopicRejectDoesNotTripBreaker pins the invariant that a multi-topic rule
-// with no fanout pool (the P1a state) is rejected BEFORE the circuit breaker — so one
-// tenant's valid multi-topic rule cannot open the shared breaker and 503 every tenant (§IX).
-func TestPublish_MultiTopicRejectDoesNotTripBreaker(t *testing.T) {
+// TestPublish_EgressRejectDoesNotTripBreaker pins the invariant that a rule with egress
+// topics but no fanout pool (the P1a state) is rejected BEFORE the circuit breaker — so one
+// tenant's valid egress rule cannot open the shared breaker and 503 every tenant (§IX).
+func TestPublish_EgressRejectDoesNotTripBreaker(t *testing.T) {
 	t.Parallel()
 
 	logger := zerolog.Nop()
@@ -82,7 +82,7 @@ func TestPublish_MultiTopicRejectDoesNotTripBreaker(t *testing.T) {
 		}
 	}
 	if state := p.CircuitBreakerState(); state != gobreaker.StateClosed {
-		t.Errorf("breaker state = %v, want Closed — multi-topic rejects must not trip the breaker", state)
+		t.Errorf("breaker state = %v, want Closed — egress rejects must not trip the breaker", state)
 	}
 }
 
@@ -92,10 +92,11 @@ func TestResolveTargets(t *testing.T) {
 	const channel = "acme.BTC.trade"
 
 	tests := []struct {
-		name       string
-		producer   *Producer
-		wantTopics []string
-		wantErrIs  error // nil = no error expected
+		name        string
+		producer    *Producer
+		wantIngress string
+		wantEgress  []string
+		wantErrIs   error // nil = no error expected
 	}{
 		{
 			name:      "nil provider rejects (no community fallback)",
@@ -118,24 +119,33 @@ func TestResolveTargets(t *testing.T) {
 			wantErrIs: backend.ErrPublishNotRoutable,
 		},
 		{
-			name:       "single-topic rule match produces",
-			producer:   resolveTargetsProducer(syncedProvider(rule("acme.*.trade", "trades"))),
-			wantTopics: []string{"prod.acme.trades"},
+			name:        "ingress-only rule match produces",
+			producer:    resolveTargetsProducer(syncedProvider(rule("acme.*.trade", "trades"))),
+			wantIngress: "prod.acme.trades",
 		},
 		{
-			name:       "multi-topic rule returns all topics",
-			producer:   resolveTargetsProducer(syncedProvider(rule("acme.**.trade", "trades", "all-data"))),
-			wantTopics: []string{"prod.acme.trades", "prod.acme.all-data"},
+			name:        "rule with egress returns ingress plus egress plan",
+			producer:    resolveTargetsProducer(syncedProvider(rule("acme.**.trade", "trades", "all-data"))),
+			wantIngress: "prod.acme.trades",
+			wantEgress:  []string{"prod.acme.all-data"},
 		},
 		{
-			name:       "duplicate topics in one rule dedupe to a single produce",
-			producer:   resolveTargetsProducer(syncedProvider(rule("acme.**.trade", "trades", "trades"))),
-			wantTopics: []string{"prod.acme.trades"},
+			// §II defense in depth: validation rejects this at write time, but a
+			// skewed snapshot must not double-produce to the ingress topic.
+			name:        "egress equal to ingress is dropped from the plan",
+			producer:    resolveTargetsProducer(syncedProvider(rule("acme.**.trade", "trades", "trades"))),
+			wantIngress: "prod.acme.trades",
 		},
 		{
-			// C1 revised (#179): zero-topic rule → no-match → REJECT (was DLQ).
-			name:      "zero-topic rule treated as no-match rejects",
-			producer:  resolveTargetsProducer(syncedProvider(rule("acme.*.trade"))),
+			name:        "duplicate egress topics dedupe to a single copy",
+			producer:    resolveTargetsProducer(syncedProvider(rule("acme.**.trade", "trades", "audit", "audit"))),
+			wantIngress: "prod.acme.trades",
+			wantEgress:  []string{"prod.acme.audit"},
+		},
+		{
+			// C1 revised (#179): a rule with no ingress topic → no-match → REJECT (was DLQ).
+			name:      "no-ingress rule treated as no-match rejects",
+			producer:  resolveTargetsProducer(syncedProvider(rule("acme.*.trade", ""))),
 			wantErrIs: backend.ErrNoMatchingRoute,
 		},
 		{
@@ -145,16 +155,16 @@ func TestResolveTargets(t *testing.T) {
 			wantErrIs: backend.ErrNoMatchingRoute,
 		},
 		{
-			name:       "first matching rule wins",
-			producer:   resolveTargetsProducer(syncedProvider(rule("acme.**.trade", "all-trades"), rule("acme.BTC.trade", "btc-trades"))),
-			wantTopics: []string{"prod.acme.all-trades"},
+			name:        "first matching rule wins",
+			producer:    resolveTargetsProducer(syncedProvider(rule("acme.**.trade", "all-trades"), rule("acme.BTC.trade", "btc-trades"))),
+			wantIngress: "prod.acme.all-trades",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			topics, err := tt.producer.resolveTargets(channel, "acme")
+			plan, err := tt.producer.resolveTargets(channel, "acme")
 
 			if tt.wantErrIs != nil {
 				if !errors.Is(err, tt.wantErrIs) {
@@ -165,20 +175,23 @@ func TestResolveTargets(t *testing.T) {
 				if errors.Is(err, backend.ErrNoMatchingRoute) && !errors.Is(err, backend.ErrPublishNotRoutable) {
 					t.Errorf("ErrNoMatchingRoute must also satisfy errors.Is(ErrPublishNotRoutable); err = %v", err)
 				}
-				if topics != nil {
-					t.Errorf("topics = %v, want nil on reject", topics)
+				if plan.ingressTopic != "" || plan.egressTopics != nil {
+					t.Errorf("plan = %+v, want zero value on reject", plan)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected err = %v", err)
 			}
-			if len(topics) != len(tt.wantTopics) {
-				t.Fatalf("topics = %v, want %v", topics, tt.wantTopics)
+			if plan.ingressTopic != tt.wantIngress {
+				t.Errorf("plan.ingressTopic = %q, want %q", plan.ingressTopic, tt.wantIngress)
 			}
-			for i, want := range tt.wantTopics {
-				if topics[i] != want {
-					t.Errorf("topics[%d] = %q, want %q", i, topics[i], want)
+			if len(plan.egressTopics) != len(tt.wantEgress) {
+				t.Fatalf("plan.egressTopics = %v, want %v", plan.egressTopics, tt.wantEgress)
+			}
+			for i, want := range tt.wantEgress {
+				if plan.egressTopics[i] != want {
+					t.Errorf("plan.egressTopics[%d] = %q, want %q", i, plan.egressTopics[i], want)
 				}
 			}
 		})

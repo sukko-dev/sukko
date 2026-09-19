@@ -139,7 +139,7 @@ func newTestService(t *testing.T, extraSeed ...func(ctx context.Context, tenantS
 
 	// Seed routing rules keyed by UUID (service lookups use tenant.ID).
 	routingRulesStore.Seed(tenant.ID, []provisioning.TopicRoutingRule{
-		{Pattern: "**.trade", Topics: []string{"trade"}, Priority: 1},
+		{Pattern: "**.trade", IngressTopic: "trade", EgressTopics: []string{"audit"}, Priority: 1},
 	})
 
 	// Seed channel rules keyed by UUID (service lookups use tenant.ID).
@@ -358,11 +358,11 @@ func TestWatchTenantConfig_Snapshot(t *testing.T) { //nolint:paralleltest // use
 	if tc.GetRoutingRules()[0].GetPattern() != "**.trade" {
 		t.Errorf("routing rule pattern = %q, want %q", tc.GetRoutingRules()[0].GetPattern(), "**.trade")
 	}
-	if tc.GetRoutingRules()[0].GetTopicSuffix() != "trade" {
-		t.Errorf("routing rule topic_suffix (compat) = %q, want %q", tc.GetRoutingRules()[0].GetTopicSuffix(), "trade")
+	if tc.GetRoutingRules()[0].GetIngressTopic() != "trade" {
+		t.Errorf("routing rule ingress topic = %q, want %q", tc.GetRoutingRules()[0].GetIngressTopic(), "trade")
 	}
-	if len(tc.GetRoutingRules()[0].GetTopics()) != 1 || tc.GetRoutingRules()[0].GetTopics()[0] != "trade" {
-		t.Errorf("routing rule topics = %v, want [trade]", tc.GetRoutingRules()[0].GetTopics())
+	if egress := tc.GetRoutingRules()[0].GetEgressTopics(); len(egress) != 1 || egress[0] != "audit" {
+		t.Errorf("routing rule egress topics = %v, want [audit]", egress)
 	}
 }
 
@@ -388,19 +388,27 @@ func TestWatchTopics_Snapshot(t *testing.T) { //nolint:paralleltest // uses shar
 		t.Error("first message should be a snapshot")
 	}
 
-	// ADR-0006: the consume set = the tenant's deterministic default topic ∪ the
-	// suffixes its routing rules reference. Default consumer type is shared.
+	// ADR-0006/ADR-0018: the consume set = the tenant's deterministic default
+	// topic ∪ its rules' INGRESS topics. The seeded rule's egress topic ("audit")
+	// MUST NOT appear here — a consumed egress topic re-delivers every copy to
+	// every subscriber. Default consumer type is shared.
 	got := append([]string(nil), resp.GetSharedTopics()...)
 	sort.Strings(got)
 	want := []string{"test.test-tenant.default", "test.test-tenant.trade"}
 	if !slices.Equal(got, want) {
-		t.Errorf("shared topics = %v, want %v", got, want)
+		t.Errorf("shared topics = %v, want %v (egress topics must never be consumed)", got, want)
+	}
+
+	// The egress topic travels in create_only_topics instead: created on the
+	// broker (ensureTopicsExist), never subscribed.
+	if co := resp.GetCreateOnlyTopics(); len(co) != 1 || co[0] != "test.test-tenant.audit" {
+		t.Errorf("create_only_topics = %v, want [test.test-tenant.audit]", co)
 	}
 }
 
 // TestWatchTopics_RulelessTenantContributesDefaultTopic pins the ADR-0006 fix that
-// makes Community ingest possible: a tenant with NO routing rules (rules are
-// Pro-gated) must still contribute its default topic to the consume/create set —
+// makes Community ingest possible: a tenant with NO routing rules must still
+// contribute its default topic to the consume/create set —
 // previously such tenants were skipped entirely, so their topics were never
 // physically created nor consumed and free-tier ingest was structurally dead.
 func TestWatchTopics_RulelessTenantContributesDefaultTopic(t *testing.T) { //nolint:paralleltest // uses shared gRPC test server

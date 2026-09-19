@@ -87,6 +87,32 @@ func (p *DLQPool) runWorker(ctx context.Context) {
 		case job := <-p.jobs:
 			p.process(ctx, job)
 		case <-ctx.Done():
+			p.drainAbandoned()
+			return
+		}
+	}
+}
+
+// drainAbandoned counts and logs every job still queued when the pool is shut down.
+// The producer's Close cancels this context only AFTER the fan-out pool has drained,
+// so no producer is still submitting here — the remaining jobs are a bounded backlog
+// (at most the channel's buffer). Each shutting-down worker drains what it can with a
+// non-blocking receive; concurrent drains across workers are safe (channel receive and
+// the counter are both concurrency-safe) and collectively empty the queue. §VII: bounded
+// by the buffer, no blocking, no send on the never-closed channel. ADR-0018: a dropped
+// dead-letter copy is surfaced, never silent.
+func (p *DLQPool) drainAbandoned() {
+	for {
+		select {
+		case job := <-p.jobs:
+			p.logger.Warn().
+				Str(logging.LogKeyTenantSlug, job.tenant).
+				Str(LabelReason, job.reason).
+				Msg("DLQ write abandoned: pool shut down with job still queued — dropping record")
+			if p.writeFailedCounter != nil {
+				p.writeFailedCounter.WithLabelValues(job.tenant, job.reason).Inc()
+			}
+		default:
 			return
 		}
 	}

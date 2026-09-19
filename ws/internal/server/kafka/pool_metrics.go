@@ -15,7 +15,8 @@ import (
 //
 // Label arities match the existing sibling registrations and MUST be preserved:
 //   - fanoutWriteFailed {tenant,topic} — per-topic produce failure (may be DLQ-retried)
-//   - fanoutDropped     {tenant}       — fan-out enqueue-backpressure drop (still routed to DLQ)
+//   - fanoutDropped     {tenant,reason}— egress copy not delivered; reason distinguishes
+//     queue_full (recoverable, dead-lettered) from shutdown_undrained/post_shutdown (terminal) (ADR-0018)
 //   - dlqWriteFailed    {tenant,reason}— DLQ write failed after retry exhaustion (terminal loss)
 //   - dlqDropped        {tenant}       — DLQ enqueue full, write never attempted (terminal loss)
 type poolMetrics struct {
@@ -55,8 +56,8 @@ func buildPoolMetrics(f promauto.Factory) poolMetrics {
 		}, []string{LabelTenant, LabelTopic}),
 		fanoutDropped: f.NewCounterVec(prometheus.CounterOpts{
 			Name: MetricFanoutDroppedTotal,
-			Help: "Total fan-out jobs dropped because the queue was full (still routed to DLQ)",
-		}, []string{LabelTenant}),
+			Help: "Total egress copies not delivered to their topic, by reason: queue_full (recoverable — still dead-lettered), shutdown_undrained and post_shutdown (terminal)",
+		}, []string{LabelTenant, LabelReason}),
 		dlqWriteFailed: f.NewCounterVec(prometheus.CounterOpts{
 			Name: MetricDLQWriteFailedTotal,
 			Help: "Total dead-letter writes that failed after all retries",
