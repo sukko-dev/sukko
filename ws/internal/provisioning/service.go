@@ -660,7 +660,7 @@ func (s *Service) DeprovisionTenant(ctx context.Context, tenantID string, force 
 			gracePeriodMs := int64(s.config.DeprovisionGraceDays) * msPerDay
 			seen := make(map[string]struct{})
 			for _, rule := range rules {
-				for _, suffix := range rule.Topics {
+				for _, suffix := range rule.AllTopicSuffixes() {
 					if _, ok := seen[suffix]; ok {
 						continue
 					}
@@ -709,7 +709,7 @@ func (s *Service) forceDeleteTenant(ctx context.Context, tenant *Tenant) error {
 		} else {
 			seen := make(map[string]struct{})
 			for _, rule := range rules {
-				for _, suffix := range rule.Topics {
+				for _, suffix := range rule.AllTopicSuffixes() {
 					if _, ok := seen[suffix]; !ok {
 						seen[suffix] = struct{}{}
 						topicSuffixes = append(topicSuffixes, suffix)
@@ -1108,6 +1108,27 @@ func (s *Service) DeleteChannelRules(ctx context.Context, tenantID string) error
 	return nil
 }
 
+// checkEgressTopicsAllowed enforces the Pro gate on routing-rule egress topics
+// (license.EgressTopics, ADR-0018). Only rules that actually carry egress topics
+// are gated: an ingress-only rule set is Community routing (ADR-0014) and MUST
+// pass on every edition. nil editionManager (tests / no license wiring) means no
+// gate — consistent with the other edition checks in this service.
+func (s *Service) checkEgressTopicsAllowed(rules []TopicRoutingRule) error {
+	if s.editionManager == nil {
+		return nil
+	}
+	for _, rule := range rules {
+		if len(rule.EgressTopics) == 0 {
+			continue
+		}
+		if !s.editionManager.HasFeature(license.EgressTopics) {
+			return fmt.Errorf("edition gate: %w", license.NewFeatureError(license.EgressTopics, s.editionManager.Edition()))
+		}
+		return nil // feature present — one check covers the whole set
+	}
+	return nil
+}
+
 // GetRoutingRules retrieves routing rules for a tenant.
 func (s *Service) GetRoutingRules(ctx context.Context, tenantID string) ([]TopicRoutingRule, error) {
 	if s.routingRules == nil {
@@ -1159,10 +1180,18 @@ func (s *Service) ReplaceRoutingRules(ctx context.Context, tenantID string, rule
 		return fmt.Errorf("invalid routing rules: %w", err)
 	}
 
+	// Edition gate: egress topics are Pro (license.EgressTopics, ADR-0018). Checked
+	// AFTER shape validation so malformed rules keep returning 400 on every edition,
+	// and ONLY when a rule actually carries egress topics — an ingress-only rule set
+	// must never trip this gate (Community keeps full routing per ADR-0014).
+	if err := s.checkEgressTopicsAllowed(rules); err != nil {
+		return err
+	}
+
 	// Verify all referenced topics are provisioned (deduped by suffix).
 	seen := make(map[string]struct{})
 	for _, rule := range rules {
-		for _, suffix := range rule.Topics {
+		for _, suffix := range rule.AllTopicSuffixes() {
 			if _, ok := seen[suffix]; ok {
 				continue
 			}
@@ -1216,9 +1245,15 @@ func (s *Service) AddRoutingRule(ctx context.Context, tenantID string, rule Topi
 	// Normalize bare * to ** before validation so patterns are stored in canonical form.
 	rule.Pattern = routing.NormalizePattern(rule.Pattern)
 
-	// Validate rule structure (pattern syntax, non-empty topics, per-rule topic limit).
+	// Validate rule structure (pattern syntax, ingress topic, per-rule topic limit).
 	if err := ValidateRoutingRules([]TopicRoutingRule{rule}, 0, s.config.MaxTopicsPerRule); err != nil {
 		return fmt.Errorf("invalid routing rule: %w", err)
+	}
+
+	// Edition gate: egress topics are Pro (license.EgressTopics, ADR-0018) — see
+	// ReplaceRoutingRules. Ingress-only rules never trip it.
+	if err := s.checkEgressTopicsAllowed([]TopicRoutingRule{rule}); err != nil {
+		return err
 	}
 
 	// Enforce per-tenant rule count limits (Constitution II: every boundary validates inputs).
@@ -1226,6 +1261,10 @@ func (s *Service) AddRoutingRule(ctx context.Context, tenantID string, rule Topi
 	// limit can sit BELOW the config limit (Community 10 < MAX_ROUTING_RULES_PER_TENANT's
 	// default 100), so this incremental path must check it too — otherwise a tenant walks
 	// past its edition cap one POST at a time and the tier wall (ADR-0014) is void.
+	// Known residual: this count read is not serialized with the insert — two
+	// concurrent Adds can both observe N-1 and land N+1. Bounded overshoot only
+	// (by the concurrency degree), and the next Add re-checks; closing it would
+	// require pushing the config+edition limits into the repository transaction.
 	if s.config.MaxRoutingRulesPerTenant > 0 || s.editionManager != nil {
 		_, total, err := s.routingRules.List(ctx, tenant.ID, 1, 0)
 		if err != nil {
@@ -1241,8 +1280,24 @@ func (s *Service) AddRoutingRule(ctx context.Context, tenantID string, rule Topi
 		}
 	}
 
+	// Tenant-wide ingress/egress disjointness (both directions): the new rule's
+	// egress topics must not be existing ingress topics, and the new rule's
+	// ingress topic must not be an existing egress topic. Either overlap would
+	// pull an egress topic into the consume set and deliver its copies (ADR-0018).
+	// This read-validate pair is a fast-fail pre-check only (§II defense in
+	// depth): it is NOT atomic with the insert. The authoritative check runs
+	// inside RoutingRulesRepository.Add's transaction under a per-tenant
+	// advisory lock, where a concurrent Add's committed row is visible.
+	existing, err := s.routingRules.GetAll(ctx, tenant.ID)
+	if err != nil {
+		return fmt.Errorf("get routing rules for disjointness check: %w", err)
+	}
+	if err := ValidateEgressDisjoint(append(existing, rule)); err != nil {
+		return fmt.Errorf("invalid routing rule: %w", err)
+	}
+
 	// Verify all referenced topics are provisioned.
-	for _, suffix := range rule.Topics {
+	for _, suffix := range rule.AllTopicSuffixes() {
 		topicName := kafka.BuildTopicName(s.config.TopicNamespace, tenant.Slug, suffix)
 		exists, err := s.kafka.TopicExists(ctx, topicName)
 		if err != nil {
@@ -1258,9 +1313,10 @@ func (s *Service) AddRoutingRule(ctx context.Context, tenantID string, rule Topi
 	}
 
 	s.auditLog(ctx, tenant.ID, ActionAddRoutingRule, Metadata{
-		"pattern":  rule.Pattern,
-		"topics":   rule.Topics,
-		"priority": rule.Priority,
+		"pattern":       rule.Pattern,
+		"ingress_topic": rule.IngressTopic,
+		"egress_topics": rule.EgressTopics,
+		"priority":      rule.Priority,
 	})
 
 	s.logger.Info().

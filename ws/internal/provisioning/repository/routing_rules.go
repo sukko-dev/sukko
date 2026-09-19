@@ -25,6 +25,24 @@ const (
 	constraintRoutingRuleTenantPattern  = "uq_routing_rule_tenant_pattern"
 )
 
+// TenantRoutingRulesLockQuery acquires the per-tenant, transaction-scoped advisory
+// lock that serializes routing-rule writes (Add, Replace) for one tenant. $1 is the
+// tenant UUID.
+//
+// Key derivation: hashtextextended is PostgreSQL's 64-bit text hash — it backs hash
+// partitioning, so PostgreSQL guarantees it is stable across versions and platforms,
+// giving a deterministic bigint key per tenant. The "routing-rules:" prefix
+// namespaces this use away from any future advisory-lock caller hashing bare IDs.
+// The only other advisory lock in the codebase is the migration lock
+// (shared/database/migrate.go, literal int8 0x73756B6B6F); a hashtextextended output
+// colliding with it — or two tenants colliding with each other — is a ~2^-64 event
+// whose worst case is transient extra serialization, never corruption or deadlock
+// (locks are always taken singly, so no ordering cycle can form).
+//
+// Exported so tests can hold the exact lock a write path will contend on (§I —
+// defined once, referenced everywhere).
+const TenantRoutingRulesLockQuery = `SELECT pg_advisory_xact_lock(hashtextextended('routing-rules:' || $1, 0))`
+
 // RoutingRulesRepository implements RoutingRulesStore using PostgreSQL via pgxpool.
 // All tenantID parameters are the tenant UUID primary key (FK → tenants.id), not the slug.
 type RoutingRulesRepository struct {
@@ -78,7 +96,7 @@ func (r *RoutingRulesRepository) List(ctx context.Context, tenantID string, limi
 	}
 
 	listQuery := `
-		SELECT pattern, topics, priority
+		SELECT pattern, ingress_topic, egress_topics, priority
 		FROM tenant_routing_rules
 		WHERE tenant_id = $1
 		ORDER BY priority ASC
@@ -97,15 +115,61 @@ func (r *RoutingRulesRepository) List(ctx context.Context, tenantID string, limi
 	return rules, total, nil
 }
 
-// Add inserts a single routing rule for a tenant.
-// Returns ErrDuplicatePriority on priority conflict, ErrDuplicateRoutingPattern on pattern conflict.
+// lockTenantRoutingRules takes the per-tenant advisory lock inside tx, blocking
+// until any concurrent routing-rule write transaction for the same tenant commits
+// or rolls back. The _xact_ variant releases automatically with the transaction
+// (commit, rollback, connection loss) — no manual unlock, no leaked locks.
+//
+// Correctness requires the transaction to run at the default READ COMMITTED
+// isolation: each statement after the lock takes a fresh snapshot and therefore
+// sees the previous holder's committed rows. Do not raise the isolation level in
+// callers — under REPEATABLE READ the snapshot would predate the competing commit
+// and the read-validate-insert race would silently return.
+func lockTenantRoutingRules(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	if _, err := tx.Exec(ctx, TenantRoutingRulesLockQuery, tenantID); err != nil {
+		return fmt.Errorf("acquire tenant routing-rules lock: %w", err)
+	}
+	return nil
+}
+
+// Add inserts a single routing rule for a tenant, enforcing the tenant-wide
+// ingress/egress disjointness invariant (ADR-0018) atomically: the per-tenant
+// advisory lock, the existing-rules read, the disjointness validation, and the
+// insert run in ONE transaction, so of two concurrent Adds the second blocks on
+// the lock and then validates against the first's committed row. The equivalent
+// check in Service.AddRoutingRule is a fast-fail pre-check only (§II defense in
+// depth) — this is the authoritative one.
+// Returns ErrDuplicatePriority on priority conflict, ErrDuplicateRoutingPattern
+// on pattern conflict, ErrEgressIngressOverlap on a disjointness violation.
 func (r *RoutingRulesRepository) Add(ctx context.Context, tenantID string, rule provisioning.TopicRoutingRule) error {
-	query := `
-		INSERT INTO tenant_routing_rules (tenant_id, pattern, topics, priority)
-		VALUES ($1, $2, $3, $4)
-	`
-	_, err := r.pool.Exec(ctx, query, tenantID, rule.Pattern, rule.Topics, rule.Priority)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	// Unconditional rollback: idempotent after a successful Commit (returns
+	// ErrTxClosed, ignored per §III), and it MUST run even when the failure is
+	// carried in an if-scoped err (the lock acquisition below) or a panic occurs
+	// between Begin and Commit — a conditional rollback would leak the pool
+	// connection on exactly the contended-timeout path the advisory lock creates.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockTenantRoutingRules(ctx, tx, tenantID); err != nil {
+		return err
+	}
+
+	existing, err := r.getAll(ctx, tx, tenantID)
+	if err != nil {
+		return err
+	}
+	if err = provisioning.ValidateEgressDisjoint(append(existing, rule)); err != nil {
+		return fmt.Errorf("add routing rule: %w", err)
+	}
+
+	const insertQuery = `
+		INSERT INTO tenant_routing_rules (tenant_id, pattern, ingress_topic, egress_topics, priority)
+		VALUES ($1, $2, $3, $4, $5)
+	`
+	if _, err = tx.Exec(ctx, insertQuery, tenantID, rule.Pattern, rule.IngressTopic, egressOrEmpty(rule.EgressTopics), rule.Priority); err != nil {
 		switch pgUniqueConstraintName(err) {
 		case constraintRoutingRuleTenantPriority:
 			return fmt.Errorf("add routing rule: %w", provisioning.ErrDuplicatePriority)
@@ -113,6 +177,10 @@ func (r *RoutingRulesRepository) Add(ctx context.Context, tenantID string, rule 
 			return fmt.Errorf("add routing rule: %w", provisioning.ErrDuplicateRoutingPattern)
 		}
 		return fmt.Errorf("add routing rule: %w", err)
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit routing rule add: %w", err)
 	}
 	return nil
 }
@@ -123,11 +191,21 @@ func (r *RoutingRulesRepository) Replace(ctx context.Context, tenantID string, r
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback(ctx)
-		}
-	}()
+	// Unconditional rollback: idempotent after a successful Commit (returns
+	// ErrTxClosed, ignored per §III), and it MUST run even when the failure is
+	// carried in an if-scoped err (the lock acquisition below) or a panic occurs
+	// between Begin and Commit — a conditional rollback would leak the pool
+	// connection on exactly the contended-timeout path the advisory lock creates.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialize with concurrent Adds for this tenant. Without the lock, an Add
+	// validated against pre-Replace rows can commit alongside this Replace: the
+	// DELETE below cannot see the Add's uncommitted row, so that rule survives
+	// the overwrite and may overlap the self-validated replacement set,
+	// breaking ADR-0018 disjointness.
+	if err := lockTenantRoutingRules(ctx, tx, tenantID); err != nil {
+		return err
+	}
 
 	if _, err = tx.Exec(ctx, `DELETE FROM tenant_routing_rules WHERE tenant_id = $1`, tenantID); err != nil {
 		return fmt.Errorf("delete routing rules: %w", err)
@@ -135,10 +213,10 @@ func (r *RoutingRulesRepository) Replace(ctx context.Context, tenantID string, r
 
 	for _, rule := range rules {
 		const insertQuery = `
-			INSERT INTO tenant_routing_rules (tenant_id, pattern, topics, priority)
-			VALUES ($1, $2, $3, $4)
+			INSERT INTO tenant_routing_rules (tenant_id, pattern, ingress_topic, egress_topics, priority)
+			VALUES ($1, $2, $3, $4, $5)
 		`
-		if _, err = tx.Exec(ctx, insertQuery, tenantID, rule.Pattern, rule.Topics, rule.Priority); err != nil {
+		if _, err = tx.Exec(ctx, insertQuery, tenantID, rule.Pattern, rule.IngressTopic, egressOrEmpty(rule.EgressTopics), rule.Priority); err != nil {
 			switch pgUniqueConstraintName(err) {
 			case constraintRoutingRuleTenantPriority:
 				return fmt.Errorf("replace routing rules: %w", provisioning.ErrDuplicatePriority)
@@ -166,8 +244,19 @@ func (r *RoutingRulesRepository) DeleteAll(ctx context.Context, tenantID string)
 // GetAll returns all routing rules for a tenant ordered by priority, with normalization applied.
 // Rules that fail pattern validation after normalization are skipped and counted.
 func (r *RoutingRulesRepository) GetAll(ctx context.Context, tenantID string) ([]provisioning.TopicRoutingRule, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT pattern, topics, priority
+	return r.getAll(ctx, r.pool, tenantID)
+}
+
+// pgxQuerier abstracts *pgxpool.Pool and pgx.Tx so getAll can read either pooled
+// (GetAll) or inside a write transaction (Add's in-tx disjointness re-read).
+type pgxQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// getAll implements GetAll against any querier (pool or open transaction).
+func (r *RoutingRulesRepository) getAll(ctx context.Context, q pgxQuerier, tenantID string) ([]provisioning.TopicRoutingRule, error) {
+	rows, err := q.Query(ctx, `
+		SELECT pattern, ingress_topic, egress_topics, priority
 		FROM tenant_routing_rules
 		WHERE tenant_id = $1
 		ORDER BY priority ASC
@@ -185,10 +274,11 @@ func (r *RoutingRulesRepository) scanRows(_ context.Context, tenantID string, ro
 	var rules []provisioning.TopicRoutingRule
 	for rows.Next() {
 		var pattern string
-		var topics []string
+		var ingressTopic string
+		var egressTopics []string
 		var priority int
 
-		if err := rows.Scan(&pattern, &topics, &priority); err != nil {
+		if err := rows.Scan(&pattern, &ingressTopic, &egressTopics, &priority); err != nil {
 			return nil, fmt.Errorf("scan routing rule: %w", err)
 		}
 
@@ -204,9 +294,10 @@ func (r *RoutingRulesRepository) scanRows(_ context.Context, tenantID string, ro
 		}
 
 		rules = append(rules, provisioning.TopicRoutingRule{
-			Pattern:  normalized,
-			Topics:   topics,
-			Priority: priority,
+			Pattern:      normalized,
+			IngressTopic: ingressTopic,
+			EgressTopics: egressTopics,
+			Priority:     priority,
 		})
 	}
 
@@ -214,6 +305,15 @@ func (r *RoutingRulesRepository) scanRows(_ context.Context, tenantID string, ro
 		return nil, fmt.Errorf("iterate routing rules: %w", err)
 	}
 	return rules, nil
+}
+
+// egressOrEmpty maps a nil egress slice to an empty array so the NOT NULL
+// egress_topics column never receives a SQL NULL from a rule without egress.
+func egressOrEmpty(egress []string) []string {
+	if egress == nil {
+		return []string{}
+	}
+	return egress
 }
 
 // pgUniqueConstraintName returns the constraint name when err is a PostgreSQL unique violation

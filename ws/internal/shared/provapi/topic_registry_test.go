@@ -267,3 +267,47 @@ func TestTopicRegistry_TopicTenants(t *testing.T) {
 		t.Error("TopicTenants must return a copy, not the internal map")
 	}
 }
+
+// TestTopicRegistry_CreateOnlyTopics pins the ADR-0018 split at the registry
+// boundary: create_only_topics (routing-rule egress topics) are exposed for
+// topic CREATION only and never leak into the shared or dedicated consume sets.
+func TestTopicRegistry_CreateOnlyTopics(t *testing.T) {
+	t.Parallel()
+	r := newTestTopicRegistry()
+
+	r.updateTopics(&provisioningv1.WatchTopicsResponse{
+		IsSnapshot:       true,
+		SharedTopics:     []string{"test.tenant-a.default", "test.tenant-a.trades"},
+		CreateOnlyTopics: []string{"test.tenant-a.audit"},
+	})
+
+	got := r.CreateOnlyTopics()
+	if len(got) != 1 || got[0] != "test.tenant-a.audit" {
+		t.Fatalf("CreateOnlyTopics() = %v, want [test.tenant-a.audit]", got)
+	}
+
+	shared, err := r.GetSharedTenantTopics(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("GetSharedTenantTopics: %v", err)
+	}
+	for _, topic := range shared {
+		if topic == "test.tenant-a.audit" {
+			t.Error("egress topic leaked into the shared consume set")
+		}
+	}
+
+	// Returned slice is a copy — mutating it must not corrupt the cache.
+	got[0] = "mutated"
+	if again := r.CreateOnlyTopics(); again[0] != "test.tenant-a.audit" {
+		t.Error("CreateOnlyTopics() must return a defensive copy")
+	}
+
+	// A subsequent snapshot replaces the set.
+	r.updateTopics(&provisioningv1.WatchTopicsResponse{
+		IsSnapshot:   true,
+		SharedTopics: []string{"test.tenant-a.default"},
+	})
+	if again := r.CreateOnlyTopics(); len(again) != 0 {
+		t.Errorf("CreateOnlyTopics() after replacing snapshot = %v, want empty", again)
+	}
+}

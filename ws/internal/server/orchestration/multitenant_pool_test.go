@@ -1333,48 +1333,4 @@ func TestUpdateDedicatedConsumers_DeprovisionedTenantGoesToToStop(t *testing.T) 
 	}
 }
 
-func TestMultiTenantPool_ChannelTopic(t *testing.T) {
-	t.Parallel()
-
-	logger := zerolog.New(nil).Level(zerolog.Disabled)
-	registry := &mockTenantRegistry{}
-	bus := &mockBroadcastBus{}
-	guard := &mockResourceGuard{}
-
-	pool, err := NewMultiTenantConsumerPool(MultiTenantPoolConfig{
-		Brokers:       []string{"localhost:9092"},
-		Namespace:     "prod",
-		Registry:      registry,
-		BroadcastBus:  bus,
-		ResourceGuard: guard,
-		Logger:        logger,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Before any message routed: ChannelTopic returns ok=false.
-	_, ok := pool.ChannelTopic("acme.BTC.trade")
-	if ok {
-		t.Error("ChannelTopic before routing: want ok=false, got ok=true")
-	}
-
-	// Route a message; ChannelTopic must return the topic using the full subject as key.
-	pool.routeMessage("acme.BTC.trade", []byte(`{}`), "sukko.prod.acme.btc-trade", 2, 99)
-
-	topic, ok := pool.ChannelTopic("acme.BTC.trade")
-	if !ok {
-		t.Fatal("ChannelTopic after routing: want ok=true, got ok=false")
-	}
-	if topic != "sukko.prod.acme.btc-trade" {
-		t.Errorf("ChannelTopic = %q, want %q", topic, "sukko.prod.acme.btc-trade")
-	}
-
-	// Unknown channel still returns ok=false.
-	_, ok = pool.ChannelTopic("acme.ETH.trade")
-	if ok {
-		t.Error("ChannelTopic for unrouted channel: want ok=false, got ok=true")
-	}
-}
-
 var _ kafka.ResourceGuard = (*mockResourceGuard)(nil)

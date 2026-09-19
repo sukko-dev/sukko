@@ -318,9 +318,9 @@ func TestExtractTenant_ValidFormats(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.channel, func(t *testing.T) {
 			t.Parallel()
-			tenant, err := extractTenant(tc.channel)
+			tenant, err := ExtractTenant(tc.channel)
 			if err != nil {
-				t.Fatalf("extractTenant(%q) error = %v", tc.channel, err)
+				t.Fatalf("ExtractTenant(%q) error = %v", tc.channel, err)
 			}
 			if tenant != tc.tenant {
 				t.Errorf("tenant = %q, want %q", tenant, tc.tenant)
@@ -343,9 +343,9 @@ func TestExtractTenant_InvalidFormats(t *testing.T) {
 	for _, tc := range invalidChannels {
 		t.Run(tc.reason, func(t *testing.T) {
 			t.Parallel()
-			_, err := extractTenant(tc.channel)
+			_, err := ExtractTenant(tc.channel)
 			if err == nil {
-				t.Errorf("extractTenant(%q) should return error (reason: %s)", tc.channel, tc.reason)
+				t.Errorf("ExtractTenant(%q) should return error (reason: %s)", tc.channel, tc.reason)
 			}
 		})
 	}
@@ -377,6 +377,6 @@ func BenchmarkProducerStats_Read(b *testing.B) {
 func BenchmarkExtractTenant(b *testing.B) {
 	channel := "acme.BTC.trade"
 	for b.Loop() {
-		_, _ = extractTenant(channel)
+		_, _ = ExtractTenant(channel)
 	}
 }

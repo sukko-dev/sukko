@@ -31,7 +31,7 @@ var testChannelRules = map[string]any{
 
 // Catch-all routing rule for test messages.
 var testRoutingRules = []map[string]any{
-	{"pattern": "**", "topics": []string{routing.DefaultTopicSuffix}, "priority": routing.DefaultCatchAllPriority},
+	{"pattern": "**", "ingress_topic": routing.DefaultTopicSuffix, "priority": routing.DefaultCatchAllPriority},
 }
 
 // setupSuiteRoutingRules applies the catch-all test routing rules to the suite tenant.

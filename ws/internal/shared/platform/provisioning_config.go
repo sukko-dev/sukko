@@ -93,7 +93,7 @@ type ProvisioningConfig struct {
 
 	// Routing Rules
 	MaxRoutingRulesPerTenant    int   `env:"MAX_ROUTING_RULES_PER_TENANT" envDefault:"100"`         // Max routing rules per tenant
-	MaxTopicsPerRule            int   `env:"MAX_TOPICS_PER_RULE" envDefault:"10"`                   // Max topics per routing rule
+	MaxTopicsPerRule            int   `env:"MAX_TOPICS_PER_RULE" envDefault:"10"`                   // Max topic destinations per routing rule: 1 ingress topic plus up to MAX_TOPICS_PER_RULE-1 egress topics
 	DeadLetterTopicPartitions   int   `env:"ROUTING_DLQ_TOPIC_PARTITIONS" envDefault:"1"`           // Partitions for dead-letter topics
 	DeadLetterTopicRetentionMs  int64 `env:"ROUTING_DLQ_TOPIC_RETENTION_MS" envDefault:"604800000"` // Retention for dead-letter topics (7 days)
 	InfraTopicReplicationFactor int   `env:"INFRA_TOPIC_REPLICATION_FACTOR" envDefault:"1"`         // Replication factor for all infrastructure topics (DLQ + default); use int — caarlos0/env v11 does not handle int16; cast to int16 at CreateTopic call sites

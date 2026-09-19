@@ -266,7 +266,7 @@ S1Drain:
 			return buildStressRevocationReport(allChecks, run), nil
 		}
 		if setErr := provClient.SetRoutingRules(ctx, tenantID, []map[string]any{
-			{"pattern": stressRevocationChannel, "topics": []string{stressRevocationChannel}, "priority": 1},
+			{"pattern": stressRevocationChannel, "ingress_topic": stressRevocationChannel, "priority": 1},
 		}); setErr != nil {
 			allChecks = append(allChecks, metrics.CheckResult{
 				Name: "s2-channel-provisioned", Status: metrics.CheckStatusFail,

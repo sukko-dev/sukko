@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,14 +41,6 @@ var ErrProducerClosed = errors.New("producer is closed")
 // defaultProducerShutdownTimeout is the fallback for ProducerConfig.ShutdownTimeout when it is
 // unset (test path / direct construction). Production sets it via KAFKA_PRODUCER_SHUTDOWN_TIMEOUT.
 const defaultProducerShutdownTimeout = 10 * time.Second
-
-// errFanoutAllFailed marks a multi-topic publish where every target topic write failed. It
-// wraps backend.ErrPublishFailed (→ gateway 500, §III: the client is NOT told a dropped
-// message succeeded) but is classified breaker-NEUTRAL (isBreakerNeutralErr): a genuine broker
-// outage trips the SHARED breaker via any tenant's single-topic produce path, so fan-out
-// 0-success needn't — and mustn't, or one tenant's all-unroutable multi-topic rule would 503
-// every tenant (#179 P1b-C1).
-var errFanoutAllFailed = errors.New("all fan-out topic writes failed")
 
 // ProducerStats holds metrics for the producer.
 type ProducerStats struct {
@@ -147,13 +138,13 @@ type Producer struct {
 	// Routing dependencies (validated non-nil by kafkabackend.New in production).
 	rulesProvider RoutingRulesSource
 
-	// Fan-out pool (constructed in NewProducer when FanoutWorkers > 0). nil → multi-topic
-	// rules are rejected before the breaker. wg tracks the pool worker goroutines; Close
-	// cancels ctx then waits on wg (bounded by shutdownTimeout) before closing the client.
+	// Fan-out pool for EGRESS copies (constructed in NewProducer when FanoutWorkers > 0).
+	// nil → rules with egress topics are rejected before the breaker. wg tracks the pool
+	// worker goroutines; Close cancels ctx then waits on wg (bounded by shutdownTimeout)
+	// before closing the client.
 	fanout          *FanoutPool
 	wg              sync.WaitGroup
 	shutdownTimeout time.Duration
-	dlqDropped      *prometheus.CounterVec // {tenant} — DLQ enqueue-full drop (producer-side leg)
 }
 
 // NewProducer creates a new Kafka producer with the provided configuration.
@@ -285,7 +276,6 @@ func NewProducer(cfg ProducerConfig) (*Producer, error) {
 
 	if cfg.FanoutWorkers > 0 {
 		pm := newPoolMetrics(cfg.Registerer)
-		producer.dlqDropped = pm.dlqDropped
 		dlq := NewDLQPool(DLQConfig{
 			MaxRetries: cfg.DLQMaxRetries,
 			BaseDelay:  cfg.DLQBaseDelay,
@@ -293,11 +283,13 @@ func NewProducer(cfg ProducerConfig) (*Producer, error) {
 			Workers:    cfg.DLQRetryWorkers,
 			Namespace:  producer.topicNamespace,
 		}, client, loggerOrNop(cfg.Logger), pm.dlqWriteFailed)
-		fanout := NewFanoutPool(cfg.FanoutWorkers, cfg.FanoutQueueSize, client, dlq, loggerOrNop(cfg.Logger), pm.fanoutWriteFailed, pm.fanoutDropped)
+		fanout := NewFanoutPool(cfg.FanoutWorkers, cfg.FanoutQueueSize, client, dlq, loggerOrNop(cfg.Logger), producer.topicNamespace, pm.fanoutWriteFailed, pm.fanoutDropped, pm.dlqDropped)
 		// Start DLQ workers before fan-out workers so a fan-out failure always has a live
-		// DLQ consumer. Both are tracked by producer.wg; Close cancels ctx then waits.
+		// DLQ consumer. DLQ workers are tracked by producer.wg (Close cancels ctx then
+		// waits); fan-out workers are tracked by the pool's own WaitGroup so Close can
+		// drain the egress backlog (fanout.Shutdown) BEFORE canceling the shared ctx.
 		dlq.Start(producer.ctx, &producer.wg)
-		fanout.Start(producer.ctx, &producer.wg)
+		fanout.Start(producer.ctx)
 		producer.fanout = fanout
 	}
 
@@ -331,9 +323,14 @@ func NewProducer(cfg ProducerConfig) (*Producer, error) {
 //   - ErrServiceUnavailable         — rules not yet synced or breaker open (retryable → 503)
 //   - other (e.g. ErrPublishFailed) — genuine produce failure (→ 500)
 //
-// A rule with no configured topics is treated as a non-match (skipped); if no rule matches,
+// A rule with no ingress topic is treated as a non-match (skipped); if no rule matches,
 // the publish is REJECTED (ErrNoMatchingRoute) — never silently dead-lettered (C1 revised,
 // #179).
+//
+// On success the returned mid is the ingress record's stable identity — ALWAYS present in
+// kafka mode, including for rules with egress topics (ADR-0018 supersedes the ADR-0008
+// no-mid-on-fan-out clause). Egress copies are written asynchronously after the delivery
+// write succeeds and never affect the ack; egress failures are dead-lettered and counted.
 func (p *Producer) Publish(ctx context.Context, clientID int64, channel string, data []byte) (string, error) {
 	closed := func() bool {
 		p.mu.RLock()
@@ -348,36 +345,35 @@ func (p *Producer) Publish(ctx context.Context, clientID int64, channel string, 
 	// signal are pure in-memory decisions with no Kafka I/O — they MUST NOT count toward
 	// breaker failure state (§IX: otherwise one rules-less tenant's retries open the shared
 	// breaker and 503 every tenant). Only genuine produce attempts enter the breaker.
-	tenant, err := extractTenant(channel)
+	tenant, err := ExtractTenant(channel)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrInvalidChannel, err)
 	}
-	topics, resolveErr := p.resolveTargets(channel, tenant)
+	plan, resolveErr := p.resolveTargets(channel, tenant)
 	if resolveErr != nil {
 		return "", resolveErr
 	}
-	// Multi-topic rule with no fan-out pool. Production always builds the pool
+	// Egress topics with no fan-out pool. Production always builds the pool
 	// (FanoutWorkers >= 1, validated at startup), so this is the FanoutWorkers == 0 test-only
 	// config (#179 P1b-C8). Reject HERE, before the breaker — like the other in-memory
 	// decisions above, it has no Kafka I/O and MUST NOT count toward breaker failure state
-	// (§IX: otherwise a tenant with a valid multi-topic rule opens the shared breaker and
+	// (§IX: otherwise a tenant with a valid egress rule opens the shared breaker and
 	// 503s every tenant).
-	if len(topics) > 1 && p.fanout == nil {
+	if len(plan.egressTopics) > 0 && p.fanout == nil {
 		p.stats.MessagesFailed.Add(1)
 		if p.logger != nil {
 			p.logger.Error().
 				Str("channel", channel).
-				Int("rule_topics", len(topics)).
-				Msg("multi-topic routing rule requires the fanout pool (not configured)")
+				Int("egress_topics", len(plan.egressTopics)).
+				Msg("egress routing topics require the fanout pool (not configured)")
 		}
-		return "", fmt.Errorf("%w: multi-topic routing requires the fanout pool", backend.ErrPublishFailed)
+		return "", fmt.Errorf("%w: egress routing requires the fanout pool", backend.ErrPublishFailed)
 	}
 
-	// The mid rides the breaker's any-typed result: single-topic produces
-	// return the coordinate-derived identity; multi-topic fan-out returns ""
-	// (N records → N mids — the ack carries none, documented on the interface).
+	// The mid rides the breaker's any-typed result: the ingress-topic produce returns the
+	// coordinate-derived identity of the ingress record — always, egress or not (ADR-0018).
 	cbResult, cbErr := p.circuitBreaker.Execute(func() (any, error) {
-		return p.doProduce(ctx, clientID, channel, tenant, topics, data)
+		return p.doProduce(ctx, clientID, channel, tenant, plan, data)
 	})
 
 	if errors.Is(cbErr, gobreaker.ErrOpenState) || errors.Is(cbErr, gobreaker.ErrTooManyRequests) {
@@ -391,14 +387,28 @@ func (p *Producer) Publish(ctx context.Context, clientID int64, channel string, 
 	return mid, nil
 }
 
-// doProduce performs the actual Kafka produce for a pre-resolved plan (topics already
-// computed by resolveTargets, guaranteed non-empty — no-match rejects before this point).
-// It runs inside the circuit breaker, so only genuine produce failures count toward breaker
-// state. On single-topic success it returns the stable message identity derived from the
-// coordinates franz-go fills into the record on ack (kafkashared.MessageID) — the same
-// derivation the consumer and replay apply, which is what makes the ack'd mid equal the
-// delivered one. Fan-out success returns "".
-func (p *Producer) doProduce(ctx context.Context, clientID int64, channel, tenant string, topics []string, data []byte) (string, error) {
+// producePlan is the produce-side view of a matched routing rule (ADR-0018):
+// one ingress topic whose synchronous write determines the ack and names the
+// mid, plus zero or more egress topics that receive asynchronous best-effort
+// copies. Both hold full topic names ({namespace}.{tenant}.{suffix}).
+type producePlan struct {
+	ingressTopic string
+	egressTopics []string
+}
+
+// doProduce performs the Kafka produce for a pre-resolved plan (computed by resolveTargets,
+// ingress topic guaranteed non-empty — no-match rejects before this point). It runs inside
+// the circuit breaker, so only genuine produce failures count toward breaker state.
+//
+// The INGRESS write is synchronous and alone determines the outcome: on success it returns
+// the stable message identity derived from the coordinates franz-go fills into the record on
+// ack (kafkashared.MessageID) — the same derivation the consumer and replay apply, which is
+// what makes the ack'd mid equal the delivered one. EGRESS copies are submitted to the
+// fan-out pool only AFTER the ingress write succeeds (an egress topic never holds a copy of
+// an un-acked message; a client retry after a lost ack can still duplicate there). Egress
+// results never flow back to the publisher — failures are dead-lettered and counted by the
+// pool (ADR-0018: surfaced, never silent; the ack is already gone).
+func (p *Producer) doProduce(ctx context.Context, clientID int64, channel, tenant string, plan producePlan, data []byte) (string, error) {
 	baseRecord := &kgo.Record{
 		Key:   []byte(channel),
 		Value: data,
@@ -410,111 +420,40 @@ func (p *Producer) doProduce(ctx context.Context, clientID int64, channel, tenan
 		},
 	}
 
-	// Single-topic: synchronous, error-propagating, breaker-protected — regardless of whether
-	// a fanout pool exists (the pool is for multi-topic fan-out only). Multi-topic with a nil
-	// pool is already rejected before the breaker in Publish, so here len(topics) > 1 implies
-	// p.fanout != nil.
-	if len(topics) == 1 {
-		rec := *baseRecord // struct copy — independent from baseRecord
-		rec.Topic = topics[0]
-		results := p.client.ProduceSync(ctx, &rec)
-		if err := results.FirstErr(); err != nil {
-			p.stats.MessagesFailed.Add(1)
-			if p.logger != nil {
-				p.logger.Error().Err(err).Str("channel", channel).Str(LabelTopic, topics[0]).Msg("kafka produce failed")
-			}
-			return "", fmt.Errorf("kafka produce failed: %w", err)
-		}
-		mid := kafkashared.MessageID(rec.Topic, rec.Partition, rec.Offset)
-		p.stats.MessagesPublished.Add(1)
+	rec := *baseRecord // struct copy — independent from baseRecord
+	rec.Topic = plan.ingressTopic
+	results := p.client.ProduceSync(ctx, &rec)
+	if err := results.FirstErr(); err != nil {
+		p.stats.MessagesFailed.Add(1)
 		if p.logger != nil {
-			p.logger.Debug().
-				Int64("client_id", clientID).
-				Str("channel", channel).
-				Str(LabelTopic, topics[0]).
-				Int("data_size", len(data)).
-				Msg("Published message to Kafka")
+			p.logger.Error().Err(err).Str("channel", channel).Str(LabelTopic, plan.ingressTopic).Msg("kafka produce failed")
 		}
-		return mid, nil
+		return "", fmt.Errorf("kafka produce failed: %w", err)
+	}
+	mid := kafkashared.MessageID(rec.Topic, rec.Partition, rec.Offset)
+	p.stats.MessagesPublished.Add(1)
+	if p.logger != nil {
+		p.logger.Debug().
+			Int64("client_id", clientID).
+			Str("channel", channel).
+			Str(LabelTopic, plan.ingressTopic).
+			Int("egress_topics", len(plan.egressTopics)).
+			Int("data_size", len(data)).
+			Msg("Published message to Kafka")
 	}
 
-	// Fan-out path: submit to multiple topics via the fanout pool. Reached only when
-	// len(topics) > 1, which implies p.fanout != nil (nil-pool multi-topic is rejected in
-	// Publish before the breaker).
-	n := len(topics)
-	successCh := make(chan string, n)
-	failCh := make(chan string, n)
-
-	var succeeded, failed []string
-	for _, topic := range topics {
-		job := fanoutJob{
-			topic:     topic,
-			record:    baseRecord,
-			channel:   channel,
-			tenant:    tenant,
-			successCh: successCh,
-			failCh:    failCh,
-		}
-		if !p.fanout.Submit(job) {
-			// Queue full — count as immediate failure so aggregator gets N results.
-			failCh <- topic
-		}
+	// Egress copies: fire-and-forget relative to the ack. len > 0 implies p.fanout != nil
+	// (nil-pool egress is rejected in Publish before the breaker). Submit dead-letters
+	// immediately when the queue is full, so every egress miss is observable.
+	for _, topic := range plan.egressTopics {
+		p.fanout.Submit(fanoutJob{
+			topic:  topic,
+			record: baseRecord,
+			tenant: tenant,
+		})
 	}
 
-	// Collect exactly N results. Two cancel arms (#179 P1b-C3): the request ctx (client
-	// disconnected mid-publish) and the producer ctx (Close() fired — a fanout worker may
-	// have exited before draining all jobs, so we must not block forever). ErrProducerClosed
-	// is breaker-neutral (isBreakerNeutralErr), so a shutdown mid-fanout does not trip the breaker.
-	for range n {
-		select {
-		case t := <-successCh:
-			succeeded = append(succeeded, t)
-		case t := <-failCh:
-			failed = append(failed, t)
-		case <-ctx.Done():
-			return "", fmt.Errorf("fanout canceled: %w", ctx.Err())
-		case <-p.ctx.Done():
-			return "", ErrProducerClosed
-		}
-	}
-
-	if len(failed) > 0 {
-		dlqTopic := kafkashared.BuildTopicName(p.topicNamespace, tenant, routing.DeadLetterTopicSuffix)
-		dlqRec := &kgo.Record{
-			Topic: dlqTopic,
-			Key:   baseRecord.Key,
-			Value: baseRecord.Value,
-			Headers: append(slices.Clone(baseRecord.Headers),
-				kgo.RecordHeader{Key: HeaderReason, Value: []byte(ReasonFanoutTopicWriteFailed)},
-				kgo.RecordHeader{Key: HeaderFailedTopics, Value: []byte(strings.Join(failed, ","))},
-				kgo.RecordHeader{Key: HeaderSucceededTopics, Value: []byte(strings.Join(succeeded, ","))},
-			),
-		}
-		if p.fanout.dlq != nil {
-			if !p.fanout.dlq.TrySubmit(dlqJob{record: dlqRec, tenant: tenant, reason: ReasonFanoutTopicWriteFailed}) {
-				// DLQ queue full — the record is terminally lost (write never attempted).
-				// Count it so this silent-loss leg is observable (#179 P1b-C4, §VII).
-				if p.dlqDropped != nil {
-					p.dlqDropped.WithLabelValues(tenant).Inc()
-				}
-				if p.logger != nil {
-					p.logger.Warn().Str(logging.LogKeyTenantSlug, tenant).Msg("DLQ queue full — dropping failed fanout record")
-				}
-			}
-		}
-	}
-
-	if len(succeeded) > 0 {
-		// ≥1 target topic accepted the record → publish succeeds (P1b-C9). Failed topics were
-		// best-effort dead-lettered above. No mid: N records → N identities.
-		p.stats.MessagesPublished.Add(1)
-		return "", nil
-	}
-	// Every fan-out topic write failed. Return an error so the client sees 500 rather than a
-	// false 2xx for a fully-dropped message (§III / spec outcome table). Breaker-neutral
-	// (errFanoutAllFailed) so it cannot 503 other tenants — see errFanoutAllFailed doc.
-	p.stats.MessagesFailed.Add(1)
-	return "", fmt.Errorf("%w: %d fan-out topics: %w", backend.ErrPublishFailed, n, errFanoutAllFailed)
+	return mid, nil
 }
 
 // resolveTargets computes the produce plan for a channel from the tenant's routing rules.
@@ -524,24 +463,24 @@ func (p *Producer) doProduce(ctx context.Context, clientID int64, channel, tenan
 //
 // Outcomes (checked in this order — not-synced MUST precede tenant-absent so a degraded
 // server returns a retryable 503, not a misleading 409):
-//   - err != nil      → REJECT (ErrPublishNotRoutable / ErrNoMatchingRoute) or UNAVAILABLE
+//   - err != nil → REJECT (ErrPublishNotRoutable / ErrNoMatchingRoute) or UNAVAILABLE
 //     (ErrServiceUnavailable); do NOT produce
-//   - topics (len>=1) → produce to these rule topic(s)
+//   - plan       → produce synchronously to plan.ingressTopic; copy to plan.egressTopics
 //
 // Routing rules are ungated on every edition (ADR-0014); the per-edition rule COUNT is
 // enforced at provisioning time, so publish-time routing needs no license check.
-func (p *Producer) resolveTargets(channel, tenant string) (topics []string, err error) {
+func (p *Producer) resolveTargets(channel, tenant string) (producePlan, error) {
 	if p.rulesProvider == nil {
-		return nil, fmt.Errorf("%w: routing rules provider not configured", backend.ErrPublishNotRoutable)
+		return producePlan{}, fmt.Errorf("%w: routing rules provider not configured", backend.ErrPublishNotRoutable)
 	}
 	if !p.rulesProvider.SnapshotReceived() {
 		// The rules stream has not delivered its first snapshot — the server is degraded
 		// (cold start / provisioning outage), not the tenant misconfigured. Retryable.
-		return nil, fmt.Errorf("%w: routing rules not yet synced", ErrServiceUnavailable)
+		return producePlan{}, fmt.Errorf("%w: routing rules not yet synced", ErrServiceUnavailable)
 	}
 	snap, ok := p.rulesProvider.GetRoutingSnapshot(tenant)
 	if !ok || len(snap.Rules) == 0 {
-		return nil, fmt.Errorf("%w: no routing rules provisioned for tenant", backend.ErrPublishNotRoutable)
+		return producePlan{}, fmt.Errorf("%w: no routing rules provisioned for tenant", backend.ErrPublishNotRoutable)
 	}
 
 	for _, rule := range snap.Rules {
@@ -562,32 +501,54 @@ func (p *Producer) resolveTargets(channel, tenant string) (topics []string, err 
 		if !matched {
 			continue
 		}
-		if len(rule.Topics) == 0 {
-			continue // zero-topic rule — treat as no-match (defense in depth §II)
+		if rule.IngressTopic == "" {
+			continue // no ingress topic — treat as no-match (defense in depth §II)
 		}
-		// Dedupe: duplicate topics within one rule would double-deliver.
-		fullTopics := make([]string, 0, len(rule.Topics))
-		seen := make(map[string]struct{}, len(rule.Topics))
-		for _, suffix := range rule.Topics {
+		delivery := kafkashared.BuildTopicName(p.topicNamespace, tenant, rule.IngressTopic)
+		// Dedupe egress and exclude the ingress topic (§II): a duplicate egress write
+		// wastes broker I/O, and an egress copy in the ingress topic double-delivers.
+		egress := make([]string, 0, len(rule.EgressTopics))
+		seen := map[string]struct{}{delivery: {}}
+		for _, suffix := range rule.EgressTopics {
+			if suffix == "" {
+				continue
+			}
+			// Reserved suffixes can never be egress targets (§II). The default topic is
+			// ALWAYS consumed, so an egress copy there double-delivers to subscribers with
+			// a second, un-dedupable identity; the dead-letter topic is never consumed and
+			// must not receive live traffic. Write-time validation rejects both, and
+			// migration 003 strips them from legacy rows — this guard makes the invariant
+			// hold for any row that reaches the snapshot by any other route.
+			if suffix == routing.DefaultTopicSuffix || suffix == routing.DeadLetterTopicSuffix {
+				if p.logger != nil {
+					p.logger.Warn().
+						Str(logging.LogKeyTenantSlug, tenant).
+						Str("pattern", rule.Pattern).
+						Str("egress_suffix", suffix).
+						Msg("routing rule names a reserved suffix as egress; skipping that egress topic")
+				}
+				continue
+			}
 			name := kafkashared.BuildTopicName(p.topicNamespace, tenant, suffix)
 			if _, dup := seen[name]; dup {
 				continue
 			}
 			seen[name] = struct{}{}
-			fullTopics = append(fullTopics, name)
+			egress = append(egress, name)
 		}
-		return fullTopics, nil
+		return producePlan{ingressTopic: delivery, egressTopics: egress}, nil
 	}
 	// Rules present but none matched — REJECT (C1 revised, #179). The WS
 	// handler emits protocol.ErrCodeNoMatchingRoute; the gateway maps it to 409. This is a
 	// synchronous reject, NOT a silent dead-letter (§III/§XV): a rules-bearing tenant
 	// publishing to an unmatched channel gets an immediate, actionable error.
-	return nil, fmt.Errorf("%w for channel %q", backend.ErrNoMatchingRoute, channel)
+	return producePlan{}, fmt.Errorf("%w for channel %q", backend.ErrNoMatchingRoute, channel)
 }
 
-// extractTenant returns the tenant ID from an internal channel (first segment).
-// Channel format: {tenant}.{rest...} (minimum 2 parts).
-func extractTenant(channel string) (string, error) {
+// ExtractTenant returns the tenant ID from an internal channel (first segment).
+// Channel format: {tenant}.{rest...} (minimum 2 parts). Exported for the kafka
+// backend's rule-based channel→topic resolution (ChannelTopic, ADR-0018).
+func ExtractTenant(channel string) (string, error) {
 	dot := strings.IndexByte(channel, '.')
 	if dot <= 0 {
 		return "", fmt.Errorf("channel must have at least 2 dot-separated parts, got %q", channel)
@@ -607,7 +568,6 @@ func extractTenant(channel string) (string, error) {
 // to breaker-eligible so real outages still trip the breaker.
 func isBreakerNeutralErr(err error) bool {
 	return errors.Is(err, ErrProducerClosed) ||
-		errors.Is(err, errFanoutAllFailed) ||
 		// Client disconnected mid-publish (request ctx canceled) — a per-request condition,
 		// not broker unavailability. NOTE: context.DeadlineExceeded is deliberately NOT here —
 		// a PublishTimeout expiry is a slow-broker signal the breaker SHOULD see.
@@ -682,25 +642,44 @@ func (p *Producer) Close() error {
 		return nil
 	}
 
-	// Records still buffered in the fan-out/DLQ queues at shutdown are intentionally NOT counted
-	// in the _dropped_total metrics (#179 P1b-C4, de-scoped): a buffered fan-out job belongs to a
-	// Publish that already returned ErrProducerClosed, and a buffered DLQ job is a best-effort
-	// copy whose failure is already counted and whose message is durable in Kafka — no signal is
-	// lost, so a bounded shutdown drain is unwarranted complexity (§XV).
+	// §VII shutdown ordering (ADR-0018): drain the egress backlog → cancel ctx →
+	// wait DLQ workers → close the client → wait fan-out stragglers.
 	//
-	// §VII shutdown ordering: cancel the producer ctx → wait for the fan-out/DLQ pool workers
-	// to exit → close the client. The wait is BOUNDED (shutdownTimeout): franz-go ignores ctx
-	// cancellation once a record is buffered, so a worker producing to an unresponsive broker
-	// would block wg.Wait indefinitely. On timeout we close the client anyway — client.Close
-	// aborts the in-flight produce, unblocking the workers — so shutdown never hangs. In-flight
-	// Publish collect loops unblock via their p.ctx.Done() arm (P1b-C3); those are caller
-	// goroutines, not tracked by p.wg.
+	// 1. DRAIN, bounded. A queued egress job belongs to a publish that was already
+	//    ACKED (egress is submitted only after the ingress write succeeds), so the
+	//    pre-split rationale for skipping the drain — "a buffered job belongs to a
+	//    Publish that already returned ErrProducerClosed" — no longer holds:
+	//    abandoning the queue here would be silent loss with no trace. The drain
+	//    runs BEFORE p.cancel() so workers and the DLQ are still live, and is
+	//    bounded by shutdownTimeout so shutdown can never hang; anything undrained
+	//    at the bound is counted (fanoutDropped) and logged by the pool.
+	if p.fanout != nil {
+		if undrained := p.fanout.Shutdown(p.shutdownTimeout); undrained > 0 && p.logger != nil {
+			p.logger.Warn().Int("undrained", undrained).Dur("timeout", p.shutdownTimeout).
+				Msg("kafka producer: egress backlog not fully drained within shutdown timeout; undrained copies counted as dropped")
+		}
+	}
+
+	// 2. Cancel → 3. wait DLQ workers (BOUNDED: franz-go ignores ctx cancellation
+	// once a record is buffered, so a worker producing to an unresponsive broker
+	// would block wg.Wait indefinitely) → 4. close the client anyway — client.Close
+	// aborts in-flight produces, unblocking any straggler — so shutdown never hangs.
 	p.cancel()
 	if !waitWithTimeout(&p.wg, p.shutdownTimeout) && p.logger != nil {
 		p.logger.Warn().Dur("timeout", p.shutdownTimeout).
-			Msg("kafka producer: fan-out/DLQ workers did not exit within shutdown timeout; force-closing client")
+			Msg("kafka producer: DLQ workers did not exit within shutdown timeout; force-closing client")
 	}
 	p.client.Close()
+
+	// 5. A fan-out worker that was blocked in a produce during the drain window is
+	// unblocked by client.Close above; bound the wait for it so Close never leaks
+	// a goroutine past return (§VII).
+	if p.fanout != nil {
+		if !waitWithTimeout(&p.fanout.wg, p.shutdownTimeout) && p.logger != nil {
+			p.logger.Warn().Dur("timeout", p.shutdownTimeout).
+				Msg("kafka producer: fan-out stragglers did not exit within shutdown timeout after client close")
+		}
+	}
 
 	if p.logger != nil {
 		stats := p.Stats()

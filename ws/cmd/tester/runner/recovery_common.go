@@ -52,7 +52,7 @@ func recoverySetupError(run *TestRun, suite string) []metrics.CheckResult {
 // default topic with a local resolver (no provisioned routing rules — ADR-0006).
 func recoveryPublisher(run *TestRun, tenantID string) (publisher.Publisher, error) {
 	resolver := publisher.NewTopicResolver(run.kafkaNamespace, tenantID, []publisher.RoutingRule{
-		{Pattern: "**", Topics: []string{routing.DefaultTopicSuffix}},
+		{Pattern: "**", IngressTopic: routing.DefaultTopicSuffix},
 	})
 	return newKafkaPub(run.kafkaBrokers, resolver, run.kafkaSASL, run.kafkaTLS)
 }

@@ -33,7 +33,7 @@ func TestKafkaPublisher_PublishAndConsume(t *testing.T) {
 
 	// Create topic resolver: channel "BTC.trade" → topic "test-ns.tenant-1.market-data"
 	resolver := NewTopicResolver("test-ns", "tenant-1", []RoutingRule{
-		{Pattern: "**", Topics: []string{"market-data"}},
+		{Pattern: "**", IngressTopic: "market-data"},
 	})
 
 	// Create publisher
@@ -118,7 +118,7 @@ func TestKafkaPublisher_ConnectionFailure(t *testing.T) {
 	t.Parallel()
 
 	resolver := NewTopicResolver("ns", "t", []RoutingRule{
-		{Pattern: "**", Topics: []string{"test"}},
+		{Pattern: "**", IngressTopic: "test"},
 	})
 
 	// Use unreachable broker — publish should fail

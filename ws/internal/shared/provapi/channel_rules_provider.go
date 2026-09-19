@@ -361,17 +361,18 @@ func (r *StreamChannelRulesProvider) updateTenantConfigs(resp *provisioningv1.Wa
 				r.invalidPatternsCounter.Inc()
 				continue
 			}
-			topics := pr.GetTopics()
-			if len(topics) == 0 && pr.GetTopicSuffix() != "" {
-				topics = []string{pr.GetTopicSuffix()}
-			}
-			if len(topics) == 0 {
-				continue // skip misconfigured rules with no topic destinations
+			if pr.GetIngressTopic() == "" {
+				// A rule without a ingress topic cannot route (misconfigured, or
+				// streamed by a pre-split provisioning peer during rolling deploy).
+				// Skipping fails closed: publishes matching only this rule reject
+				// with PUBLISH_NOT_ROUTABLE rather than routing implicitly (§XV).
+				continue
 			}
 			rules = append(rules, types.RoutingRule{
-				Pattern:  pattern,
-				Topics:   topics,
-				Priority: int(pr.GetPriority()),
+				Pattern:      pattern,
+				IngressTopic: pr.GetIngressTopic(),
+				EgressTopics: pr.GetEgressTopics(),
+				Priority:     int(pr.GetPriority()),
 			})
 		}
 		next[tc.GetTenantSlug()] = TenantRoutingSnapshot{Rules: rules}

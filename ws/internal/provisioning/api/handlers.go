@@ -497,8 +497,11 @@ func (h *Handler) AddRoutingRule(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, provisioning.ErrTopicNotProvisioned):
 			httputil.WriteError(w, http.StatusBadRequest, errCodeTopicNotProvisioned, err.Error())
 		case errors.Is(err, provisioning.ErrInvalidRoutingPattern),
-			errors.Is(err, provisioning.ErrEmptyTopics),
-			errors.Is(err, provisioning.ErrTooManyTopics):
+			errors.Is(err, provisioning.ErrMissingIngressTopic),
+			errors.Is(err, provisioning.ErrTooManyTopics),
+			errors.Is(err, provisioning.ErrReservedTopicSuffix),
+			errors.Is(err, provisioning.ErrEgressIngressOverlap),
+			errors.Is(err, provisioning.ErrDuplicateEgressTopic):
 			httputil.WriteError(w, http.StatusBadRequest, errCodeRoutingRuleValidation, err.Error())
 		default:
 			// Classify once so the log level follows the status: the Community rule-count

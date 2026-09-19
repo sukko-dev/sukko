@@ -124,7 +124,7 @@ func runWebhookScenario(
 
 	// Step 3: provision routing rule so the webhook-worker receives broadcasts.
 	if err := provClient.SetRoutingRules(ctx, tenantID, []map[string]any{
-		{"pattern": webhookTestRoutingPatt, "topics": []string{webhookTestTopic}, "priority": routing.DefaultCatchAllPriority},
+		{"pattern": webhookTestRoutingPatt, "ingress_topic": webhookTestTopic, "priority": routing.DefaultCatchAllPriority},
 	}); err != nil {
 		return fail(pfx+"routing-rule", fmt.Sprintf("set routing rules: %v", err)), nil
 	}

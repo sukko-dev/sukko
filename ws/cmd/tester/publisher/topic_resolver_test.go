@@ -1,7 +1,6 @@
 package publisher
 
 import (
-	"slices"
 	"strings"
 	"testing"
 )
@@ -10,7 +9,7 @@ func TestTopicResolver_ExactMatch(t *testing.T) {
 	t.Parallel()
 
 	r := NewTopicResolver("prod", "acme", []RoutingRule{
-		{Pattern: "general.test", Topics: []string{"general"}},
+		{Pattern: "general.test", IngressTopic: "general"},
 	})
 
 	topic, err := r.Resolve("general.test")
@@ -26,7 +25,7 @@ func TestTopicResolver_WildcardMatch(t *testing.T) {
 	t.Parallel()
 
 	r := NewTopicResolver("local", "tenant1", []RoutingRule{
-		{Pattern: "**", Topics: []string{"default"}},
+		{Pattern: "**", IngressTopic: "default"},
 	})
 
 	topic, err := r.Resolve("general.test")
@@ -42,8 +41,8 @@ func TestTopicResolver_FirstMatchWins(t *testing.T) {
 	t.Parallel()
 
 	r := NewTopicResolver("dev", "t1", []RoutingRule{
-		{Pattern: "room.**", Topics: []string{"rooms"}},
-		{Pattern: "**", Topics: []string{"default"}},
+		{Pattern: "room.**", IngressTopic: "rooms"},
+		{Pattern: "**", IngressTopic: "default"},
 	})
 
 	// "room.vip" matches first rule
@@ -69,7 +68,7 @@ func TestTopicResolver_NoMatch(t *testing.T) {
 	t.Parallel()
 
 	r := NewTopicResolver("prod", "t1", []RoutingRule{
-		{Pattern: "room.**", Topics: []string{"rooms"}},
+		{Pattern: "room.**", IngressTopic: "rooms"},
 	})
 
 	_, err := r.Resolve("general.test")
@@ -106,17 +105,17 @@ func TestParseRoutingRules(t *testing.T) {
 	}{
 		{
 			name:  "canonical single catch-all",
-			input: `{"items":[{"pattern":"**","topics":["default"],"priority":100}],"total":1,"limit":50,"offset":0}`,
+			input: `{"items":[{"pattern":"**","ingress_topic":"default","priority":100}],"total":1,"limit":50,"offset":0}`,
 			wantRules: []RoutingRule{
-				{Pattern: "**", Topics: []string{"default"}},
+				{Pattern: "**", IngressTopic: "default"},
 			},
 		},
 		{
 			name:  "multi-rule response",
-			input: `{"items":[{"pattern":"**","topics":["default"],"priority":100},{"pattern":"room.**","topics":["rooms"],"priority":1}],"total":2,"limit":50,"offset":0}`,
+			input: `{"items":[{"pattern":"**","ingress_topic":"default","priority":100},{"pattern":"room.**","ingress_topic":"rooms","priority":1}],"total":2,"limit":50,"offset":0}`,
 			wantRules: []RoutingRule{
-				{Pattern: "**", Topics: []string{"default"}},
-				{Pattern: "room.**", Topics: []string{"rooms"}},
+				{Pattern: "**", IngressTopic: "default"},
+				{Pattern: "room.**", IngressTopic: "rooms"},
 			},
 		},
 		{
@@ -130,10 +129,10 @@ func TestParseRoutingRules(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:  "item with empty topics",
-			input: `{"items":[{"pattern":"**","topics":[],"priority":100}],"total":1,"limit":50,"offset":0}`,
+			name:  "item with empty ingress topic",
+			input: `{"items":[{"pattern":"**","ingress_topic":"","priority":100}],"total":1,"limit":50,"offset":0}`,
 			wantRules: []RoutingRule{
-				{Pattern: "**", Topics: []string{}},
+				{Pattern: "**", IngressTopic: ""},
 			},
 		},
 	}
@@ -158,8 +157,8 @@ func TestParseRoutingRules(t *testing.T) {
 				if rules[i].Pattern != want.Pattern {
 					t.Errorf("rules[%d].Pattern = %q, want %q", i, rules[i].Pattern, want.Pattern)
 				}
-				if !slices.Equal(rules[i].Topics, want.Topics) {
-					t.Errorf("rules[%d].Topics = %v, want %v", i, rules[i].Topics, want.Topics)
+				if rules[i].IngressTopic != want.IngressTopic {
+					t.Errorf("rules[%d].IngressTopic = %q, want %q", i, rules[i].IngressTopic, want.IngressTopic)
 				}
 			}
 		})
@@ -169,10 +168,10 @@ func TestParseRoutingRules(t *testing.T) {
 func TestTopicResolver_MultiTopicRule(t *testing.T) {
 	t.Parallel()
 
-	// Resolve() returns Topics[0] when multiple topics are present.
-	// Full fan-out (all topics) is out of scope for the test publisher — filed as follow-up.
+	// Resolve() targets the rule's ingress topic (ADR-0018): the one topic the
+	// platform consumes. Egress topics are irrelevant to the test publisher.
 	r := NewTopicResolver("prod", "acme", []RoutingRule{
-		{Pattern: "**", Topics: []string{"primary", "audit"}},
+		{Pattern: "**", IngressTopic: "primary"},
 	})
 
 	topic, err := r.Resolve("any.channel")
@@ -184,7 +183,7 @@ func TestTopicResolver_MultiTopicRule(t *testing.T) {
 	}
 }
 
-func TestTopicResolver_EmptyTopicsRule(t *testing.T) {
+func TestTopicResolver_EmptyIngressRule(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -195,18 +194,18 @@ func TestTopicResolver_EmptyTopicsRule(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "skip empty-topics rule fall through to valid rule",
+			name: "skip empty-ingress rule fall through to valid rule",
 			rules: []RoutingRule{
-				{Pattern: "**", Topics: []string{}},
-				{Pattern: "**", Topics: []string{"fallback"}},
+				{Pattern: "**", IngressTopic: ""},
+				{Pattern: "**", IngressTopic: "fallback"},
 			},
 			channel: "any.channel",
 			want:    "prod.acme.fallback",
 		},
 		{
-			name: "all matching rules have empty topics returns no-match error",
+			name: "all matching rules have empty ingress returns no-match error",
 			rules: []RoutingRule{
-				{Pattern: "**", Topics: []string{}},
+				{Pattern: "**", IngressTopic: ""},
 			},
 			channel: "any.channel",
 			wantErr: true,
