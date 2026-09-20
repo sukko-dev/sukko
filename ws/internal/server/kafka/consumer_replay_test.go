@@ -208,3 +208,30 @@ func TestReplayFromOffsets_OutOfRangeSurfaces(t *testing.T) {
 		t.Fatalf("err = %v, want kerr.OffsetOutOfRange (stale cursor must fail loudly, not replay from start)", err)
 	}
 }
+
+// TestReplayFromOffsets_EmptySubscriptionsFailsClosed pins the ADR-0020 defense:
+// an empty subscription filter MUST return zero messages (fail closed), never the
+// whole topic. Before the fix the `if len(subSet) > 0` guard skipped filtering on
+// an empty set, replaying every channel on the topic to the caller — the
+// reconnect isolation leak. handleReconnect can only ever be as safe as this.
+func TestReplayFromOffsets_EmptySubscriptionsFailsClosed(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cluster, producer := newReplayTestCluster(t)
+	// One topic/partition carrying two different channels — the shared-topic
+	// shape a catch-all routing rule produces.
+	produceAt(ctx, t, producer, 1, replayTestChannel, []byte(`{"n":0}`))
+	produceAt(ctx, t, producer, 1, "acme.SOL.trade", []byte(`{"other":true}`))
+
+	consumer := newReplayTestConsumer(t, cluster)
+	msgs, err := consumer.ReplayFromOffsets(ctx,
+		map[string]map[int32]int64{replayTestTopic: {1: 0}}, 100, nil /* empty subscriptions */)
+	if err != nil {
+		t.Fatalf("ReplayFromOffsets: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("empty subscriptions must fail closed (0 messages), got %d: %+v", len(msgs), msgs)
+	}
+}

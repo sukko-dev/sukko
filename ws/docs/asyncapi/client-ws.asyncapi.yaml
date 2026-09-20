@@ -278,6 +278,10 @@ operations:
     description: >
       Request replay of missed messages using a persistent client ID and last-known
       pos values. The server replays up to 100 messages within a 5-second timeout.
+      Replay is scoped to the channels named in last_pos, and only those owned by the
+      connection's authenticated tenant — a channel belonging to another tenant is
+      silently ignored and never replayed. If no named channel is replayable, the
+      server returns a reconnect_ack with messages_replayed 0 (not an error).
     messages:
       - $ref: "#/channels/clientSend/messages/reconnect"
 

@@ -675,12 +675,22 @@ func (a *MultiTenantPoolMetricsAdapter) OnRefresh(success bool, topicsSubscribed
 // Reconnect Metrics
 // =============================================================================
 
-// ReconnectPosDecodeFailures counts reconnect requests where the client-supplied pos
-// could not be decoded (malformed pos or unknown topic). These clients fall back to
-// replaying from the beginning of available history.
+// ReconnectPosDecodeFailures counts reconnect last_pos channels where the client-supplied
+// pos could not be decoded (malformed pos or unknown topic). The channel is skipped — it
+// is not replayed (ADR-0020: reconnect replay is scoped to the decodable, authorized
+// channels the client named, never a fallback full replay).
 var ReconnectPosDecodeFailures = promauto.NewCounter(prometheus.CounterOpts{
 	Name: "ws_reconnect_pos_decode_failure_total",
-	Help: "Reconnect requests where the client pos was undecodable or the topic was unknown; falls back to full replay.",
+	Help: "Reconnect last_pos channels where the client pos was undecodable or the topic was unknown; the channel is skipped (not replayed).",
+})
+
+// ReconnectChannelDenied counts reconnect last_pos channels rejected because the
+// channel is not owned by the connection's authenticated tenant (ADR-0020). A
+// persistent nonzero rate flags a misbehaving or hostile client probing other
+// tenants' channels.
+var ReconnectChannelDenied = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "ws_reconnect_channel_denied_total",
+	Help: "Reconnect last_pos channels denied because they are not owned by the connection's authenticated tenant.",
 })
 
 // =============================================================================
