@@ -1575,12 +1575,21 @@ func (c *Consumer) ReplayFromOffsets(
 				return // Stop if we've hit the limit
 			}
 
-			// Parse message to get subject.
-			// IMPORTANT: must NOT call MarkCommitRecords here — replay uses a temporary
-			// client and marking via c.committer would contaminate main consumer offset state.
-			msg, _ := c.prepareMessage(record)
-			if msg == nil {
-				return
+			// Parse the record's channel WITHOUT the live consume path's rate
+			// limiter, CPU brake, or DLQ routing (ADR-0021): replay is a bounded,
+			// read-only recovery operation, and those layers would silently drop
+			// (rate limit) — the recovery holes this closes — block past the
+			// deadline (brake waits on the consumer-lifetime ctx), or duplicate
+			// DLQ entries from this temporary client. extractChannel is the pure
+			// parser and keeps the §IX tenant-prefix check as defense in depth
+			// beside the subscription filter below. A record it cannot parse is
+			// skipped — never marked, never DLQ'd from this read-only client.
+			// IMPORTANT: must NOT call MarkCommitRecords here — replay uses a
+			// temporary client and marking would contaminate the main consumer's
+			// offset state.
+			channel, reason, _ := c.extractChannel(record)
+			if reason != "" {
+				return // unparseable record — skip (read-only replay does not DLQ)
 			}
 
 			// Filter by subscriptions (only return messages client is subscribed to).
@@ -1588,7 +1597,7 @@ func (c *Consumer) ReplayFromOffsets(
 			// FAIL CLOSED (ADR-0020, §II/§IX): an empty subSet replays NOTHING, never
 			// the whole topic. Do NOT reintroduce a `len(subSet) > 0` guard here — that
 			// let a reconnect with no filter leak every channel on a shared topic.
-			if _, subscribed := subSet[msg.subject]; !subscribed {
+			if _, subscribed := subSet[channel]; !subscribed {
 				return // skip messages for unsubscribed channels (empty set skips all)
 			}
 
@@ -1597,8 +1606,8 @@ func (c *Consumer) ReplayFromOffsets(
 				Topic:     record.Topic,
 				Partition: record.Partition,
 				Offset:    record.Offset,
-				Subject:   msg.subject,
-				Data:      msg.message,
+				Subject:   channel,
+				Data:      record.Value,
 				Pos:       history.EncodePos(record.Partition, record.Offset),
 			})
 			messagesRead++

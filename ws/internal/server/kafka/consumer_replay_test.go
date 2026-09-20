@@ -40,6 +40,13 @@ const (
 // ReplayFromOffsets never touches the group consume loop — it only needs the
 // client (for broker addresses), fetch tuning, and prepareMessage.
 func newReplayTestConsumer(t *testing.T, cluster *kfake.Cluster) *Consumer {
+	return newReplayTestConsumerGuard(t, cluster, &mockResourceGuardFixed{allowKafka: true})
+}
+
+// newReplayTestConsumerGuard builds a replay-capable consumer with a caller-chosen
+// ResourceGuard, so tests can prove replay is NOT subject to the live rate limiter
+// or CPU brake (ADR-0021).
+func newReplayTestConsumerGuard(t *testing.T, cluster *kfake.Cluster, guard ResourceGuard) *Consumer {
 	t.Helper()
 	logger := zerolog.Nop()
 	consumer, err := NewConsumer(ConsumerConfig{
@@ -48,7 +55,7 @@ func newReplayTestConsumer(t *testing.T, cluster *kfake.Cluster) *Consumer {
 		Topics:                []string{replayTestTopic},
 		Logger:                &logger,
 		Broadcast:             func(string, []byte, string, int32, int64) error { return nil },
-		ResourceGuard:         &mockResourceGuardFixed{allowKafka: true},
+		ResourceGuard:         guard,
 		TenantResolver:        func(string) (string, bool) { return replayTestTenant, true },
 		ConsumerType:          ConsumerTypeKindShared,
 		CommitOnRevokeTimeout: 10 * time.Second,
@@ -233,5 +240,57 @@ func TestReplayFromOffsets_EmptySubscriptionsFailsClosed(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Fatalf("empty subscriptions must fail closed (0 messages), got %d: %+v", len(msgs), msgs)
+	}
+}
+
+// TestReplayFromOffsets_NotThrottledByLiveRateLimit is the ADR-0021 red test:
+// replay must recover a client's records even when the live Kafka rate limiter is
+// exhausted. Before the fix, replay routed each record through prepareMessage,
+// whose rate limiter dropped every record under an exhausted budget — the recovery
+// holes seen on a failover burst. Replay now parses records without that throttle.
+func TestReplayFromOffsets_NotThrottledByLiveRateLimit(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cluster, producer := newReplayTestCluster(t)
+	for range 5 {
+		produceAt(ctx, t, producer, 1, replayTestChannel, []byte(`{"burst":true}`))
+	}
+	// Live rate limiter EXHAUSTED: denies every message.
+	consumer := newReplayTestConsumerGuard(t, cluster, &mockResourceGuardFixed{allowKafka: false})
+	msgs, err := consumer.ReplayFromOffsets(ctx,
+		map[string]map[int32]int64{replayTestTopic: {1: 0}}, 100, []string{replayTestChannel})
+	if err != nil {
+		t.Fatalf("ReplayFromOffsets: %v", err)
+	}
+	if len(msgs) != 5 {
+		t.Fatalf("replay must not be throttled by the live rate limiter: got %d, want 5", len(msgs))
+	}
+}
+
+// TestReplayFromOffsets_CompletesDespiteCPUBrake proves replay does not apply the
+// live CPU emergency brake (which waits on the consumer-lifetime context, not the
+// replay deadline). With the brake asserted, replay must still complete promptly.
+func TestReplayFromOffsets_CompletesDespiteCPUBrake(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cluster, producer := newReplayTestCluster(t)
+	produceAt(ctx, t, producer, 1, replayTestChannel, []byte(`{"n":0}`))
+
+	consumer := newReplayTestConsumerGuard(t, cluster, &mockResourceGuardFixed{allowKafka: true, shouldPause: true})
+	start := time.Now()
+	msgs, err := consumer.ReplayFromOffsets(ctx,
+		map[string]map[int32]int64{replayTestTopic: {1: 0}}, 100, []string{replayTestChannel})
+	if err != nil {
+		t.Fatalf("ReplayFromOffsets: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1 (CPU brake must not drop/block replay)", len(msgs))
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("replay blocked %v — CPU brake wrongly applied to replay", elapsed)
 	}
 }
