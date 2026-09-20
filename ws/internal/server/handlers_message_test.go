@@ -1059,6 +1059,7 @@ func TestHandleReconnect_NormalPath_PosForwarded(t *testing.T) {
 	s := newReconnectTestServer(t, mb)
 	c := &Client{
 		id:            1,
+		tenantID:      "acme", // ADR-0020: reconnect replay is authorized against the tenant
 		send:          make(chan OutgoingMsg, 32),
 		seqGen:        messaging.NewSequenceGenerator(),
 		subscriptions: NewSubscriptionSet(),
@@ -1285,6 +1286,7 @@ func TestHandleReconnect_MultiChannelSameTopic_MinOffsetWins(t *testing.T) {
 	s := newReconnectTestServer(t, mb)
 	c := &Client{
 		id:            5,
+		tenantID:      "acme", // ADR-0020: reconnect replay is authorized against the tenant
 		send:          make(chan OutgoingMsg, 8),
 		seqGen:        messaging.NewSequenceGenerator(),
 		subscriptions: NewSubscriptionSet(),

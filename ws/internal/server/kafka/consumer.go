@@ -1583,12 +1583,13 @@ func (c *Consumer) ReplayFromOffsets(
 				return
 			}
 
-			// Filter by subscriptions (only return messages client is subscribed to)
-			// The subject IS the channel (e.g., "BTC.trade", "BTC.balances.user123")
-			if len(subSet) > 0 {
-				if _, subscribed := subSet[msg.subject]; !subscribed {
-					return // Skip messages for unsubscribed channels
-				}
+			// Filter by subscriptions (only return messages client is subscribed to).
+			// The subject IS the channel (e.g., "BTC.trade", "BTC.balances.user123").
+			// FAIL CLOSED (ADR-0020, §II/§IX): an empty subSet replays NOTHING, never
+			// the whole topic. Do NOT reintroduce a `len(subSet) > 0` guard here — that
+			// let a reconnect with no filter leak every channel on a shared topic.
+			if _, subscribed := subSet[msg.subject]; !subscribed {
+				return // skip messages for unsubscribed channels (empty set skips all)
 			}
 
 			// Add to replay results

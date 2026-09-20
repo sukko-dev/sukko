@@ -10,6 +10,8 @@ import (
 	"github.com/sukko-dev/sukko/internal/server/history"
 	"github.com/sukko-dev/sukko/internal/server/messaging"
 	"github.com/sukko-dev/sukko/internal/server/metrics"
+	"github.com/sukko-dev/sukko/internal/shared/auth"
+	"github.com/sukko-dev/sukko/internal/shared/logging"
 	"github.com/sukko-dev/sukko/internal/shared/protocol"
 )
 
@@ -303,7 +305,26 @@ func (s *Server) handleReconnect(c *Client, data []byte) {
 	// on ONE partition, and replaying the whole topic at that offset would be
 	// out of range on partitions with shorter logs.
 	positions := make(map[string]map[int32]int64, len(reconnectReq.LastPos))
+	// authorizedChannels is the replay filter: exactly the channels the client
+	// named in last_pos that pass tenant authorization (ADR-0020). It replaces
+	// the live subscription set, which is empty here because the protocol sends
+	// reconnect before subscribe — passing that empty set let the replay fail
+	// open and dump every channel on the shared topic to the client.
+	authorizedChannels := make([]string, 0, len(reconnectReq.LastPos))
 	for channel, posStr := range reconnectReq.LastPos {
+		// L1 authorization: a client may only replay channels owned by its
+		// authenticated tenant. Denied channels are skipped, logged, and counted
+		// so a client cannot name another tenant's channel to have its topic
+		// replayed (§IX). ValidateChannelTenant fails closed on an empty tenant.
+		if !auth.ValidateChannelTenant(channel, c.TenantID()) {
+			metrics.ReconnectChannelDenied.Inc()
+			s.logger.Warn().
+				Int64("client_id", c.id).
+				Str("channel", channel).
+				Str(logging.LogKeyTenantSlug, c.TenantID()).
+				Msg("handleReconnect: channel not owned by tenant — denied")
+			continue
+		}
 		partition, offset, ok := history.DecodePos(posStr)
 		if !ok {
 			metrics.ReconnectPosDecodeFailures.Inc()
@@ -330,20 +351,40 @@ func (s *Server) handleReconnect(c *Client, data []byte) {
 		if existing, alreadySet := positions[topic][partition]; !alreadySet || nextOffset < existing {
 			positions[topic][partition] = nextOffset
 		}
+		authorizedChannels = append(authorizedChannels, channel)
 	}
 
-	// Get client's subscriptions for filtering
-	subscriptions := c.subscriptions.List()
+	// Nothing left to replay after authorization/decoding (e.g. every last_pos
+	// channel was denied or undecodable): send a clean zero-message ack, not a
+	// REPLAY_FAILED. The backend rejects an empty positions map with "at least
+	// one topic offset is required", which would misrepresent an authz denial as
+	// a server failure.
+	if len(positions) == 0 {
+		ackMsg := map[string]any{
+			"type":              RespTypeReconnectAck,
+			"status":            "completed",
+			"messages_replayed": 0,
+			"message":           "No replayable channels",
+		}
+		if ackData, err := json.Marshal(ackMsg); err == nil {
+			select {
+			case c.send <- RawMsg(ackData):
+			default:
+			}
+		}
+		return
+	}
 
 	// Create context with timeout for replay operation
 	ctx, cancel := context.WithTimeout(s.ctx, s.config.ReplayTimeout)
 	defer cancel()
 
-	// Perform replay from backend
+	// Perform replay from backend. Subscriptions is the tenant-validated
+	// last_pos channel set (ADR-0020) — never the empty live subscription set.
 	replayedMsgs, err := s.backend.Replay(ctx, backend.ReplayRequest{
 		Positions:     positions,
 		MaxMessages:   s.config.MaxReplayMessages,
-		Subscriptions: subscriptions,
+		Subscriptions: authorizedChannels,
 	})
 
 	if err != nil {
