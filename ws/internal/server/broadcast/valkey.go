@@ -117,11 +117,33 @@ type valkeyBus struct {
 	publishErrors  atomic.Uint64
 	messagesRecv   atomic.Uint64
 
+	// disruptedSince records the start (UnixNano) of an open subscribe-disruption
+	// episode, or 0 when none is open (ADR-0019). Written only by the
+	// subscription management loop (armed in reinitDedicatedClient on a
+	// dedicated-connection loss, cleared on a fully successful converge); read
+	// lock-free by Publish to decide whether a zero-subscriber PUBLISH is the
+	// publish-recovers-before-subscribe race (hold) or a genuinely empty channel
+	// (accept). Its value marks that a disruption is active; the hold window is
+	// measured from heldSince, not from here.
+	disruptedSince atomic.Int64
+
+	// heldSince records (UnixNano) when this episode first held a zero-subscriber
+	// publish — i.e. when the pooled connection recovered and began flushing
+	// held records into not-yet-reconverged channels. The window is measured
+	// from HERE, not from disruptedSince: during the outage itself publishes fail
+	// on the error path (held unbounded, ADR-0015), so anchoring the window at
+	// disruption start would burn it down while it protects nothing and let any
+	// outage longer than the window reproduce the loss. Set once per episode by
+	// Publish via CAS (many goroutines), reset to 0 by the management loop when a
+	// fresh episode opens or an episode clears.
+	heldSince atomic.Int64
+
 	shutdownTimeout           time.Duration
 	publishTimeout            time.Duration
 	healthCheckInterval       time.Duration
 	healthCheckTimeout        time.Duration
 	publishStalenessThreshold time.Duration
+	zeroSubscriberWindow      time.Duration
 
 	metrics *busMetrics
 	logger  zerolog.Logger
@@ -231,6 +253,7 @@ func newValkeyBus(cfg Config, logger zerolog.Logger) (*valkeyBus, error) {
 		healthCheckInterval:       vcfg.HealthCheckInterval,
 		healthCheckTimeout:        vcfg.HealthCheckTimeout,
 		publishStalenessThreshold: vcfg.PublishStalenessThreshold,
+		zeroSubscriberWindow:      vcfg.ZeroSubscriberWindow,
 		ctx:                       busCtx,
 		cancel:                    busCancel,
 		logger:                    busLogger,
@@ -293,7 +316,10 @@ func (b *valkeyBus) Publish(msg *Message) error {
 	ctx, cancel := context.WithTimeout(b.ctx, b.publishTimeout)
 	defer cancel()
 
-	if err := b.client.Do(ctx, b.client.B().Publish().Channel(ch).Message(string(payload)).Build()).Error(); err != nil {
+	// PUBLISH returns the number of subscribers that received the message; we
+	// read it (ADR-0019) rather than only checking the error.
+	resp := b.client.Do(ctx, b.client.B().Publish().Channel(ch).Message(string(payload)).Build())
+	if err := resp.Error(); err != nil {
 		b.logger.Error().
 			Err(err).
 			Str("channel", ch).
@@ -305,9 +331,75 @@ func (b *valkeyBus) Publish(msg *Message) error {
 		return fmt.Errorf("%w: publish to %q: %w", ErrPublishUnavailable, ch, err)
 	}
 
+	// The pooled connection is healthy — the command succeeded. Record that
+	// before the zero-subscriber decision so a held publish (below) does not trip
+	// the publish-staleness health check during a recovery episode.
 	b.lastPublish.Store(time.Now().Unix())
 	b.publishHealthy.Store(true)
+
+	// Zero subscribers received the message. Distinguish the two explicit cases
+	// (ADR-0019, §XV): during an open subscribe-disruption episode this is the
+	// publish-recovers-before-subscribe race, so hold the record for retry;
+	// otherwise it is a genuinely empty channel (Kafka durability and the
+	// reconnect/replay path cover a client that connects later), so accept it.
+	// A non-integer PUBLISH reply (cerr != nil) is not expected — PUBLISH always
+	// returns the receiver count — so the gate is deliberately skipped fail-open
+	// (§III: treat as delivered rather than block on an unparseable reply).
+	if count, cerr := resp.AsInt64(); cerr == nil && count == 0 {
+		if b.inRecoveryEpisode(time.Now().UnixNano()) {
+			b.metrics.zeroSubscriberRetriesTotal.WithLabelValues(outcomeHeld).Inc()
+			return fmt.Errorf("%w: publish to %q reached 0 subscribers during recovery", ErrPublishUnavailable, ch)
+		}
+		if b.disruptedSince.Load() != 0 {
+			b.metrics.zeroSubscriberRetriesTotal.WithLabelValues(outcomeWindowExpired).Inc()
+		} else {
+			b.metrics.zeroSubscriberRetriesTotal.WithLabelValues(outcomeAcceptedEmpty).Inc()
+		}
+	}
 	return nil
+}
+
+// inRecoveryEpisode reports whether a zero-subscriber publish should be HELD for
+// retry: a subscribe-disruption episode is open AND the hold window has not
+// elapsed. The window is measured from heldSince — the first held publish of the
+// episode, i.e. publish recovery — NOT from disruption start: during the outage
+// itself publishes fail on the error path (held unbounded, ADR-0015), so a
+// window anchored at disruption start would burn down while protecting nothing
+// and let any outage longer than the window reproduce the loss. On the first
+// held publish it records the window start via CAS (Publish is multi-goroutine).
+// Past the window it returns false so the record is flushed, bounding the
+// consume-loop block so a prolonged genuinely-empty channel cannot livelock.
+func (b *valkeyBus) inRecoveryEpisode(now int64) bool {
+	if b.disruptedSince.Load() == 0 {
+		return false // subscriptions healthy: a zero-subscriber channel is genuinely empty
+	}
+	held := b.heldSince.Load()
+	if held == 0 {
+		b.heldSince.CompareAndSwap(0, now) // start the window at publish recovery
+		return true
+	}
+	return now-held < int64(b.zeroSubscriberWindow)
+}
+
+// armDisruptionEpisode opens a subscribe-disruption episode. On a FRESH
+// disruption (none currently open) it resets the hold-window clock so the window
+// is measured from the next publish recovery; a reconnect that flaps while an
+// episode is already open does NOT reset the clock, so repeated reinits cannot
+// extend the hold window indefinitely. Called only from the subscription
+// management loop (the single writer of episode state, alongside converge).
+func (b *valkeyBus) armDisruptionEpisode(start int64) {
+	if b.disruptedSince.Load() == 0 {
+		b.heldSince.Store(0)
+	}
+	b.disruptedSince.Store(start)
+}
+
+// clearDisruptionEpisode ends any open episode and resets the hold-window clock.
+// Called only from the subscription management loop after a fully successful
+// convergence pass.
+func (b *valkeyBus) clearDisruptionEpisode() {
+	b.disruptedSince.Store(0)
+	b.heldSince.Store(0)
 }
 
 // --- Subscribe / Unsubscribe ---
@@ -557,6 +649,13 @@ func (b *valkeyBus) reinitDedicatedClient() {
 	b.confirmedAll = false
 	b.updateEstablished()
 	b.desiredGen.Add(1)
+
+	// A dedicated-connection loss is the one signal that precedes the
+	// publish-recovers-before-subscribe gap: open a recovery episode so a
+	// zero-subscriber PUBLISH is held until subscriptions reconverge (ADR-0019).
+	// This is the only place an episode is armed — normal subscription churn
+	// goes through the wakeup path, never here.
+	b.armDisruptionEpisode(time.Now().UnixNano())
 }
 
 // --- Subscription management goroutine ---
@@ -766,6 +865,9 @@ func (b *valkeyBus) converge(backstop bool) bool {
 		// the next pass will advance the generation again — convergence may
 		// read transiently false, never falsely true.
 		b.confirmedGen.Store(gen)
+		// Subscriptions are fully re-established: end any open recovery episode
+		// so zero-subscriber publishes return to steady-state semantics (ADR-0019).
+		b.clearDisruptionEpisode()
 	}
 	return ok
 }

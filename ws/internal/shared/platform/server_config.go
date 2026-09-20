@@ -404,6 +404,7 @@ type ServerConfig struct {
 	ValkeyHealthCheckInterval       time.Duration `env:"VALKEY_HEALTH_CHECK_INTERVAL" envDefault:"10s"`       // Interval for periodic Valkey health checks.
 	ValkeyHealthCheckTimeout        time.Duration `env:"VALKEY_HEALTH_CHECK_TIMEOUT" envDefault:"5s"`         // Timeout for each Valkey health check PING.
 	ValkeyPublishStalenessThreshold time.Duration `env:"VALKEY_PUBLISH_STALENESS_THRESHOLD" envDefault:"60s"` // Staleness window for the Valkey broadcast publisher — a warning is logged if no message is published within this interval (indicates silent consumer failures).
+	ValkeyZeroSubscriberWindow      time.Duration `env:"VALKEY_ZERO_SUBSCRIBER_WINDOW" envDefault:"30s"`      // How long a broadcast that reaches zero subscribers is held for retry after a Valkey pub/sub disruption before being flushed — bounds consume-loop backpressure so a genuinely empty channel cannot block ingestion indefinitely.
 
 	// Kafka consumer tuning
 	KafkaBatchSize    int           `env:"KAFKA_BATCH_SIZE" envDefault:"50"`      // Maximum number of Kafka messages processed per consumer batch.
@@ -935,6 +936,9 @@ func (c *ServerConfig) Validate() error {
 	}
 	if c.ValkeyHealthCheckTimeout <= 0 {
 		return fmt.Errorf("VALKEY_HEALTH_CHECK_TIMEOUT must be > 0, got %v", c.ValkeyHealthCheckTimeout)
+	}
+	if c.ValkeyZeroSubscriberWindow <= 0 {
+		return fmt.Errorf("VALKEY_ZERO_SUBSCRIBER_WINDOW must be > 0, got %v", c.ValkeyZeroSubscriberWindow)
 	}
 	if c.KafkaBatchTimeout <= 0 {
 		return fmt.Errorf("KAFKA_BATCH_TIMEOUT must be > 0, got %v", c.KafkaBatchTimeout)

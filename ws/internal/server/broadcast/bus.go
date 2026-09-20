@@ -229,6 +229,12 @@ type ValkeyConfig struct {
 	// Staleness detection
 	PublishStalenessThreshold time.Duration // Log warning if no publish within this window
 
+	// Recovery gate (ADR-0019): how long a zero-subscriber PUBLISH is held for
+	// retry after a subscribe-connection disruption before it is flushed under
+	// plain pub/sub semantics. Bounds the consume-loop block so a genuinely
+	// empty channel cannot livelock.
+	ZeroSubscriberWindow time.Duration
+
 	// TLS for managed Valkey/Redis services (ElastiCache, Memorystore, Upstash, etc.)
 	TLSEnabled  bool
 	TLSInsecure bool   // Skip TLS verification (not for production)

@@ -6,12 +6,13 @@ import (
 )
 
 const (
-	metricDroppedTotal              = "ws_broadcast_bus_dropped_total"
-	metricPublishFailuresTotal      = "ws_broadcast_publish_failures_total"
-	metricSubscribeCommandsTotal    = "ws_broadcast_subscribe_commands_total"
-	metricReconcileCorrectionsTotal = "ws_broadcast_reconcile_corrections_total"
-	metricSubscriptionsDesired      = "ws_broadcast_subscriptions_desired"
-	metricSubscriptionsEstablished  = "ws_broadcast_subscriptions_established"
+	metricDroppedTotal               = "ws_broadcast_bus_dropped_total"
+	metricPublishFailuresTotal       = "ws_broadcast_publish_failures_total"
+	metricSubscribeCommandsTotal     = "ws_broadcast_subscribe_commands_total"
+	metricReconcileCorrectionsTotal  = "ws_broadcast_reconcile_corrections_total"
+	metricSubscriptionsDesired       = "ws_broadcast_subscriptions_desired"
+	metricSubscriptionsEstablished   = "ws_broadcast_subscriptions_established"
+	metricZeroSubscriberRetriesTotal = "ws_broadcast_zero_subscriber_retries_total"
 
 	metricTenantLabelAll     = "_all"
 	metricTenantLabelEmpty   = ""
@@ -19,6 +20,12 @@ const (
 
 	metricResultSuccess = "success"
 	metricResultRetry   = "retry"
+
+	// Outcomes for a zero-subscriber PUBLISH (ADR-0019), the `outcome` label of
+	// metricZeroSubscriberRetriesTotal.
+	outcomeHeld          = "held"           // gated during a recovery episode: returned ErrPublishUnavailable for retry
+	outcomeAcceptedEmpty = "accepted_empty" // steady state: genuinely empty channel, accepted
+	outcomeWindowExpired = "window_expired" // episode window elapsed: flushed under plain pub/sub semantics
 )
 
 // busMetrics holds all Prometheus instruments for valkeyBus.
@@ -47,6 +54,14 @@ type busMetrics struct {
 	// No tenant label — a bus outage is global, and the failure cause is not
 	// per-tenant (validation rejects are counted in droppedTotal instead).
 	publishFailuresTotal prometheus.Counter
+
+	// zeroSubscriberRetriesTotal makes the ADR-0019 recovery gate observable: a
+	// PUBLISH that reached zero subscribers, labeled by what the bus did with
+	// it (held for retry, accepted as a steady-state empty channel, or flushed
+	// after the episode window expired). A non-trivial accepted_empty rate right
+	// after an outage, or any held outside a real disruption, means the episode
+	// signal is miscalibrated.
+	zeroSubscriberRetriesTotal *prometheus.CounterVec
 }
 
 func newBusMetrics(reg prometheus.Registerer) *busMetrics {
@@ -80,5 +95,9 @@ func newBusMetrics(reg prometheus.Registerer) *busMetrics {
 			Name: metricPublishFailuresTotal,
 			Help: "Broadcast messages that failed to publish to the backend (Valkey PUBLISH command failure or serialization failure).",
 		}),
+		zeroSubscriberRetriesTotal: promauto.With(reg).NewCounterVec(prometheus.CounterOpts{
+			Name: metricZeroSubscriberRetriesTotal,
+			Help: "Broadcast PUBLISH commands that reached zero subscribers, by outcome (held for retry during a recovery episode, accepted_empty in steady state, window_expired after the episode window elapsed).",
+		}, []string{"outcome"}),
 	}
 }

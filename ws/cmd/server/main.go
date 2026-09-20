@@ -207,6 +207,7 @@ func main() {
 			HealthCheckInterval:       cfg.ValkeyHealthCheckInterval,
 			HealthCheckTimeout:        cfg.ValkeyHealthCheckTimeout,
 			PublishStalenessThreshold: cfg.ValkeyPublishStalenessThreshold,
+			ZeroSubscriberWindow:      cfg.ValkeyZeroSubscriberWindow,
 		},
 	}
 
