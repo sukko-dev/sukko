@@ -270,9 +270,11 @@ func buildLoggerConfig(cfg *platform.WebhookWorkerConfig) logging.LoggerConfig {
 // Fields intentionally left at their zero value — the worker only calls SubscribeAll() and
 // never publishes, so these have no effect here (§XV: no dead knobs; enumerated per spec):
 // BufferSize/Limits (SubscribeAll sizes its buffer to the max when Limits is unset), DB
-// (0 = database 0, same as ws-server), PublishTimeout/PublishStalenessThreshold (publisher-
-// side; a future publishing use of the bus from this service must expose them first), and the
-// Reconnect* knobs (the bus never consumes them — reconnection uses internal backoff constants).
+// (0 = database 0, same as ws-server), PublishTimeout/PublishStalenessThreshold/
+// ZeroSubscriberWindow (publisher-side; a future publishing use of the bus from this service
+// must expose them first — ZeroSubscriberWindow at 0 correctly disables the ADR-0019 gate on a
+// publish-free bus), and the Reconnect* knobs (the bus never consumes them — reconnection uses
+// internal backoff constants).
 //
 // NOTE (§X, §XVIII documented deviation): the broadcast package lives under internal/server/;
 // with two services consuming it, §X would place it in internal/shared/. Relocation is a tracked

@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/sukko-dev/sukko/internal/server/backend"
+	"github.com/sukko-dev/sukko/internal/server/broadcast"
 	"github.com/sukko-dev/sukko/internal/server/metrics"
 	"github.com/sukko-dev/sukko/internal/shared/auth"
 	"github.com/sukko-dev/sukko/internal/shared/protocol"
@@ -128,6 +129,13 @@ func publishErrorToClientCode(err error) (protocol.ErrorCode, bool) {
 	case errors.Is(err, protocol.ErrTopicNotProvisioned):
 		return protocol.ErrCodeTopicNotProvisioned, false
 	case errors.Is(err, protocol.ErrServiceUnavailable):
+		return protocol.ErrCodeServiceUnavailable, true
+	case errors.Is(err, broadcast.ErrPublishUnavailable):
+		// The broadcast bus is unavailable or recovering (ADR-0019: a
+		// zero-subscriber publish held during a subscribe-disruption episode
+		// surfaces here on the direct backend, which has no consumer-side
+		// retrier). It is transient — the client should retry — so classify it
+		// as service-unavailable (Warn), not a terminal publish_failed (Error).
 		return protocol.ErrCodeServiceUnavailable, true
 	default:
 		return protocol.ErrCodePublishFailed, false

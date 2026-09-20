@@ -112,6 +112,7 @@ func newValidServerConfig() *ServerConfig {
 		ValkeyReconnectMaxAttempts:    10,
 		ValkeyHealthCheckInterval:     10 * time.Second,
 		ValkeyHealthCheckTimeout:      5 * time.Second,
+		ValkeyZeroSubscriberWindow:    30 * time.Second,
 		// Kafka consumer tuning
 		KafkaBatchSize:                 50,
 		KafkaBatchTimeout:              10 * time.Millisecond,
