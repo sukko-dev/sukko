@@ -298,6 +298,89 @@ func (c *ProvisioningClient) routingRulesPath(tenantID string) string {
 	return c.baseURL + "/api/v1/tenants/" + tenantID + "/routing-rules"
 }
 
+// --- Topics (ADR-0006 Phase 2) ---
+
+func (c *ProvisioningClient) topicsURL(tenantID string) string {
+	return c.baseURL + "/api/v1/tenants/" + tenantID + "/topics"
+}
+
+func (c *ProvisioningClient) topicURL(tenantID, suffix string) string {
+	return c.topicsURL(tenantID) + "/" + suffix
+}
+
+// ListTopics GETs a tenant's provisioned topics as admin and returns the raw JSON body.
+func (c *ProvisioningClient) ListTopics(ctx context.Context, tenantID string) ([]byte, error) {
+	return c.doGet(ctx, "/api/v1/tenants/"+tenantID+"/topics", "list topics")
+}
+
+// ListTopicsPage GETs topics with a ?limit=N query (used to assert the page-limit cap echo).
+func (c *ProvisioningClient) ListTopicsPage(ctx context.Context, tenantID string, limit int) ([]byte, error) {
+	return c.doGet(ctx, fmt.Sprintf("/api/v1/tenants/%s/topics?limit=%d", tenantID, limit), "list topics")
+}
+
+// ListTopicsWithToken GETs topics using an explicit bearer token and returns the HTTP status
+// (used to assert a user-role GET is allowed — reads are outside the write role gate).
+func (c *ProvisioningClient) ListTopicsWithToken(ctx context.Context, tenantID, token string) (int, error) {
+	return c.doRawWithToken(ctx, http.MethodGet, c.topicsURL(tenantID), token, "list topics", nil)
+}
+
+// CreateTopicRaw POSTs a topic as admin and returns the HTTP status.
+func (c *ProvisioningClient) CreateTopicRaw(ctx context.Context, tenantID, suffix string) (int, error) {
+	body, err := json.Marshal(map[string]any{"suffix": suffix})
+	if err != nil {
+		return 0, fmt.Errorf("create topic: marshal: %w", err)
+	}
+	return c.doRawAdmin(ctx, http.MethodPost, c.topicsURL(tenantID), "create topic", body)
+}
+
+// CreateTopicRawWithToken POSTs a topic using an explicit bearer token (role-gate probe).
+func (c *ProvisioningClient) CreateTopicRawWithToken(ctx context.Context, tenantID, token, suffix string) (int, error) {
+	body, err := json.Marshal(map[string]any{"suffix": suffix})
+	if err != nil {
+		return 0, fmt.Errorf("create topic: marshal: %w", err)
+	}
+	return c.doRawWithToken(ctx, http.MethodPost, c.topicsURL(tenantID), token, "create topic", body)
+}
+
+// DeleteTopicRaw DELETEs a topic as admin and returns the HTTP status.
+func (c *ProvisioningClient) DeleteTopicRaw(ctx context.Context, tenantID, suffix string) (int, error) {
+	return c.doRawAdmin(ctx, http.MethodDelete, c.topicURL(tenantID, suffix), "delete topic", nil)
+}
+
+// DeleteTopicRawWithToken DELETEs a topic using an explicit bearer token (role-gate probe).
+func (c *ProvisioningClient) DeleteTopicRawWithToken(ctx context.Context, tenantID, token, suffix string) (int, error) {
+	return c.doRawWithToken(ctx, http.MethodDelete, c.topicURL(tenantID, suffix), token, "delete topic", nil)
+}
+
+// GetQuotaRaw GETs a tenant's quota as admin, returning status + body so the caller can both
+// detect the Community edition gate (403 EDITION_LIMIT) and read the current max_topics.
+func (c *ProvisioningClient) GetQuotaRaw(ctx context.Context, tenantID string) (status int, body []byte, err error) {
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/tenants/"+tenantID+"/quotas", http.NoBody)
+	if reqErr != nil {
+		return 0, nil, fmt.Errorf("get quota: build request: %w", reqErr)
+	}
+	c.setHeaders(req)
+	resp, doErr := c.httpClient.Do(req)
+	if doErr != nil {
+		return 0, nil, fmt.Errorf("get quota: %w", doErr)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if resp.StatusCode >= 400 {
+		return resp.StatusCode, body, formatHTTPError("get quota", resp.StatusCode, body)
+	}
+	return resp.StatusCode, body, nil
+}
+
+// UpdateQuotaRaw PATCHes a tenant's quota as admin and returns the HTTP status (Pro-gated).
+func (c *ProvisioningClient) UpdateQuotaRaw(ctx context.Context, tenantID string, updates map[string]any) (int, error) {
+	body, err := json.Marshal(updates)
+	if err != nil {
+		return 0, fmt.Errorf("update quota: marshal: %w", err)
+	}
+	return c.doRawAdmin(ctx, http.MethodPatch, c.baseURL+"/api/v1/tenants/"+tenantID+"/quotas", "update quota", body)
+}
+
 // doRawAdmin issues an admin-signed request with an optional JSON body and returns the status.
 // On a >=400 response it returns the status plus a readError-wrapped error embedding the body.
 func (c *ProvisioningClient) doRawAdmin(ctx context.Context, method, url, operation string, payload []byte) (int, error) {

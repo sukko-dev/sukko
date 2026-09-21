@@ -53,6 +53,12 @@ const (
 	// the handler's service-private constants (internal/provisioning/api/handlers.go),
 	// matched exactly via extractErrorCode on the `code` field.
 	errCodeTopicNotProvisioned          = "TOPIC_NOT_PROVISIONED"           // routing write referencing an unprovisioned topic suffix (400)
+	errCodeTopicAlreadyExists           = "TOPIC_ALREADY_EXISTS"            // create an already-provisioned topic (409)
+	errCodeTopicNotFound                = "TOPIC_NOT_FOUND"                 // delete a non-existent topic (404)
+	errCodeReservedTopicSuffix          = "RESERVED_TOPIC_SUFFIX"           // create/delete a reserved suffix: default/dead-letter (400)
+	errCodeInvalidTopicSuffix           = "INVALID_TOPIC_SUFFIX"            // create with an empty/uppercase/otherwise-invalid suffix (400)
+	errCodeTopicReferencedByRule        = "TOPIC_REFERENCED_BY_RULE"        // delete a topic still referenced by a routing rule (409)
+	errCodeTooManyTopics                = "TOO_MANY_TOPICS"                 // create past the per-tenant max_topics quota (400)
 	errCodeInsufficientRole             = "INSUFFICIENT_ROLE"               // RequireRole rejection on a user-role write (403)
 	errCodeTenantMismatch               = "TENANT_MISMATCH"                 // RequireTenant cross-tenant rejection (403)
 	errCodeRoutingRuleDuplicatePattern  = "ROUTING_RULE_DUPLICATE_PATTERN"  // POST dup pattern (409); PUT internal dup (400)
