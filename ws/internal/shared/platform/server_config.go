@@ -177,7 +177,7 @@ type ServerConfig struct {
 	MaxConnections int `env:"WS_MAX_CONNECTIONS" envDefault:"500"` // Maximum simultaneous WebSocket client connections per pod. New connections are rejected with HTTP 503 when this limit is reached.
 
 	// Rate limiting
-	MaxKafkaMessagesPerSec   int `env:"WS_MAX_KAFKA_RATE" envDefault:"1000"`           // Maximum Kafka messages per second the server will consume across all topics.
+	MaxKafkaMessagesPerSec   int `env:"WS_MAX_KAFKA_RATE" envDefault:"1000"`           // Maximum Kafka messages per second the server consumes across all topics; exceeding it paces (backpressures) consumption rather than dropping, so sustained overload becomes consumer lag, not message loss.
 	MaxBroadcastsPerSec      int `env:"WS_MAX_BROADCAST_RATE" envDefault:"25"`         // Maximum Valkey broadcast fan-out rate in messages per second. Messages above this rate are dropped and counted in ws_broadcast_bus_dropped_total.
 	MaxGoroutines            int `env:"WS_MAX_GOROUTINES" envDefault:"100000"`         // Maximum number of goroutines allowed per pod. New connections are rejected when this limit is reached.
 	RateLimitBurstMultiplier int `env:"WS_RATE_LIMIT_BURST_MULTIPLIER" envDefault:"2"` // Burst capacity as a multiple of the steady-state rate
