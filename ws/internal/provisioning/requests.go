@@ -85,6 +85,12 @@ type AddRoutingRuleRequest struct {
 	Rule TopicRoutingRule `json:"rule"`
 }
 
+// CreateTopicRequest is the request to provision a non-default topic.
+type CreateTopicRequest struct {
+	// Suffix is the topic suffix to provision (the "<suffix>" in "<tenant>.<suffix>").
+	Suffix string `json:"suffix"`
+}
+
 // UpdateQuotaRequest is the request to update quotas.
 type UpdateQuotaRequest struct {
 	// MaxTopics is the new max topics limit.

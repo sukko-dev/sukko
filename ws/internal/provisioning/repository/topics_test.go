@@ -2,11 +2,13 @@ package repository_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sukko-dev/sukko/internal/provisioning"
 	"github.com/sukko-dev/sukko/internal/provisioning/repository"
 	"github.com/sukko-dev/sukko/internal/shared/testutil"
 )
@@ -88,5 +90,64 @@ func TestTopicRepository_Exists_TenantScoped(t *testing.T) {
 	}
 	if exists {
 		t.Error("tenant B must not see tenant A's topic (isolation)")
+	}
+}
+
+func TestTopicRepository_Create_ListCountDelete(t *testing.T) {
+	t.Parallel()
+	repo, _, tenantID, ctx := newTopicsFixture(t, "topics-crud")
+
+	if n, err := repo.Count(ctx, tenantID); err != nil || n != 0 {
+		t.Fatalf("initial Count = %d, %v; want 0, nil", n, err)
+	}
+
+	ca, err := repo.Create(ctx, tenantID, "analytics")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if ca.IsZero() {
+		t.Error("Create returned zero created_at")
+	}
+	if _, err := repo.Create(ctx, tenantID, "audit"); err != nil {
+		t.Fatalf("Create audit: %v", err)
+	}
+
+	got, err := repo.List(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 2 || got[0].Suffix != "analytics" || got[1].Suffix != "audit" {
+		t.Errorf("List = %+v, want [analytics, audit] ordered", got)
+	}
+	if n, _ := repo.Count(ctx, tenantID); n != 2 {
+		t.Errorf("Count = %d, want 2", n)
+	}
+
+	if err := repo.Delete(ctx, tenantID, "analytics"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if n, _ := repo.Count(ctx, tenantID); n != 1 {
+		t.Errorf("Count after delete = %d, want 1", n)
+	}
+}
+
+func TestTopicRepository_Create_DuplicateRejected(t *testing.T) {
+	t.Parallel()
+	repo, _, tenantID, ctx := newTopicsFixture(t, "topics-dup")
+	if _, err := repo.Create(ctx, tenantID, "analytics"); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+	_, err := repo.Create(ctx, tenantID, "analytics")
+	if !errors.Is(err, provisioning.ErrTopicAlreadyExists) {
+		t.Errorf("duplicate Create err = %v, want ErrTopicAlreadyExists", err)
+	}
+}
+
+func TestTopicRepository_Delete_NotFound(t *testing.T) {
+	t.Parallel()
+	repo, _, tenantID, ctx := newTopicsFixture(t, "topics-del-absent")
+	err := repo.Delete(ctx, tenantID, "ghost")
+	if !errors.Is(err, provisioning.ErrTopicNotFound) {
+		t.Errorf("Delete absent err = %v, want ErrTopicNotFound", err)
 	}
 }

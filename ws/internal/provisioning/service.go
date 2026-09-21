@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1390,6 +1391,142 @@ func (s *Service) DeleteRoutingRules(ctx context.Context, tenantID string) error
 	s.emitEvent(eventbus.TenantConfigChanged)
 	s.emitEvent(eventbus.TopicsChanged)
 
+	return nil
+}
+
+// maxTopicSuffixLength caps a provisioned topic suffix. Kafka topic names are
+// capped at 249 chars and the namespaced name is "<namespace>.<slug>.<suffix>",
+// so the suffix must leave room for the prefix.
+const maxTopicSuffixLength = 200
+
+// validateTopicSuffix enforces the provisioned-topic suffix format: non-empty,
+// lowercase alphanumeric and hyphens (the same charset as routing-pattern
+// literal segments), length-capped, and never a reserved suffix — 'default' is
+// deterministic (validated implicitly) and 'dead-letter' is infrastructure.
+func validateTopicSuffix(suffix string) error {
+	switch suffix {
+	case "":
+		return fmt.Errorf("%w: empty", ErrInvalidTopicSuffix)
+	case routing.DefaultTopicSuffix, routing.DeadLetterTopicSuffix:
+		return fmt.Errorf("%w: %q is reserved", ErrReservedTopicSuffix, suffix)
+	}
+	if len(suffix) > maxTopicSuffixLength {
+		return fmt.Errorf("%w: %d chars, max %d", ErrInvalidTopicSuffix, len(suffix), maxTopicSuffixLength)
+	}
+	if !literalSegmentRegex.MatchString(suffix) {
+		return fmt.Errorf("%w: %q (lowercase alphanumeric and hyphens only)", ErrInvalidTopicSuffix, suffix)
+	}
+	return nil
+}
+
+// CreateTopic provisions a non-default topic for a tenant (ADR-0006 Phase 2).
+// No RequireFeature middleware gates topics; the wall is the per-tenant MaxTopics
+// quota row (seeded from config, overridable via PATCH /quotas), with the ratified
+// per-edition count cap also binding via the license key. The deterministic default
+// topic and the DLQ are never counted or creatable here.
+func (s *Service) CreateTopic(ctx context.Context, tenantID, suffix string) (*Topic, error) {
+	tenant, err := s.tenants.GetBySlug(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("get tenant: %w", err)
+	}
+	if tenant.Status != StatusActive {
+		return nil, fmt.Errorf("%w: %s", ErrTenantNotActive, tenant.Status)
+	}
+	if err := validateTopicSuffix(suffix); err != nil {
+		return nil, err
+	}
+
+	count, err := s.topics.Count(ctx, tenant.ID)
+	if err != nil {
+		return nil, fmt.Errorf("count topics: %w", err)
+	}
+	// The per-tenant quota row is the wall (ADR-0006 Phase 2): it is seeded from
+	// MAX_TOPICS_PER_TENANT at tenant creation and overridable via PATCH /quotas,
+	// so an operator's per-tenant max_topics binds here. Fall back to the global
+	// config only when no quota row exists. A quota of 0 means unlimited
+	// (Enterprise), matching license.IsUnlimited and the config's ">0" guard.
+	// Known residual: this count read is not serialized with the insert — two
+	// concurrent creates can both observe N-1 and land N+1. Bounded overshoot
+	// only (by the concurrency degree), and the next create re-checks; closing it
+	// would require pushing the limit into the repository transaction. Mirrors the
+	// same accepted residual in AddRoutingRule.
+	maxTopics := s.config.MaxTopicsPerTenant
+	if quota, qerr := s.quotas.Get(ctx, tenant.ID); qerr == nil {
+		maxTopics = quota.MaxTopics
+	} else if !errors.Is(qerr, ErrQuotaNotFound) {
+		return nil, fmt.Errorf("get quota: %w", qerr)
+	}
+	if maxTopics > 0 && count+1 > maxTopics {
+		return nil, fmt.Errorf("%w: have %d, max %d", ErrTopicQuotaExceeded, count, maxTopics)
+	}
+	// Edition count cap (checkCount contract: pass the existing count, fails when
+	// count >= max). No RequireFeature middleware gates topics (ADR-0006: "no
+	// edition gate"), but the ratified per-edition count still binds via the
+	// license key → resolveLimits.
+	if s.editionManager != nil {
+		if err := s.editionManager.Limits().CheckTopicsPerTenant(count); err != nil {
+			return nil, fmt.Errorf("edition limit: %w", err)
+		}
+	}
+
+	createdAt, err := s.topics.Create(ctx, tenant.ID, suffix)
+	if err != nil {
+		return nil, fmt.Errorf("create topic: %w", err)
+	}
+
+	s.auditLog(ctx, tenant.ID, ActionCreateTopic, Metadata{"suffix": suffix})
+	s.logger.Info().Str(logging.LogKeyTenantSlug, tenant.Slug).Str("suffix", suffix).Msg("Topic created")
+	s.emitEvent(eventbus.TopicsChanged)
+	return &Topic{Suffix: suffix, CreatedAt: createdAt}, nil
+}
+
+// ListTopics returns a tenant's provisioned topics. The deterministic default
+// topic is not stored but is always available, so it is prepended — callers see
+// the full consumable set.
+func (s *Service) ListTopics(ctx context.Context, tenantID string) ([]Topic, error) {
+	tenant, err := s.tenants.GetBySlug(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("get tenant: %w", err)
+	}
+	stored, err := s.topics.List(ctx, tenant.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list topics: %w", err)
+	}
+	topics := make([]Topic, 0, len(stored)+1)
+	topics = append(topics, Topic{Suffix: routing.DefaultTopicSuffix, CreatedAt: tenant.CreatedAt})
+	topics = append(topics, stored...)
+	return topics, nil
+}
+
+// DeleteTopic removes a provisioned topic. The default topic and DLQ are reserved
+// and cannot be deleted; a topic still referenced by a routing rule (ingress or
+// egress) cannot be deleted (ErrTopicReferencedByRule) — the rule would then fail
+// validation, so the operator must remove the rule first.
+func (s *Service) DeleteTopic(ctx context.Context, tenantID, suffix string) error {
+	tenant, err := s.tenants.GetBySlug(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("get tenant: %w", err)
+	}
+	if suffix == routing.DefaultTopicSuffix || suffix == routing.DeadLetterTopicSuffix {
+		return fmt.Errorf("%w: %q is reserved", ErrReservedTopicSuffix, suffix)
+	}
+	if s.routingRules != nil {
+		rules, err := s.routingRules.GetAll(ctx, tenant.ID)
+		if err != nil {
+			return fmt.Errorf("get routing rules: %w", err)
+		}
+		for _, rule := range rules {
+			if slices.Contains(rule.AllTopicSuffixes(), suffix) {
+				return fmt.Errorf("%w: %s", ErrTopicReferencedByRule, suffix)
+			}
+		}
+	}
+	if err := s.topics.Delete(ctx, tenant.ID, suffix); err != nil {
+		return fmt.Errorf("delete topic: %w", err)
+	}
+	s.auditLog(ctx, tenant.ID, ActionDeleteTopic, Metadata{"suffix": suffix})
+	s.logger.Info().Str(logging.LogKeyTenantSlug, tenant.Slug).Str("suffix", suffix).Msg("Topic deleted")
+	s.emitEvent(eventbus.TopicsChanged)
 	return nil
 }
 
