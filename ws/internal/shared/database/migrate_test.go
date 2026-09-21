@@ -3,6 +3,8 @@ package database
 import (
 	"context"
 	"database/sql"
+	"io/fs"
+	"strings"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -80,8 +82,21 @@ func TestRunMigrations_FreshDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 3 {
-		t.Errorf("expected 3 recorded migrations, got %d", count)
+	// Expect one recorded migration per embedded .sql file (RunMigrations applies
+	// every *.sql and skips atlas.sum) — derived, so adding a migration doesn't
+	// require touching this assertion.
+	entries, err := fs.ReadDir(migrations.Postgres, "postgres")
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	want := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sql") {
+			want++
+		}
+	}
+	if count != want {
+		t.Errorf("expected %d recorded migrations (one per .sql file), got %d", want, count)
 	}
 }
 
