@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1515,10 +1516,8 @@ func (s *Service) DeleteTopic(ctx context.Context, tenantID, suffix string) erro
 			return fmt.Errorf("get routing rules: %w", err)
 		}
 		for _, rule := range rules {
-			for _, ref := range rule.AllTopicSuffixes() {
-				if ref == suffix {
-					return fmt.Errorf("%w: %s", ErrTopicReferencedByRule, suffix)
-				}
+			if slices.Contains(rule.AllTopicSuffixes(), suffix) {
+				return fmt.Errorf("%w: %s", ErrTopicReferencedByRule, suffix)
 			}
 		}
 	}

@@ -1298,7 +1298,7 @@ func (m *MockWebhookStore) ListForDowngrade(_ context.Context, _ time.Time) ([]*
 
 // MockTopicStore implements provisioning.TopicStore for testing (ADR-0006
 // Phase 2). Create/List/Delete/Count are stateful (keyed by tenant+suffix) so
-// topics-API tests exercise real behaviour. Exists is decoupled: it returns
+// topics-API tests exercise real behavior. Exists is decoupled: it returns
 // ExistsResult (default true) so routing-rule validation tests need no per-test
 // setup; set ExistsErr for the store-error path or ExistsResult=false for the
 // not-provisioned path. The per-method *Err fields inject failures.
