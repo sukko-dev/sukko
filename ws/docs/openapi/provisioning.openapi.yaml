@@ -583,7 +583,10 @@ paths:
               $ref: "#/components/schemas/AddRoutingRuleRequest"
       responses:
         "201":
-          description: Rule added
+          description: |
+            Rule added. NOTE: the response echoes the rule exactly as submitted; the
+            stored, normalized form (e.g. a bare `*` pattern becomes `**`) is what a
+            subsequent GET returns.
           content:
             application/json:
               schema:
@@ -664,7 +667,9 @@ paths:
               $ref: "#/components/schemas/SetRoutingRulesRequest"
       responses:
         "200":
-          description: Rules set
+          description: |
+            Rules set. The response returns the stored, normalized rules (e.g. a bare `*`
+            pattern is normalized to `**`), matching what a subsequent GET returns.
           content:
             application/json:
               schema:
@@ -962,11 +967,13 @@ paths:
               $ref: "#/components/schemas/SetChannelRulesRequest"
       responses:
         "200":
-          description: Rules set
+          description: |
+            Rules set. NOTE: unlike GET (which returns the TenantChannelRules wrapper), PUT
+            echoes the bare, normalized ChannelRules object.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TenantChannelRules"
+                $ref: "#/components/schemas/ChannelRules"
         "400":
           description: Validation error
           content:
@@ -1348,14 +1355,39 @@ paths:
                 code: INSUFFICIENT_ROLE
                 message: "Required role: admin or system"
         "409":
-          description: Replay detected (iat not newer than current)
+          description: |
+            Conflict — one of two cases:
+            - `REPLAY_DETECTED`: the key iat is not newer than the current key (replay rejected).
+            - `EDITION_CHANGE_REQUIRES_RESTART`: the license changes the edition, which requires
+              a service restart to take effect. This response carries two extra fields,
+              `current_edition` and `requested_edition`.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
-              example:
-                code: "REPLAY_DETECTED"
-                message: "key iat is not newer than current — replay rejected"
+                type: object
+                required: [code, message]
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  current_edition:
+                    type: string
+                    description: Present only for EDITION_CHANGE_REQUIRES_RESTART — the edition currently in effect.
+                  requested_edition:
+                    type: string
+                    description: Present only for EDITION_CHANGE_REQUIRES_RESTART — the edition the submitted license requests.
+              examples:
+                replay_detected:
+                  value:
+                    code: "REPLAY_DETECTED"
+                    message: "key iat is not newer than current — replay rejected"
+                edition_change_requires_restart:
+                  value:
+                    code: "EDITION_CHANGE_REQUIRES_RESTART"
+                    message: "edition change requires a service restart"
+                    current_edition: "community"
+                    requested_edition: "pro"
         "429":
           description: Rate limited
           headers:
@@ -2583,7 +2615,7 @@ components:
 
     BulkDisconnectResponse:
       type: object
-      required: [disconnected, errors, channels_capped_warning, re_query_skipped]
+      required: [disconnected, errors, channels_capped_warning, connections_capped, re_query_skipped]
       properties:
         disconnected:
           type: integer
@@ -2594,6 +2626,9 @@ components:
         channels_capped_warning:
           type: boolean
           description: True when at least one connection's channel list was capped; the filter may have missed some channels.
+        connections_capped:
+          type: boolean
+          description: True when the matched-connection set was capped, so some matching connections may not have been disconnected.
         re_query_skipped:
           type: boolean
           description: True when the re-query goroutine was not launched (WG unavailable). Normally false.
@@ -2824,11 +2859,10 @@ components:
 
     CreateAPIKeyRequest:
       type: object
-      required: [name]
       properties:
         name:
           type: string
-          description: Human-readable label for the API key
+          description: Human-readable label for the API key (optional).
 
     PaginatedAPIKeys:
       type: object
@@ -2868,8 +2902,8 @@ components:
           examples: ["trades.**", "rooms.*.presence", "**"]
         ingress_topic:
           type: string
-          maxLength: 128
-          pattern: "^[a-zA-Z0-9._-]{1,128}$"
+          maxLength: 200
+          pattern: "^[a-z0-9-]{1,200}$"
           description: "Kafka topic suffix the platform consumes and delivers from. Full topic name: `{namespace}.{tenant_slug}.{suffix}`. Must be a pre-provisioned topic."
           examples: ["trades", "default"]
         egress_topics:
@@ -2877,8 +2911,8 @@ components:
           maxItems: 9
           items:
             type: string
-            maxLength: 128
-            pattern: "^[a-zA-Z0-9._-]{1,128}$"
+            maxLength: 200
+            pattern: "^[a-z0-9-]{1,200}$"
           description: "Kafka topic suffixes receiving copies for external consumers — written to (with the producer's bounded retry, then dead-lettered on terminal failure), never consumed. Requires Pro edition. Must be pre-provisioned topics, distinct from every ingress topic, and not `default` or `dead-letter`."
           examples: [["audit-log"]]
         priority:
