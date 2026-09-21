@@ -40,6 +40,7 @@ func newRenameService(clock func() time.Time, holdPeriod time.Duration) (
 		KeyStore:                    testutil.NewMockKeyStore(),
 		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           testutil.NewMockRoutingRulesStore(),
+		TopicStore:                  testutil.NewMockTopicStore(),
 		QuotaStore:                  quotaStore,
 		AuditStore:                  auditStore,
 		KafkaAdmin:                  kafkaAdmin,

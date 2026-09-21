@@ -176,6 +176,7 @@ func main() {
 	keyRepo := repository.NewKeyRepository(pool)
 	apiKeyRepo := repository.NewAPIKeyStore(pool)
 	routingRulesRepo := repository.NewRoutingRulesRepository(pool, structuredLogger, "provisioning")
+	topicsRepo := repository.NewTopicRepository(pool)
 	quotaRepo := repository.NewQuotaRepository(pool)
 	auditRepo := repository.NewAuditRepository(pool)
 	channelRulesRepo := repository.NewChannelRulesRepository(pool)
@@ -236,6 +237,7 @@ func main() {
 		KeyStore:                    keyRepo,
 		APIKeyStore:                 apiKeyRepo,
 		RoutingRulesStore:           routingRulesRepo,
+		TopicStore:                  topicsRepo,
 		QuotaStore:                  quotaRepo,
 		AuditStore:                  auditRepo,
 		ChannelRulesStore:           channelRulesRepo,

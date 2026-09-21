@@ -78,18 +78,23 @@ func newTestService() *provisioning.Service {
 
 // newTestServiceWithStores creates a provisioning service with specific mock stores.
 func newTestServiceWithStores(tenantStore *testutil.MockTenantStore, routingStore *testutil.MockRoutingRulesStore, channelRulesStore ...*testutil.MockChannelRulesStore) *provisioning.Service {
-	svc, _ := newTestServiceWithKafka(tenantStore, routingStore, channelRulesStore...)
+	svc, _, _ := newTestServiceWithKafka(tenantStore, routingStore, channelRulesStore...)
 	return svc
 }
 
-// newTestServiceWithKafka creates a provisioning service and returns the kafka admin for test assertions.
-func newTestServiceWithKafka(tenantStore *testutil.MockTenantStore, routingStore *testutil.MockRoutingRulesStore, channelRulesStore ...*testutil.MockChannelRulesStore) (*provisioning.Service, *testutil.MockKafkaAdmin) {
+// newTestServiceWithKafka creates a provisioning service and returns the kafka admin
+// and topic store for test assertions. The topic store defaults to reporting every
+// topic as provisioned; a test can set topicStore.ExistsResult=false to exercise the
+// not-provisioned path.
+func newTestServiceWithKafka(tenantStore *testutil.MockTenantStore, routingStore *testutil.MockRoutingRulesStore, channelRulesStore ...*testutil.MockChannelRulesStore) (*provisioning.Service, *testutil.MockKafkaAdmin, *testutil.MockTopicStore) {
 	kafkaAdmin := testutil.NewMockKafkaAdmin()
+	topicStore := testutil.NewMockTopicStore()
 	cfg := provisioning.ServiceConfig{
 		TenantStore:                 tenantStore,
 		KeyStore:                    testutil.NewMockKeyStore(),
 		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           routingStore,
+		TopicStore:                  topicStore,
 		QuotaStore:                  testutil.NewMockQuotaStore(),
 		AuditStore:                  testutil.NewMockAuditStore(),
 		KafkaAdmin:                  kafkaAdmin,
@@ -112,7 +117,7 @@ func newTestServiceWithKafka(tenantStore *testutil.MockTenantStore, routingStore
 	if err != nil {
 		panic("newTestServiceWithKafka: " + err.Error())
 	}
-	return svc, kafkaAdmin
+	return svc, kafkaAdmin, topicStore
 }
 
 // mustNewRouter creates a test router, failing the test on error.
@@ -695,7 +700,7 @@ func TestRouter_RoutingRules_CRUD(t *testing.T) {
 
 	tenantStore := testutil.NewMockTenantStore()
 	routingStore := testutil.NewMockRoutingRulesStore()
-	svc, kafkaAdmin := newTestServiceWithKafka(tenantStore, routingStore)
+	svc, kafkaAdmin, _ := newTestServiceWithKafka(tenantStore, routingStore)
 
 	// Pre-create a tenant so service calls succeed
 	_ = tenantStore.Create(context.Background(), testutil.NewTestTenant("test-tenant"))
@@ -786,16 +791,16 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		setup      func(*testutil.MockTenantStore, *testutil.MockKafkaAdmin, *testutil.MockRoutingRulesStore)
+		setup      func(*testutil.MockTenantStore, *testutil.MockKafkaAdmin, *testutil.MockRoutingRulesStore, *testutil.MockTopicStore)
 		reqBody    any
 		wantStatus int
 		wantCode   string
 	}{
 		{
 			name: "201 happy path",
-			setup: func(ts *testutil.MockTenantStore, k *testutil.MockKafkaAdmin, _ *testutil.MockRoutingRulesStore) {
+			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, _ *testutil.MockRoutingRulesStore, _ *testutil.MockTopicStore) {
 				_ = ts.Create(context.Background(), testutil.NewTestTenant("t1"))
-				_ = k.CreateTopic(context.Background(), "test.t1.trade", 1, 1, nil)
+				// ingress "trade" is provisioned per the default MockTopicStore (ExistsResult=true).
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
 				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", IngressTopic: "trade", Priority: 5},
@@ -804,9 +809,8 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 		},
 		{
 			name: "409 duplicate priority",
-			setup: func(ts *testutil.MockTenantStore, k *testutil.MockKafkaAdmin, rs *testutil.MockRoutingRulesStore) {
+			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, rs *testutil.MockRoutingRulesStore, _ *testutil.MockTopicStore) {
 				_ = ts.Create(context.Background(), testutil.NewTestTenant("t1"))
-				_ = k.CreateTopic(context.Background(), "test.t1.trade", 1, 1, nil)
 				rs.AddErr = provisioning.ErrDuplicatePriority
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
@@ -817,9 +821,8 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 		},
 		{
 			name: "409 duplicate pattern",
-			setup: func(ts *testutil.MockTenantStore, k *testutil.MockKafkaAdmin, rs *testutil.MockRoutingRulesStore) {
+			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, rs *testutil.MockRoutingRulesStore, _ *testutil.MockTopicStore) {
 				_ = ts.Create(context.Background(), testutil.NewTestTenant("t1"))
-				_ = k.CreateTopic(context.Background(), "test.t1.trade", 1, 1, nil)
 				rs.AddErr = provisioning.ErrDuplicateRoutingPattern
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
@@ -830,7 +833,7 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 		},
 		{
 			name: "400 invalid pattern",
-			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, _ *testutil.MockRoutingRulesStore) {
+			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, _ *testutil.MockRoutingRulesStore, _ *testutil.MockTopicStore) {
 				_ = ts.Create(context.Background(), testutil.NewTestTenant("t1"))
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
@@ -841,7 +844,7 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 		},
 		{
 			name: "400 missing ingress topic",
-			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, _ *testutil.MockRoutingRulesStore) {
+			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, _ *testutil.MockRoutingRulesStore, _ *testutil.MockTopicStore) {
 				_ = ts.Create(context.Background(), testutil.NewTestTenant("t1"))
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
@@ -852,9 +855,9 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 		},
 		{
 			name: "400 topic not provisioned",
-			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, _ *testutil.MockRoutingRulesStore) {
+			setup: func(ts *testutil.MockTenantStore, _ *testutil.MockKafkaAdmin, _ *testutil.MockRoutingRulesStore, topicStore *testutil.MockTopicStore) {
 				_ = ts.Create(context.Background(), testutil.NewTestTenant("t1"))
-				// topic "trade" not created in kafka — TopicExists returns false
+				topicStore.ExistsResult = false // "trade" is not a provisioned topic
 			},
 			reqBody: provisioning.AddRoutingRuleRequest{
 				Rule: provisioning.TopicRoutingRule{Pattern: "**.trade", IngressTopic: "trade", Priority: 5},
@@ -870,9 +873,9 @@ func TestRouter_AddRoutingRule(t *testing.T) {
 
 			tenantStore := testutil.NewMockTenantStore()
 			routingStore := testutil.NewMockRoutingRulesStore()
-			svc, kafkaAdmin := newTestServiceWithKafka(tenantStore, routingStore)
+			svc, kafkaAdmin, topicStore := newTestServiceWithKafka(tenantStore, routingStore)
 			if tt.setup != nil {
-				tt.setup(tenantStore, kafkaAdmin, routingStore)
+				tt.setup(tenantStore, kafkaAdmin, routingStore, topicStore)
 			}
 
 			router, addAuth := mustNewRouterWithAuth(t, api.RouterConfig{
@@ -1666,7 +1669,7 @@ func TestIsReservedSlug_CoversAllRouteSegments(t *testing.T) {
 		"channel-rules", "tokens", "test-access",
 	}
 
-	svc, _ := newTestServiceWithKafka(
+	svc, _, _ := newTestServiceWithKafka(
 		testutil.NewMockTenantStore(),
 		testutil.NewMockRoutingRulesStore(),
 	)
@@ -2070,6 +2073,7 @@ func newCommunityServiceWithKafka(
 		KeyStore:                    testutil.NewMockKeyStore(),
 		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           routingStore,
+		TopicStore:                  testutil.NewMockTopicStore(),
 		QuotaStore:                  testutil.NewMockQuotaStore(),
 		AuditStore:                  testutil.NewMockAuditStore(),
 		KafkaAdmin:                  kafkaAdmin,

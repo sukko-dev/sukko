@@ -768,7 +768,6 @@ type MockKafkaAdmin struct {
 	CreateTopicErrs    []error
 	CreateTopicErr     error
 	DeleteTopicErr     error
-	TopicExistsErr     error
 	SetTopicConfigErr  error
 	CreateACLErr       error
 	SetQuotaErr        error
@@ -823,17 +822,6 @@ func (m *MockKafkaAdmin) DeleteTopic(_ context.Context, name string) error {
 	delete(m.topics, name)
 	m.DeletedTopics = append(m.DeletedTopics, name)
 	return nil
-}
-
-// TopicExists implements KafkaAdmin.TopicExists for testing.
-func (m *MockKafkaAdmin) TopicExists(_ context.Context, name string) (bool, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.TopicExistsErr != nil {
-		return false, m.TopicExistsErr
-	}
-	_, ok := m.topics[name]
-	return ok, nil
 }
 
 // SetTopicConfig implements KafkaAdmin.SetTopicConfig for testing.
@@ -1306,4 +1294,27 @@ func (m *MockWebhookStore) ListForDowngrade(_ context.Context, _ time.Time) ([]*
 		}
 	}
 	return result, nil
+}
+
+// MockTopicStore implements provisioning.TopicStore for testing (ADR-0006
+// Phase 2). ExistsResult defaults to true so routing-rule tests that reference
+// non-default topics validate without per-test setup; set ExistsErr to exercise
+// the store-error path, or ExistsResult=false for the not-provisioned path.
+type MockTopicStore struct {
+	ExistsResult bool
+	ExistsErr    error
+}
+
+// NewMockTopicStore returns a MockTopicStore that reports every topic as
+// provisioned (ExistsResult=true).
+func NewMockTopicStore() *MockTopicStore {
+	return &MockTopicStore{ExistsResult: true}
+}
+
+// Exists implements provisioning.TopicStore.Exists for testing.
+func (m *MockTopicStore) Exists(_ context.Context, _, _ string) (bool, error) {
+	if m.ExistsErr != nil {
+		return false, m.ExistsErr
+	}
+	return m.ExistsResult, nil
 }

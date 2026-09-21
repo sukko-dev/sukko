@@ -104,6 +104,7 @@ type ServiceConfig struct {
 	KeyStore          KeyStore
 	APIKeyStore       APIKeyStore
 	RoutingRulesStore RoutingRulesStore
+	TopicStore        TopicStore
 	QuotaStore        QuotaStore
 	AuditStore        AuditStore
 	ChannelRulesStore ChannelRulesStore
@@ -163,6 +164,7 @@ type Service struct {
 	keys           KeyStore
 	apiKeys        APIKeyStore
 	routingRules   RoutingRulesStore
+	topics         TopicStore
 	quotas         QuotaStore
 	audit          AuditStore
 	channelRules   ChannelRulesStore
@@ -186,6 +188,9 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	}
 	if cfg.QuotaStore == nil {
 		return nil, errors.New("provisioning service: quota store is required")
+	}
+	if cfg.TopicStore == nil {
+		return nil, errors.New("provisioning service: topic store is required")
 	}
 	if cfg.AuditStore == nil {
 		return nil, errors.New("provisioning service: audit store is required")
@@ -211,6 +216,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		keys:           cfg.KeyStore,
 		apiKeys:        cfg.APIKeyStore,
 		routingRules:   cfg.RoutingRulesStore,
+		topics:         cfg.TopicStore,
 		quotas:         cfg.QuotaStore,
 		audit:          cfg.AuditStore,
 		channelRules:   cfg.ChannelRulesStore,
@@ -1147,6 +1153,27 @@ func (s *Service) GetRoutingRules(ctx context.Context, tenantID string) ([]Topic
 	return rules, nil
 }
 
+// ensureTopicProvisioned returns nil when a routing rule may reference the given
+// topic suffix. The per-tenant 'default' topic is deterministic (ADR-0006: the
+// consume/create set is {default} ∪ {rule suffixes}) and is always valid; every
+// other suffix must have a durable topics row (TopicStore) — a restart-safe
+// check that replaces the volatile in-memory KafkaAdmin map (ADR-0006 Phase 2).
+// Returns ErrTopicNotProvisioned (wrapped with the namespaced topic name) when
+// a non-default suffix has no provisioned topic.
+func (s *Service) ensureTopicProvisioned(ctx context.Context, tenant *Tenant, suffix string) error {
+	if suffix == routing.DefaultTopicSuffix {
+		return nil
+	}
+	exists, err := s.topics.Exists(ctx, tenant.ID, suffix)
+	if err != nil {
+		return fmt.Errorf("check topic %s: %w", suffix, err)
+	}
+	if !exists {
+		return fmt.Errorf("%w: %s", ErrTopicNotProvisioned, kafka.BuildTopicName(s.config.TopicNamespace, tenant.Slug, suffix))
+	}
+	return nil
+}
+
 // ReplaceRoutingRules atomically replaces all routing rules for a tenant.
 func (s *Service) ReplaceRoutingRules(ctx context.Context, tenantID string, rules []TopicRoutingRule) error {
 	if s.routingRules == nil {
@@ -1196,13 +1223,8 @@ func (s *Service) ReplaceRoutingRules(ctx context.Context, tenantID string, rule
 				continue
 			}
 			seen[suffix] = struct{}{}
-			topicName := kafka.BuildTopicName(s.config.TopicNamespace, tenant.Slug, suffix)
-			exists, err := s.kafka.TopicExists(ctx, topicName)
-			if err != nil {
-				return fmt.Errorf("check topic %s: %w", topicName, err)
-			}
-			if !exists {
-				return fmt.Errorf("%w: %s", ErrTopicNotProvisioned, topicName)
+			if err := s.ensureTopicProvisioned(ctx, tenant, suffix); err != nil {
+				return err
 			}
 		}
 	}
@@ -1298,13 +1320,8 @@ func (s *Service) AddRoutingRule(ctx context.Context, tenantID string, rule Topi
 
 	// Verify all referenced topics are provisioned.
 	for _, suffix := range rule.AllTopicSuffixes() {
-		topicName := kafka.BuildTopicName(s.config.TopicNamespace, tenant.Slug, suffix)
-		exists, err := s.kafka.TopicExists(ctx, topicName)
-		if err != nil {
-			return fmt.Errorf("check topic %s: %w", topicName, err)
-		}
-		if !exists {
-			return fmt.Errorf("%w: %s", ErrTopicNotProvisioned, topicName)
+		if err := s.ensureTopicProvisioned(ctx, tenant, suffix); err != nil {
+			return err
 		}
 	}
 
