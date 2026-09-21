@@ -42,6 +42,7 @@ func newStartupScanService(ts *testutil.MockTenantStore) (svc *provisioning.Serv
 		KeyStore:                    testutil.NewMockKeyStore(),
 		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           testutil.NewMockRoutingRulesStore(),
+		TopicStore:                  testutil.NewMockTopicStore(),
 		QuotaStore:                  testutil.NewMockQuotaStore(),
 		AuditStore:                  testutil.NewMockAuditStore(),
 		KafkaAdmin:                  testutil.NewMockKafkaAdmin(),

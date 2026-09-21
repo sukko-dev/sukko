@@ -5,46 +5,30 @@ import (
 	"sync"
 )
 
-// NoopKafkaAdmin is a no-op implementation of KafkaAdmin for Phase 1.
-// It records operations in memory but doesn't actually create Kafka resources.
-// Thread-safe for concurrent use from HTTP handlers.
-// Replace with real implementation in Phase 2.
+// NoopKafkaAdmin is a no-op implementation of KafkaAdmin. Physical topic
+// creation is handled by ws-server's KafkaBackend, and topic-existence
+// validation is now backed by the durable TopicStore (ADR-0006 Phase 2), so the
+// admin's topic operations are genuine no-ops. Thread-safe for concurrent use.
 type NoopKafkaAdmin struct {
-	mu     sync.RWMutex
-	topics map[string]bool
-	acls   []ACLBinding
+	mu   sync.RWMutex
+	acls []ACLBinding
 }
 
 // NewNoopKafkaAdmin creates a new NoopKafkaAdmin.
 func NewNoopKafkaAdmin() *NoopKafkaAdmin {
 	return &NoopKafkaAdmin{
-		topics: make(map[string]bool),
-		acls:   []ACLBinding{},
+		acls: []ACLBinding{},
 	}
 }
 
-// CreateTopic records a topic creation (no-op).
-func (n *NoopKafkaAdmin) CreateTopic(_ context.Context, name string, _ int, _ int16, _ map[string]string) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.topics[name] = true
+// CreateTopic is a no-op — ws-server's KafkaBackend creates physical topics.
+func (n *NoopKafkaAdmin) CreateTopic(_ context.Context, _ string, _ int, _ int16, _ map[string]string) error {
 	return nil
 }
 
-// DeleteTopic records a topic deletion (no-op).
-func (n *NoopKafkaAdmin) DeleteTopic(_ context.Context, name string) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	delete(n.topics, name)
+// DeleteTopic is a no-op.
+func (n *NoopKafkaAdmin) DeleteTopic(_ context.Context, _ string) error {
 	return nil
-}
-
-// TopicExists checks if a topic was recorded (no-op).
-func (n *NoopKafkaAdmin) TopicExists(_ context.Context, name string) (bool, error) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	_, ok := n.topics[name]
-	return ok, nil
 }
 
 // SetTopicConfig is a no-op.

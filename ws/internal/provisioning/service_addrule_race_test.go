@@ -85,6 +85,7 @@ func newRoutingRaceHarness(t *testing.T, slugs ...string) *routingRaceHarness {
 		KeyStore:                    testutil.NewMockKeyStore(),
 		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           repo,
+		TopicStore:                  testutil.NewMockTopicStore(),
 		QuotaStore:                  testutil.NewMockQuotaStore(),
 		AuditStore:                  testutil.NewMockAuditStore(),
 		KafkaAdmin:                  kafkaAdmin,

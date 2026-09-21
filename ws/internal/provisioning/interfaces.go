@@ -123,6 +123,19 @@ type RoutingRulesStore interface {
 	GetAll(ctx context.Context, tenantID string) ([]TopicRoutingRule, error)
 }
 
+// TopicStore is the durable source of truth for a tenant's non-default
+// provisioned topics (ADR-0006 Phase 2). It replaces the volatile in-memory
+// KafkaAdmin map for TOPIC_NOT_PROVISIONED validation, so a provisioning restart
+// no longer loses the record of which topics a tenant has provisioned. The
+// per-tenant 'default' topic is deterministic and validated implicitly, so it
+// is not stored here. tenantID is the tenant UUID (FK → tenants.id), suffix is
+// the topic suffix (never the namespaced name, never 'default'/'dead-letter').
+// Create/List/Delete arrive with the topics API (ADR-0006 Phase 2, slice 2).
+type TopicStore interface {
+	// Exists reports whether a non-default topic suffix is provisioned for a tenant.
+	Exists(ctx context.Context, tenantID, suffix string) (bool, error)
+}
+
 // QuotaStore handles tenant quota operations.
 type QuotaStore interface {
 	// Get retrieves quotas for a tenant.
@@ -188,9 +201,6 @@ type KafkaAdmin interface {
 
 	// DeleteTopic deletes a Kafka topic.
 	DeleteTopic(ctx context.Context, name string) error
-
-	// TopicExists checks if a topic exists.
-	TopicExists(ctx context.Context, name string) (bool, error)
 
 	// SetTopicConfig updates topic configuration.
 	SetTopicConfig(ctx context.Context, name string, config map[string]string) error

@@ -160,6 +160,7 @@ func newTestService(t *testing.T, extraSeed ...func(ctx context.Context, tenantS
 		KeyStore:          keyStore,
 		APIKeyStore:       testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore: routingRulesStore,
+		TopicStore:        testutil.NewMockTopicStore(),
 		QuotaStore:        quotaStore,
 		AuditStore:        auditStore,
 		ChannelRulesStore: channelRulesStore,

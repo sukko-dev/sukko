@@ -15,46 +15,19 @@ func TestNoopKafkaAdmin_ImplementsInterface(t *testing.T) {
 	var _ KafkaAdmin = (*NoopKafkaAdmin)(nil)
 }
 
-func TestNoopKafkaAdmin_CreateAndCheckTopic(t *testing.T) {
+func TestNoopKafkaAdmin_TopicOpsAreNoops(t *testing.T) {
 	t.Parallel()
 	admin := NewNoopKafkaAdmin()
 	ctx := context.Background()
 
-	// Topic should not exist initially
-	exists, err := admin.TopicExists(ctx, "test-topic")
-	if err != nil {
-		t.Fatalf("TopicExists: %v", err)
-	}
-	if exists {
-		t.Error("expected topic to not exist initially")
-	}
-
-	// Create topic
+	// Physical topic creation is ws-server's job and existence is validated by
+	// the durable TopicStore (ADR-0006 Phase 2), so the admin's topic ops are
+	// genuine no-ops that only need to succeed.
 	if err := admin.CreateTopic(ctx, "test-topic", 3, 1, nil); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-
-	// Topic should exist now
-	exists, err = admin.TopicExists(ctx, "test-topic")
-	if err != nil {
-		t.Fatalf("TopicExists: %v", err)
-	}
-	if !exists {
-		t.Error("expected topic to exist after creation")
-	}
-
-	// Delete topic
 	if err := admin.DeleteTopic(ctx, "test-topic"); err != nil {
 		t.Fatalf("DeleteTopic: %v", err)
-	}
-
-	// Topic should not exist after deletion
-	exists, err = admin.TopicExists(ctx, "test-topic")
-	if err != nil {
-		t.Fatalf("TopicExists: %v", err)
-	}
-	if exists {
-		t.Error("expected topic to not exist after deletion")
 	}
 }
 
@@ -97,7 +70,6 @@ func TestNoopKafkaAdmin_Concurrent(t *testing.T) {
 			defer logging.RecoverPanic(zerolog.Nop(), "test_noop_kafka_concurrent", nil)
 			topic := "topic-" + string(rune('a'+i))
 			_ = admin.CreateTopic(ctx, topic, 1, 1, nil)
-			_, _ = admin.TopicExists(ctx, topic)
 			_ = admin.DeleteTopic(ctx, topic)
 			_ = admin.CreateACL(ctx, ACLBinding{Principal: topic})
 		})

@@ -38,6 +38,7 @@ func newTestServiceWithKafka(kafkaAdmin *testutil.MockKafkaAdmin, ts ...provisio
 		KeyStore:                    testutil.NewMockKeyStore(),
 		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           testutil.NewMockRoutingRulesStore(),
+		TopicStore:                  testutil.NewMockTopicStore(),
 		QuotaStore:                  testutil.NewMockQuotaStore(),
 		AuditStore:                  testutil.NewMockAuditStore(),
 		KafkaAdmin:                  kafkaAdmin,
@@ -55,6 +56,37 @@ func newTestServiceWithKafka(kafkaAdmin *testutil.MockKafkaAdmin, ts ...provisio
 	})
 	if err != nil {
 		panic("newTestServiceWithKafka: " + err.Error())
+	}
+	return svc
+}
+
+// newTestServiceWithTopicStore builds a service with an injected TopicStore (for
+// exercising the ADR-0006 Phase 2 topic-existence check) and tenant store,
+// defaulting every other dependency to a mock.
+func newTestServiceWithTopicStore(topics provisioning.TopicStore, tenantStore provisioning.TenantStore) *provisioning.Service {
+	svc, err := provisioning.NewService(provisioning.ServiceConfig{
+		TenantStore:                 tenantStore,
+		KeyStore:                    testutil.NewMockKeyStore(),
+		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
+		RoutingRulesStore:           testutil.NewMockRoutingRulesStore(),
+		TopicStore:                  topics,
+		QuotaStore:                  testutil.NewMockQuotaStore(),
+		AuditStore:                  testutil.NewMockAuditStore(),
+		KafkaAdmin:                  testutil.NewMockKafkaAdmin(),
+		EventBus:                    eventbus.New(zerolog.Nop()),
+		TopicNamespace:              "test",
+		DefaultPartitions:           3,
+		DefaultRetentionMs:          testDefaultRetentionMs,
+		MaxTopicsPerTenant:          50,
+		MaxRoutingRulesPerTenant:    5,
+		DeadLetterTopicPartitions:   1,
+		DeadLetterTopicRetentionMs:  testDLQRetentionMs,
+		InfraTopicReplicationFactor: 1,
+		DeprovisionGraceDays:        30,
+		Logger:                      zerolog.Nop(),
+	})
+	if err != nil {
+		panic("newTestServiceWithTopicStore: " + err.Error())
 	}
 	return svc
 }

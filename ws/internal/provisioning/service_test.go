@@ -33,6 +33,7 @@ func newTestService() (*provisioning.Service, *testutil.MockTenantStore, *testut
 		KeyStore:                    keyStore,
 		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           routingRulesStore,
+		TopicStore:                  testutil.NewMockTopicStore(),
 		QuotaStore:                  quotaStore,
 		AuditStore:                  auditStore,
 		KafkaAdmin:                  kafkaAdmin,
@@ -1078,6 +1079,7 @@ func TestService_SetRoutingRules_NilStore(t *testing.T) {
 		KeyStore:                 testutil.NewMockKeyStore(),
 		APIKeyStore:              testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:        nil, // not configured
+		TopicStore:               testutil.NewMockTopicStore(),
 		QuotaStore:               testutil.NewMockQuotaStore(),
 		AuditStore:               testutil.NewMockAuditStore(),
 		KafkaAdmin:               testutil.NewMockKafkaAdmin(),
@@ -1150,20 +1152,51 @@ func TestService_SetRoutingRules_NonexistentTenant(t *testing.T) {
 func TestService_AddRoutingRule_TopicExistsError(t *testing.T) {
 	t.Parallel()
 
-	kafka := testutil.NewMockKafkaAdmin()
-	kafka.TopicExistsErr = errors.New("kafka: topic check failed")
+	// A store-level failure in the (durable) topic-existence check must
+	// propagate — the rule is not silently accepted (ADR-0006 Phase 2: the
+	// check resolves against TopicStore, not the volatile KafkaAdmin map).
+	topics := testutil.NewMockTopicStore()
+	topics.ExistsErr = errors.New("topics: check failed")
 
 	ts := testutil.NewMockTenantStore()
 	_ = ts.Create(context.Background(), testutil.NewTestTenant("acme-corp"))
-	svc := newTestServiceWithKafka(kafka, ts)
+	svc := newTestServiceWithTopicStore(topics, ts)
 
 	err := svc.AddRoutingRule(context.Background(), "acme-corp", provisioning.TopicRoutingRule{
 		Pattern:      "**.trade",
-		IngressTopic: "trade",
+		IngressTopic: "trade", // non-default → exercises the store check
 		Priority:     1,
 	})
 	if err == nil {
-		t.Fatal("expected error when TopicExists fails, got nil")
+		t.Fatal("expected error when the topic-existence check fails, got nil")
+	}
+}
+
+// TestService_AddRoutingRule_DefaultTopicImplicitlyValid pins the load-bearing
+// line of the ADR-0006 Phase 2 slice-1 fix: the deterministic 'default' topic is
+// validated implicitly and MUST NOT be looked up in the durable store. The store
+// is set to ERROR — if the implicit-default short-circuit is ever removed, the
+// default lookup would hit that error and this test fails, catching the
+// regression the mock's default (ExistsResult=true) would otherwise mask. This
+// is exactly the noop-saga bug the slice fixes: default validation must not
+// depend on any volatile/failing existence source.
+func TestService_AddRoutingRule_DefaultTopicImplicitlyValid(t *testing.T) {
+	t.Parallel()
+
+	topics := testutil.NewMockTopicStore()
+	topics.ExistsErr = errors.New("topics: store must not be consulted for the default topic")
+
+	ts := testutil.NewMockTenantStore()
+	_ = ts.Create(context.Background(), testutil.NewTestTenant("acme-corp"))
+	svc := newTestServiceWithTopicStore(topics, ts)
+
+	err := svc.AddRoutingRule(context.Background(), "acme-corp", provisioning.TopicRoutingRule{
+		Pattern:      "**.trade",
+		IngressTopic: "default", // deterministic → validated implicitly, store not consulted
+		Priority:     1,
+	})
+	if err != nil {
+		t.Fatalf("AddRoutingRule with ingress_topic=default must succeed implicitly, got: %v", err)
 	}
 }
 
@@ -1221,6 +1254,7 @@ func newTestServiceWithAPIKeys() (*provisioning.Service, *testutil.MockTenantSto
 		KeyStore:                    keyStore,
 		APIKeyStore:                 apiKeyStore,
 		RoutingRulesStore:           routingRulesStore,
+		TopicStore:                  testutil.NewMockTopicStore(),
 		QuotaStore:                  quotaStore,
 		AuditStore:                  auditStore,
 		KafkaAdmin:                  kafkaAdmin,
@@ -1586,6 +1620,7 @@ func newTestServiceWithWebhooks(store *testutil.MockWebhookStore) *provisioning.
 		KeyStore:                    testutil.NewMockKeyStore(),
 		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           testutil.NewMockRoutingRulesStore(),
+		TopicStore:                  testutil.NewMockTopicStore(),
 		QuotaStore:                  testutil.NewMockQuotaStore(),
 		AuditStore:                  testutil.NewMockAuditStore(),
 		KafkaAdmin:                  testutil.NewMockKafkaAdmin(),
@@ -1708,6 +1743,7 @@ func TestService_CreateWebhook_QuotaExceeded(t *testing.T) {
 		KeyStore:                    testutil.NewMockKeyStore(),
 		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           testutil.NewMockRoutingRulesStore(),
+		TopicStore:                  testutil.NewMockTopicStore(),
 		QuotaStore:                  testutil.NewMockQuotaStore(),
 		AuditStore:                  testutil.NewMockAuditStore(),
 		KafkaAdmin:                  testutil.NewMockKafkaAdmin(),

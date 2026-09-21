@@ -52,6 +52,7 @@ func TestWebhookHandler_Create_PersistsTenantUUID(t *testing.T) {
 		KeyStore:                    provtestutil.NewMockKeyStore(),
 		APIKeyStore:                 provtestutil.NewMockAPIKeyStore(),
 		RoutingRulesStore:           provtestutil.NewMockRoutingRulesStore(),
+		TopicStore:                  provtestutil.NewMockTopicStore(),
 		QuotaStore:                  provtestutil.NewMockQuotaStore(),
 		AuditStore:                  provtestutil.NewMockAuditStore(),
 		KafkaAdmin:                  provtestutil.NewMockKafkaAdmin(),

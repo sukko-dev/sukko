@@ -1,4 +1,5 @@
-h1:HizKhalW8Ni6JReHM20T3zcM9HU7EwtpJ0Dbwea0prc=
+h1:e+v7+3skqTIAWejfu1faL7HpUr7N6fWmO8eCgf6600M=
 001_initial.sql h1:5BHJlDLYPX8AWImpX48znFJqjxigOJMaQff7ydFEgeA=
 002_analytics_partition.sql h1:JdM7r9rl40YKOc6SzY9mHObcGAWccXECVHBaIUHBJoI=
 003_routing_rule_ingress_egress.sql h1:HnEx+bbJOjxStGvtFhrotrBJMjJK3JbUsen78X13Iv4=
+004_topics_table.sql h1:TtV/KmD5e/jZbZTDteh/U8jOMgswTFvFtZBI0tfWRlU=
