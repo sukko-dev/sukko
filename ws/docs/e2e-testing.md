@@ -357,7 +357,7 @@ load/soak/stress are scale tests.
 | 7 | `ratelimit` | Community | no | Per-connection WS publish rate-limit enforcement. Gated into `community-direct` (§2.8) |
 | 8 | `sse` | **Pro** | no | SSE transport validation (SSE stays Pro-gated) |
 | 9 | `rest-publish` | Community | no | REST publish delivery (`/api/v1/publish` is open on all editions, ADR-0009; the SSE receive leg skips below Pro — SSE transport stays Pro-gated) |
-| 10 | `provisioning` | Community | **yes** | Provisioning API CRUD + e2e-unique routing-rules coverage (topic gate, role/tenant isolation, error-code mapping, pagination, normalization) + rename & test-access coverage (all-editions). Gated into `community-direct`/`pro-kafka`/`pro-direct` (§2.11) |
+| 10 | `provisioning` | Community | **yes** | Provisioning API CRUD + e2e-unique routing-rules coverage (topic gate, role/tenant isolation, error-code mapping, pagination, normalization) + provisioned-**topics** API coverage (create/list/delete, reserved/invalid/duplicate/not-found/referenced-by-rule, role gate, pagination, quota wall) + rename & test-access coverage (all-editions). Gated into `community-direct`/`pro-kafka`/`pro-direct` (§2.11) |
 | 11 | `tenant-isolation` | Community | **yes** | Cross-tenant isolation (delivery isolation + active cross-tenant subscribe rejection, §2.12) |
 | 12 | `token-revocation` | **Pro** | **yes** | Token revocation force-disconnect (jti/sub WS + SSE), revoke-endpoint validation, cross-tenant rejection. Gated into `pro-kafka`/`pro-direct` (§2.13) |
 | 13 | `edition-limits` | Community | no | Edition boundary limits |
@@ -578,7 +578,7 @@ sukko test validate --suite provisioning
 ```
 
 Validates the provisioning API CRUD lifecycle: tenant create/get/update/list, key
-create/revoke, API key create/revoke, routing rules create/list/delete. Requires an
+create/revoke, API key create/revoke, routing rules create/list/delete, topics create/list/delete. Requires an
 admin keypair — see §1.2.
 
 Beyond CRUD, the suite adds **e2e-unique routing-rules coverage** — behavior only a live
@@ -611,6 +611,25 @@ different check name, so they are not required there.) All three cells
 `provisioning/main.go`, so `pro-direct` behaves identically to `pro-kafka`, and `community-direct`
 now matches both). The Pro cells `ALLOWED_SKIPS` `provisioning:get audit log`; `community-direct`
 additionally `ALLOWED_SKIPS` the quota/lifecycle/audit checks that remain edition-gated.
+
+Beyond routing, the suite adds **provisioned-topics API coverage** (ADR-0006 Phase 2) — the
+`POST/GET/DELETE …/topics` endpoints that back explicit topic provisioning. The 10 topic checks
+(`topics create and list`, `topics reserved suffix`, `topics invalid suffix`, `topics duplicate`,
+`topics delete not-found`, `topics referenced by rule`, `topics role gate read/write`,
+`topics pagination`, `topics quota wall`) each assert an exact HTTP status **and** error `code`
+and pair every negative with a verified allowed (2xx) case; topics are durable rows, so each
+check deletes what it created and list/pagination assertions are relative to a freshly-read
+baseline. `topics referenced by rule` proves a topic an ingress rule references cannot be deleted
+(409 `TOPIC_REFERENCED_BY_RULE`) — restoring the fixture rule before deleting the topic.
+
+**Edition reachability (topics)**: topics are ungated (no `RequireFeature`), so the 9 create/
+list/delete/role-gate/pagination checks RUN and `REQUIRE_PASS` on **every** provisioning cell.
+Only `topics quota wall` — which uses the Pro-gated `PATCH /quotas` to set the per-tenant
+`max_topics` one above the live count and then proves the wall binds (400 `TOO_MANY_TOPICS`) —
+is edition-tolerant: it `REQUIRE_PASS`es on the Pro cells and is an `ALLOWED_SKIP` on
+`community-direct` (where `PATCH /quotas` 403s `EDITION_LIMIT`). The drift guard
+`TestTopicsCheckNamesInE2E` asserts every topic check name is gated into all three cells (the
+quota check as REQUIRE_PASS on Pro / ALLOWED_SKIPS on Community), so a typo cannot vacuous-pass.
 
 Beyond routing, the suite adds **rename + test-access coverage** for the two remaining untested
 provisioning endpoints — `POST …/rename` and `POST …/test-access` — behavior only a live stack

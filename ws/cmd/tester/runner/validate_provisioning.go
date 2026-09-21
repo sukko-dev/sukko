@@ -165,6 +165,7 @@ func validateProvisioning(ctx context.Context, run *TestRun, logger zerolog.Logg
 	// ungated on every edition (ADR-0014), so the block runs fail-closed everywhere — no edition
 	// branch, and community-direct REQUIRE_PASSes it exactly as the Pro cells do.
 	checks = append(checks, validateProvisioningRouting(ctx, run, setup, logger)...)
+	checks = append(checks, validateProvisioningTopics(ctx, setup, logger)...)
 
 	// --- E2E-unique rename + test-access coverage block. Placed after the routing
 	// block and BEFORE check 11 so its throwaway tenant B is provisioned and eagerly cleaned up
