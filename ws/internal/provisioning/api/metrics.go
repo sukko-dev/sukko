@@ -81,6 +81,16 @@ var (
 		Help: "Total number of routing rules delete operations",
 	})
 
+	topicsCreated = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "provisioning_topics_created_total",
+		Help: "Total number of provisioned topics created",
+	})
+
+	topicsDeleted = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "provisioning_topics_deleted_total",
+		Help: "Total number of provisioned topics deleted",
+	})
+
 	// API request metrics
 	apiRequests = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "provisioning_api_requests_total",
@@ -143,6 +153,16 @@ func RecordRoutingRulesSet() {
 // RecordRoutingRulesDeleted increments the routing rules deleted counter.
 func RecordRoutingRulesDeleted() {
 	routingRulesDeleted.Inc()
+}
+
+// RecordTopicCreated increments the provisioned-topics created counter.
+func RecordTopicCreated() {
+	topicsCreated.Inc()
+}
+
+// RecordTopicDeleted increments the provisioned-topics deleted counter.
+func RecordTopicDeleted() {
+	topicsDeleted.Inc()
 }
 
 // RecordAPIRequest records an API request with its result.

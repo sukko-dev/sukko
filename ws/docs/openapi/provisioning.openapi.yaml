@@ -745,6 +745,177 @@ paths:
                 code: DELETE_ROUTING_RULES_FAILED
                 message: "failed to delete routing rules"
 
+  /api/v1/tenants/{tenantSlug}/topics:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+
+    get:
+      operationId: listTopics
+      summary: List provisioned topics
+      description: |
+        Returns the tenant's provisioned topics, paginated. The deterministic
+        `default` topic is always available and is included first; it is not
+        stored and never counts against the topic quota.
+      tags: [Topics]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+          description: Maximum number of topics to return per page (clamped to 200).
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+          description: Number of topics to skip (pagination offset).
+      responses:
+        "200":
+          description: Provisioned topics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopicsResponse"
+
+    post:
+      operationId: createTopic
+      summary: Create a provisioned topic
+      description: |
+        Provisions a non-default topic for the tenant. Requires admin or system role.
+        No edition feature gate — available on every edition. The wall is the
+        tenant's `max_topics` quota row (seeded from `MAX_TOPICS_PER_TENANT`,
+        default 50, and adjustable per tenant via `PATCH /quotas`); the ratified
+        per-edition count cap (Community 10 / Pro 50 / Enterprise unlimited) also
+        binds. Exceeding the quota row returns `400 TOO_MANY_TOPICS`; exceeding the
+        edition cap returns `403`.
+
+        The suffix must be lowercase alphanumeric and hyphens (max 200 chars). The
+        `default` and `dead-letter` suffixes are reserved and cannot be created.
+      tags: [Topics]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTopicRequest"
+      responses:
+        "201":
+          description: Topic created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  topic:
+                    $ref: "#/components/schemas/Topic"
+        "400":
+          description: Validation error, reserved suffix, or topic quota exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalid_suffix:
+                  summary: Suffix fails validation
+                  value:
+                    code: INVALID_TOPIC_SUFFIX
+                    message: "invalid topic suffix: \"Analytics\" (lowercase alphanumeric and hyphens only)"
+                reserved_suffix:
+                  summary: Reserved suffix
+                  value:
+                    code: RESERVED_TOPIC_SUFFIX
+                    message: "invalid topic suffix: \"default\" is reserved"
+                quota_exceeded:
+                  summary: Configured per-tenant topic quota exceeded
+                  value:
+                    code: TOO_MANY_TOPICS
+                    message: "topic quota exceeded: have 50, max 50"
+        "403":
+          description: |
+            Edition denial — the per-edition topic count cap is lower than the
+            tenant's `max_topics` quota (`EDITION_LIMIT`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: EDITION_LIMIT_TOPICS_PER_TENANT
+                message: "topics_per_tenant limit reached (community edition). Upgrade at https://docs.sukko.dev/editions/upgrade"
+        "409":
+          description: A topic with this suffix already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: TOPIC_ALREADY_EXISTS
+                message: "topic already exists: analytics"
+
+  /api/v1/tenants/{tenantSlug}/topics/{topicSuffix}:
+    parameters:
+      - $ref: "#/components/parameters/tenantSlug"
+      - $ref: "#/components/parameters/topicSuffix"
+
+    delete:
+      operationId: deleteTopic
+      summary: Delete a provisioned topic
+      description: |
+        Removes a provisioned topic. Requires admin or system role. The `default`
+        and `dead-letter` suffixes are reserved and cannot be deleted. A topic that
+        is still referenced by a routing rule (as ingress or egress) cannot be
+        deleted — remove the rule first.
+      tags: [Topics]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Topic deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: deleted
+        "400":
+          description: Reserved suffix — cannot be deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: RESERVED_TOPIC_SUFFIX
+                message: "invalid topic suffix: \"default\" is reserved"
+        "404":
+          description: Topic not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: TOPIC_NOT_FOUND
+                message: "topic not found: analytics"
+        "409":
+          description: Topic still referenced by a routing rule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: TOPIC_REFERENCED_BY_RULE
+                message: "topic referenced by routing rule: trade"
+
   /api/v1/tenants/{tenantSlug}/channel-rules:
     parameters:
       - $ref: "#/components/parameters/tenantSlug"
@@ -2339,6 +2510,16 @@ components:
         type: string
       description: Key identifier
 
+    topicSuffix:
+      name: topicSuffix
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z0-9-]+$"
+        maxLength: 200
+      description: Topic suffix — the "<suffix>" in the namespaced Kafka topic name "<namespace>.<tenant>.<suffix>"
+
     limit:
       name: limit
       in: query
@@ -2730,6 +2911,46 @@ components:
       properties:
         rule:
           $ref: "#/components/schemas/RoutingRule"
+
+    Topic:
+      type: object
+      required: [suffix, created_at]
+      properties:
+        suffix:
+          type: string
+          description: The topic suffix (the "<suffix>" in the namespaced topic "<namespace>.<tenant>.<suffix>").
+        created_at:
+          type: string
+          format: date-time
+          description: When the topic was provisioned. For the synthetic default topic this is the tenant's creation time.
+
+    TopicsResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Topic"
+        total:
+          type: integer
+          description: Total number of topics for the tenant, including the default topic.
+        limit:
+          type: integer
+          description: Maximum number of items returned per page.
+        offset:
+          type: integer
+          description: Number of items skipped (pagination offset).
+
+    CreateTopicRequest:
+      type: object
+      required: [suffix]
+      properties:
+        suffix:
+          type: string
+          pattern: "^[a-z0-9-]+$"
+          maxLength: 200
+          description: The topic suffix to provision (the "<suffix>" in the namespaced topic "<namespace>.<tenant>.<suffix>"). Lowercase alphanumeric and hyphens; "default" and "dead-letter" are reserved.
 
     SetRoutingRulesRequest:
       type: object

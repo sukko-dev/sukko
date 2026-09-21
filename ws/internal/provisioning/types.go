@@ -340,7 +340,10 @@ type TenantQuota struct {
 	// TenantID is the tenant these quotas apply to.
 	TenantID string `json:"tenant_id"`
 
-	// MaxTopics is the maximum number of topics.
+	// MaxTopics is the maximum number of provisioned topics for the tenant.
+	// 0 means unlimited (Enterprise), matching license.IsUnlimited. Enforced at
+	// topic creation (ADR-0006 Phase 2); the deterministic default topic and the
+	// DLQ are never counted.
 	MaxTopics int `json:"max_topics"`
 
 	// MaxPartitions is the maximum total partitions.

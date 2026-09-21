@@ -130,10 +130,30 @@ type RoutingRulesStore interface {
 // per-tenant 'default' topic is deterministic and validated implicitly, so it
 // is not stored here. tenantID is the tenant UUID (FK → tenants.id), suffix is
 // the topic suffix (never the namespaced name, never 'default'/'dead-letter').
-// Create/List/Delete arrive with the topics API (ADR-0006 Phase 2, slice 2).
 type TopicStore interface {
 	// Exists reports whether a non-default topic suffix is provisioned for a tenant.
 	Exists(ctx context.Context, tenantID, suffix string) (bool, error)
+
+	// Create records a provisioned topic and returns its created_at. Returns
+	// ErrTopicAlreadyExists when the (tenant, suffix) already exists.
+	Create(ctx context.Context, tenantID, suffix string) (time.Time, error)
+
+	// List returns a tenant's provisioned topics ordered by suffix.
+	List(ctx context.Context, tenantID string) ([]Topic, error)
+
+	// Delete removes a provisioned topic. Returns ErrTopicNotFound when absent.
+	Delete(ctx context.Context, tenantID, suffix string) error
+
+	// Count returns the number of provisioned topics for a tenant (the MaxTopics quota denominator).
+	Count(ctx context.Context, tenantID string) (int, error)
+}
+
+// Topic is a durable provisioned topic: a non-default, non-DLQ topic suffix a
+// tenant may reference from routing rules (ADR-0006 Phase 2). The deterministic
+// 'default' topic is not stored and is surfaced separately by the topics API.
+type Topic struct {
+	Suffix    string    `json:"suffix"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // QuotaStore handles tenant quota operations.

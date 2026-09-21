@@ -61,6 +61,13 @@ var (
 	// ErrTopicNotProvisioned indicates a referenced Kafka topic does not exist.
 	ErrTopicNotProvisioned = errors.New("topic not provisioned")
 
+	// Topics API sentinel errors (ADR-0006 Phase 2).
+	ErrTopicAlreadyExists    = errors.New("topic already exists")
+	ErrTopicNotFound         = errors.New("topic not found")
+	ErrInvalidTopicSuffix    = errors.New("invalid topic suffix")
+	ErrTopicQuotaExceeded    = errors.New("topic quota exceeded")
+	ErrTopicReferencedByRule = errors.New("topic is referenced by a routing rule")
+
 	// Validation sentinel errors for ValidateRoutingRules.
 	ErrEmptyRoutingRules       = errors.New("routing rules cannot be empty")
 	ErrEmptyRoutingPattern     = errors.New("pattern cannot be empty")

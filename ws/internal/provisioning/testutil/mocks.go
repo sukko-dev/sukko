@@ -1297,18 +1297,26 @@ func (m *MockWebhookStore) ListForDowngrade(_ context.Context, _ time.Time) ([]*
 }
 
 // MockTopicStore implements provisioning.TopicStore for testing (ADR-0006
-// Phase 2). ExistsResult defaults to true so routing-rule tests that reference
-// non-default topics validate without per-test setup; set ExistsErr to exercise
-// the store-error path, or ExistsResult=false for the not-provisioned path.
+// Phase 2). Create/List/Delete/Count are stateful (keyed by tenant+suffix) so
+// topics-API tests exercise real behaviour. Exists is decoupled: it returns
+// ExistsResult (default true) so routing-rule validation tests need no per-test
+// setup; set ExistsErr for the store-error path or ExistsResult=false for the
+// not-provisioned path. The per-method *Err fields inject failures.
 type MockTopicStore struct {
+	mu           sync.Mutex
+	created      map[string]map[string]time.Time // tenantID → suffix → createdAt
 	ExistsResult bool
 	ExistsErr    error
+	CreateErr    error
+	ListErr      error
+	DeleteErr    error
+	CountErr     error
 }
 
 // NewMockTopicStore returns a MockTopicStore that reports every topic as
-// provisioned (ExistsResult=true).
+// provisioned via Exists (ExistsResult=true) and starts with no created topics.
 func NewMockTopicStore() *MockTopicStore {
-	return &MockTopicStore{ExistsResult: true}
+	return &MockTopicStore{ExistsResult: true, created: make(map[string]map[string]time.Time)}
 }
 
 // Exists implements provisioning.TopicStore.Exists for testing.
@@ -1317,4 +1325,65 @@ func (m *MockTopicStore) Exists(_ context.Context, _, _ string) (bool, error) {
 		return false, m.ExistsErr
 	}
 	return m.ExistsResult, nil
+}
+
+// Create implements provisioning.TopicStore.Create for testing.
+func (m *MockTopicStore) Create(_ context.Context, tenantID, suffix string) (time.Time, error) {
+	if m.CreateErr != nil {
+		return time.Time{}, m.CreateErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.created[tenantID] == nil {
+		m.created[tenantID] = make(map[string]time.Time)
+	}
+	if _, ok := m.created[tenantID][suffix]; ok {
+		return time.Time{}, fmt.Errorf("%w: %s", provisioning.ErrTopicAlreadyExists, suffix)
+	}
+	ts := time.Unix(0, 0)
+	m.created[tenantID][suffix] = ts
+	return ts, nil
+}
+
+// List implements provisioning.TopicStore.List for testing (ordered by suffix).
+func (m *MockTopicStore) List(_ context.Context, tenantID string) ([]provisioning.Topic, error) {
+	if m.ListErr != nil {
+		return nil, m.ListErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	suffixes := make([]string, 0, len(m.created[tenantID]))
+	for s := range m.created[tenantID] {
+		suffixes = append(suffixes, s)
+	}
+	slices.Sort(suffixes)
+	topics := make([]provisioning.Topic, 0, len(suffixes))
+	for _, s := range suffixes {
+		topics = append(topics, provisioning.Topic{Suffix: s, CreatedAt: m.created[tenantID][s]})
+	}
+	return topics, nil
+}
+
+// Delete implements provisioning.TopicStore.Delete for testing.
+func (m *MockTopicStore) Delete(_ context.Context, tenantID, suffix string) error {
+	if m.DeleteErr != nil {
+		return m.DeleteErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.created[tenantID][suffix]; !ok {
+		return fmt.Errorf("%w: %s", provisioning.ErrTopicNotFound, suffix)
+	}
+	delete(m.created[tenantID], suffix)
+	return nil
+}
+
+// Count implements provisioning.TopicStore.Count for testing.
+func (m *MockTopicStore) Count(_ context.Context, tenantID string) (int, error) {
+	if m.CountErr != nil {
+		return 0, m.CountErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.created[tenantID]), nil
 }

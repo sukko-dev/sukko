@@ -243,6 +243,18 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					})
 				})
 
+				// Provisioned topics management — ungated (ADR-0006 Phase 2); the
+				// per-edition MaxTopicsPerTenant count is the wall, enforced in the
+				// service. Read is open to the tenant; writes require admin.
+				r.Route("/topics", func(r chi.Router) {
+					r.Get("/", h.ListTopics)
+					r.Group(func(r chi.Router) {
+						r.Use(RequireRole("admin", "system"))
+						r.Post("/", h.CreateTopic)
+						r.Delete("/{topicSuffix}", h.DeleteTopic)
+					})
+				})
+
 				// Quota management — requires Pro
 				r.Group(func(r chi.Router) {
 					r.Use(RequireFeature(cfg.EditionManager, license.PerTenantConfigurableQuotas))
