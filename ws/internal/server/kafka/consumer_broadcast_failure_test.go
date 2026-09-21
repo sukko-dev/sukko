@@ -241,9 +241,11 @@ func TestBroadcastFailure_CtxCancelDuringRetry(t *testing.T) {
 }
 
 // TestBroadcastFailure_DeliberateDropsStillMark asserts that the deliberate-drop
-// sites (rate limit, DLQ route) still mark the record for commit even while the
-// broadcast bus is failing — those records never reach the bus, so bus health
-// must not affect their commit behavior.
+// sites (DLQ route for a malformed/unroutable record) still mark the record for
+// commit even while the broadcast bus is failing — those records never reach the
+// bus, so bus health must not affect their commit behavior. Rate-limit is NOT a
+// deliberate-drop site any more: it paces (ADR-0022), covered by the
+// TestRateLimitPacing_* tests.
 func TestBroadcastFailure_DeliberateDropsStillMark(t *testing.T) {
 	t.Parallel()
 
@@ -252,7 +254,6 @@ func TestBroadcastFailure_DeliberateDropsStillMark(t *testing.T) {
 		allowKafka bool
 		emptyKey   bool // empty channel key routes to DLQ
 	}{
-		{name: "rate-limited record is marked", allowKafka: false, emptyKey: false},
 		{name: "DLQ-routed record is marked", allowKafka: true, emptyKey: true},
 	}
 

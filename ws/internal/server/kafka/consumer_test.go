@@ -303,16 +303,13 @@ func TestConsumer_GetMetrics_Initial(t *testing.T) {
 	t.Parallel()
 	consumer := &Consumer{}
 
-	processed, failed, dropped := consumer.GetMetrics()
+	processed, failed := consumer.GetMetrics()
 
 	if processed != 0 {
 		t.Errorf("Initial processed = %d, want 0", processed)
 	}
 	if failed != 0 {
 		t.Errorf("Initial failed = %d, want 0", failed)
-	}
-	if dropped != 0 {
-		t.Errorf("Initial dropped = %d, want 0", dropped)
 	}
 }
 
@@ -324,7 +321,7 @@ func TestConsumer_IncrementProcessed(t *testing.T) {
 	consumer.incrementProcessed("test-topic")
 	consumer.incrementProcessed("test-topic")
 
-	processed, _, _ := consumer.GetMetrics()
+	processed, _ := consumer.GetMetrics()
 	if processed != 3 {
 		t.Errorf("processed = %d, want 3", processed)
 	}
@@ -337,37 +334,9 @@ func TestConsumer_IncrementFailed(t *testing.T) {
 	consumer.incrementFailed()
 	consumer.incrementFailed()
 
-	_, failed, _ := consumer.GetMetrics()
+	_, failed := consumer.GetMetrics()
 	if failed != 2 {
 		t.Errorf("failed = %d, want 2", failed)
-	}
-}
-
-func TestConsumer_IncrementDropped(t *testing.T) {
-	t.Parallel()
-	consumer := &Consumer{}
-
-	consumer.incrementDropped("test-topic")
-	consumer.incrementDropped("test-topic")
-	consumer.incrementDropped("test-topic")
-	consumer.incrementDropped("test-topic")
-
-	_, _, dropped := consumer.GetMetrics()
-	if dropped != 4 {
-		t.Errorf("dropped = %d, want 4", dropped)
-	}
-}
-
-func TestConsumer_GetDroppedCount(t *testing.T) {
-	t.Parallel()
-	consumer := &Consumer{}
-
-	consumer.incrementDropped("test-topic")
-	consumer.incrementDropped("test-topic")
-
-	count := consumer.getDroppedCount()
-	if count != 2 {
-		t.Errorf("getDroppedCount() = %d, want 2", count)
 	}
 }
 
@@ -379,22 +348,9 @@ func TestConsumer_IncrementProcessed_MultipleTopics(t *testing.T) {
 	consumer.incrementProcessed("sukko.dev.liquidity")
 	consumer.incrementProcessed("sukko.dev.trade")
 
-	processed, _, _ := consumer.GetMetrics()
+	processed, _ := consumer.GetMetrics()
 	if processed != 3 {
 		t.Errorf("processed = %d, want 3", processed)
-	}
-}
-
-func TestConsumer_IncrementDropped_MultipleTopics(t *testing.T) {
-	t.Parallel()
-	consumer := &Consumer{}
-
-	consumer.incrementDropped("sukko.dev.trade")
-	consumer.incrementDropped("sukko.dev.liquidity")
-
-	_, _, dropped := consumer.GetMetrics()
-	if dropped != 2 {
-		t.Errorf("dropped = %d, want 2", dropped)
 	}
 }
 
@@ -420,7 +376,7 @@ func TestConsumer_Metrics_Concurrent(t *testing.T) {
 	const opsPerGoroutine = 100
 
 	var wg sync.WaitGroup
-	wg.Add(numGoroutines * 3) // 3 types of operations
+	wg.Add(numGoroutines * 2) // 2 types of operations
 
 	// Concurrent incrementProcessed
 	for range numGoroutines {
@@ -442,19 +398,9 @@ func TestConsumer_Metrics_Concurrent(t *testing.T) {
 		}()
 	}
 
-	// Concurrent incrementDropped
-	for range numGoroutines {
-		go func() {
-			defer wg.Done()
-			for range opsPerGoroutine {
-				consumer.incrementDropped("test-topic")
-			}
-		}()
-	}
-
 	wg.Wait()
 
-	processed, failed, dropped := consumer.GetMetrics()
+	processed, failed := consumer.GetMetrics()
 	expected := uint64(numGoroutines * opsPerGoroutine)
 
 	if processed != expected {
@@ -462,9 +408,6 @@ func TestConsumer_Metrics_Concurrent(t *testing.T) {
 	}
 	if failed != expected {
 		t.Errorf("failed = %d, want %d", failed, expected)
-	}
-	if dropped != expected {
-		t.Errorf("dropped = %d, want %d", dropped, expected)
 	}
 }
 
@@ -531,41 +474,15 @@ func TestConsumer_PrepareMessage_EmptyKey_ReturnNil(t *testing.T) {
 		t.Error("prepareMessage should return nil for empty key")
 	}
 
-	_, failed, _ := consumer.GetMetrics()
+	_, failed := consumer.GetMetrics()
 	if failed != 1 {
 		t.Errorf("failed = %d, want 1 (should increment on empty key)", failed)
 	}
 }
 
-func TestConsumer_PrepareMessage_RateLimited_DropsWithTopic(t *testing.T) {
-	t.Parallel()
-	logger := zerolog.Nop()
-	guard := newMockResourceGuard()
-	guard.allowKafka = false
-
-	consumer := &Consumer{
-		logger:        &logger,
-		resourceGuard: guard,
-		ctx:           context.Background(),
-		consumerGroup: "test-group",
-	}
-
-	record := &kgo.Record{
-		Topic: "sukko.dev.trade",
-		Key:   []byte("BTC.trade"),
-		Value: []byte(`{"price":"50000"}`),
-	}
-
-	msg, _ := consumer.prepareMessage(record)
-	if msg != nil {
-		t.Error("prepareMessage should return nil when rate limited")
-	}
-
-	_, _, dropped := consumer.GetMetrics()
-	if dropped != 1 {
-		t.Errorf("dropped = %d, want 1", dropped)
-	}
-}
+// Rate-limit behavior is covered by the TestRateLimitPacing_* tests: the
+// limiter paces (bounded-blocks) instead of dropping (ADR-0022), so there is no
+// "rate-limited drop" path to assert here any more.
 
 // =============================================================================
 // TokenEvent Tests

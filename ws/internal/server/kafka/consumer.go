@@ -61,9 +61,10 @@ var consumerRevokeCommitMetrics = struct {
 // consumerBroadcastRetryMetrics holds the broadcast retry counters registered
 // once at package level. Tests bypass this singleton via ConsumerConfig.Registerer.
 var consumerBroadcastRetryMetrics = struct {
-	retriesTotal        prometheus.Counter
-	blockedSecondsTotal prometheus.Counter
-	once                sync.Once
+	retriesTotal          prometheus.Counter
+	blockedSecondsTotal   prometheus.Counter
+	ratePacedSecondsTotal prometheus.Counter
+	once                  sync.Once
 }{}
 
 // topicPauser is the minimal interface for pausing Kafka topic fetching.
@@ -108,6 +109,13 @@ const (
 	broadcastRetryInitialBackoff = 100 * time.Millisecond
 	broadcastRetryMaxBackoff     = 5 * time.Second
 )
+
+// kafkaPacingLogThreshold is how long a single record may spend paced on the
+// rate limiter before the consume loop logs that it is in sustained
+// backpressure. Below it, pacing is normal burst-smoothing and stays quiet
+// (per-denial logging would spam); above it signals the consumer is falling
+// behind produce — the operator-visible counterpart to the CPU brake's log.
+const kafkaPacingLogThreshold = time.Second
 
 // ResourceGuard interface for rate limiting and CPU emergency brake
 type ResourceGuard interface {
@@ -159,7 +167,6 @@ type Consumer struct {
 	// Metrics - lock-free atomic counters (Constitution VII)
 	messagesProcessed atomic.Uint64 // Successfully broadcast messages
 	messagesFailed    atomic.Uint64 // Messages with invalid format
-	messagesDropped   atomic.Uint64 // Rate limited or CPU paused
 	batchesSent       atomic.Uint64 // Number of batches sent
 	unknownTopicDrops atomic.Uint64 // Records dropped because the topic→tenant map had no entry (registry-miss)
 	consumerGroup     string        // Consumer group ID for metrics labels
@@ -183,6 +190,12 @@ type Consumer struct {
 	// must be visible on dashboards.
 	broadcastRetryCounter   prometheus.Counter // ws_consumer_broadcast_retries_total
 	broadcastBlockedSeconds prometheus.Counter // ws_consumer_broadcast_blocked_seconds_total
+
+	// Rate-limit pacing observability (§VI): the rate limiter bounded-blocks the
+	// consume loop instead of dropping (ADR-0022), so the paced time must be
+	// visible on dashboards — sustained pacing signals the consumer is falling
+	// behind produce and lag is growing.
+	kafkaRatePacedSeconds prometheus.Counter // ws_consumer_rate_limit_paced_seconds_total
 
 	// Security config retained for the replay client (ReplayFromOffsets creates a separate kgo.Client).
 	sasl *kafkashared.SASLConfig
@@ -492,8 +505,18 @@ func NewConsumer(cfg ConsumerConfig) (*Consumer, error) {
 			cancel()
 			return nil, fmt.Errorf("failed to register broadcast blocked seconds counter: %w", err)
 		}
+		paced := prometheus.NewCounter(prometheus.CounterOpts{
+			Name: MetricRateLimitPacedSecondsTotal,
+			Help: "Total seconds the consume loop spent pacing on the rate limiter (bounded-block instead of drop) — the at-least-once guard for recovery catch-up",
+		})
+		if err := cfg.Registerer.Register(paced); err != nil {
+			client.Close()
+			cancel()
+			return nil, fmt.Errorf("failed to register rate-limit paced seconds counter: %w", err)
+		}
 		consumer.broadcastRetryCounter = retries
 		consumer.broadcastBlockedSeconds = blocked
+		consumer.kafkaRatePacedSeconds = paced
 	} else {
 		// Register both counters in a single once.Do for atomicity (either both
 		// registered or neither — concurrent NewConsumer calls are safe).
@@ -506,9 +529,14 @@ func NewConsumer(cfg ConsumerConfig) (*Consumer, error) {
 				Name: MetricBroadcastBlockedSecondsTotal,
 				Help: "Total seconds the consume loop spent blocked in broadcast retry backpressure while the bus was unavailable",
 			})
+			consumerBroadcastRetryMetrics.ratePacedSecondsTotal = promauto.NewCounter(prometheus.CounterOpts{
+				Name: MetricRateLimitPacedSecondsTotal,
+				Help: "Total seconds the consume loop spent pacing on the rate limiter (bounded-block instead of drop) — the at-least-once guard for recovery catch-up",
+			})
 		})
 		consumer.broadcastRetryCounter = consumerBroadcastRetryMetrics.retriesTotal
 		consumer.broadcastBlockedSeconds = consumerBroadcastRetryMetrics.blockedSecondsTotal
+		consumer.kafkaRatePacedSeconds = consumerBroadcastRetryMetrics.ratePacedSecondsTotal
 	}
 
 	if batchEnabled {
@@ -657,10 +685,11 @@ func (c *Consumer) consumeLoop() {
 	// stranded until the next record happens to arrive (Constitution §VII: the message pipeline MUST NOT
 	// stall; the earlier single-goroutine loop blocked in PollFetches so its flush timer never fired,
 	// stranding burst tails indefinitely). §VII also prefers this goroutine-owns-state + channel design
-	// over shared state. (Two exceptions to the batchTimeout flush cadence intentionally block
-	// this loop as bounded backpressure, not a stall: an in-progress CPU emergency brake in
-	// prepareMessage until CPU recovers, and broadcastWithRetry in deliverBatch while the broadcast
-	// bus is down — see broadcastWithRetry for why blocking beats committing past undelivered records.)
+	// over shared state. (Three exceptions to the batchTimeout flush cadence intentionally block
+	// this loop as bounded backpressure, not a stall: rate-limit pacing (paceKafkaRate) and an
+	// in-progress CPU emergency brake, both in prepareMessage, and broadcastWithRetry in
+	// deliverBatch while the broadcast bus is down — each blocks instead of committing past an
+	// undelivered record, the at-least-once guard; see paceKafkaRate and broadcastWithRetry.)
 	recordCh := make(chan *kgo.Record, c.batchSize)
 
 	c.wg.Go(func() {
@@ -758,8 +787,9 @@ func (c *Consumer) consumeLoop() {
 					}
 				}
 			case noMark && c.ctx.Err() != nil:
-				// Consumer context canceled (CPU brake interrupted): the record
-				// is abandoned unmarked. Stop consuming NOW — the next select
+				// Consumer context canceled (CPU brake or rate-limit pacing
+				// interrupted): the record is abandoned unmarked. Stop consuming
+				// NOW — the next select
 				// arm could otherwise pull a deliberate-drop record whose mark
 				// commits past this one. Flush first: the pending batch
 				// precedes the abandoned record, so marking it cannot cover
@@ -770,8 +800,9 @@ func (c *Consumer) consumeLoop() {
 				// Registry miss: leave unmarked and keep consuming (see
 				// logUnknownTopicDrop for the honest redelivery contract).
 			default:
-				// Deliberate drop (rate-limit, malformed, DLQ): mark so the offset is not
-				// re-delivered after rebalance.
+				// Deliberate drop (malformed, DLQ): mark so the offset is not
+				// re-delivered after rebalance. Rate-limit is NOT here — it paces
+				// (paceKafkaRate), never drops (ADR-0022).
 				c.committer.MarkCommitRecords(record)
 			}
 		}
@@ -805,7 +836,7 @@ func (c *Consumer) consumeLoopUnbatched() {
 
 // consumeFetchRecords processes every record in fetches in order. It returns
 // true when processing aborted (consumer context canceled while a record was
-// stuck in broadcast retry or in the CPU brake): the abandoned record is
+// stuck in broadcast retry, the CPU brake, or rate-limit pacing): the abandoned record is
 // unmarked, and under cumulative commit (kgo.AutoCommitMarks) ANY later mark
 // on that partition — including a deliberate-drop mark — would commit past it
 // and lose it silently. Once a record aborts, the remaining records in the
@@ -830,32 +861,80 @@ type preparedMessage struct {
 	record  *kgo.Record // original record, used for MarkCommitRecords at broadcast site
 }
 
+// paceKafkaRate blocks until the WS_MAX_KAFKA_RATE limiter admits one message,
+// pacing the consume loop instead of dropping. It returns false when the
+// consumer context is canceled while waiting — the caller MUST abandon the
+// record UNMARKED (it redelivers after restart/rebalance) and stop consuming,
+// exactly as the CPU emergency brake does. Pacing (not dropping) is what keeps
+// at-least-once intact during recovery catch-up, when a reassigned partition's
+// backlog would otherwise drain faster than the limit and the excess be shed
+// and committed past (ADR-0022; extends the ADR-0015 bounded-block principle).
+//
+// AllowKafkaMessage cancels its token reservation when a wait is needed, so
+// re-calling after the wait does not consume a token prematurely.
+func (c *Consumer) paceKafkaRate() (admitted bool) {
+	var paced time.Duration
+	pacingLogged := false
+	finish := func() {
+		if paced > 0 {
+			c.kafkaRatePacedSeconds.Add(paced.Seconds())
+		}
+		if pacingLogged {
+			c.logger.Info().
+				Dur("paced_duration", paced).
+				Msg("Kafka rate-limit pacing released - resuming consumption")
+		}
+	}
+	for {
+		allow, waitDuration := c.resourceGuard.AllowKafkaMessage(c.ctx)
+		if allow {
+			finish()
+			return true
+		}
+		if waitDuration <= 0 {
+			// Defensive: a valid limiter (burst >= 1) always returns a positive
+			// wait when it denies; floor to the brake interval so a misconfigured
+			// limiter cannot busy-spin.
+			waitDuration = c.backpressureCheckInterval
+		}
+		if !pacingLogged && paced >= kafkaPacingLogThreshold {
+			// Mirror the CPU brake's log shape: one Warn on entering sustained
+			// backpressure, Info with the total on release. This is bounded
+			// backpressure, not loss — the record is delivered once admitted.
+			c.logger.Warn().
+				Dur("paced_so_far", paced).
+				Msg("Kafka rate limit exceeded - pacing (bounded backpressure, no message loss)")
+			pacingLogged = true
+		}
+		select {
+		case <-c.ctx.Done():
+			finish()
+			return false // canceled while pacing — caller abandons the record unmarked
+		case <-time.After(waitDuration):
+			paced += waitDuration
+		}
+	}
+}
+
 // prepareMessage validates and prepares a message for batching.
 // Returns (msg, noMark):
-//   - (nil, false): deliberate drop (rate-limit, malformed, DLQ) — caller MUST mark the record
-//   - (nil, true): no-mark — either the CPU brake was interrupted by ctx.Done()
-//     (caller MUST stop consuming; the abandoned record must not be covered by
-//     a later mark) or a registry miss (caller keeps consuming). The caller
-//     distinguishes the two via c.ctx.Err().
+//   - (nil, false): deliberate drop (malformed, DLQ) — caller MUST mark the record
+//   - (nil, true): no-mark — either a bounded-block (rate-limit pacing or the CPU
+//     brake) was interrupted by ctx.Done() (caller MUST stop consuming; the
+//     abandoned record must not be covered by a later mark) or a registry miss
+//     (caller keeps consuming). The caller distinguishes the two via c.ctx.Err().
 //   - (msg, false): ready to broadcast — caller MUST mark only after a successful broadcast
 func (c *Consumer) prepareMessage(record *kgo.Record) (*preparedMessage, bool) {
 	// ============================================================================
-	// LAYER 1: RATE LIMITING
+	// LAYER 1: RATE LIMITING - PACING (bounded-block, no loss!)
 	// ============================================================================
-	allow, waitDuration := c.resourceGuard.AllowKafkaMessage(c.ctx)
-	if !allow {
-		c.incrementDropped(record.Topic)
-
-		// Log every 100th drop to avoid log spam
-		dropped := c.getDroppedCount()
-		if dropped%100 == 0 {
-			c.logger.Warn().
-				Uint64("dropped_count", dropped).
-				Dur("would_wait", waitDuration).
-				Str(LabelTopic, record.Topic).
-				Msg("Kafka rate limit exceeded - dropping messages")
-		}
-		return nil, false // deliberate drop — caller must mark
+	// Pace on the limiter instead of dropping. Dropping+marking here permanently
+	// loses records during recovery catch-up: when a partition is reassigned
+	// after an owner death, the survivor drains the accumulated backlog faster
+	// than WS_MAX_KAFKA_RATE, and drop-and-mark would shed the excess AND commit
+	// past it (ADR-0022). Mirrors LAYER 2's backpressure.
+	if !c.paceKafkaRate() {
+		return nil, true // ctx canceled while pacing — do NOT mark; caller must abort
 	}
 
 	// ============================================================================
@@ -1024,32 +1103,19 @@ func (c *Consumer) deliverBatch(batch []preparedMessage) bool {
 // Without these protections, Kafka consumer blocks synchronously, causing plateau at 2.2K connections.
 //
 // Returns abort=true when the consumer context was canceled mid-processing
-// (CPU brake or broadcast retry) and the record was abandoned UNMARKED. The
+// (CPU brake, rate-limit pacing, or broadcast retry) and the record was abandoned UNMARKED. The
 // caller MUST stop consuming: under cumulative commit any later mark on the
 // partition — including a deliberate-drop mark — would commit past the
 // abandoned record and lose it silently.
 func (c *Consumer) processRecord(record *kgo.Record) (abort bool) {
 	// ============================================================================
-	// LAYER 1: RATE LIMITING
+	// LAYER 1: RATE LIMITING - PACING (bounded-block, no loss!)
 	// ============================================================================
-	// Check if we're allowed to process this message based on configured rate limit
-	// If rate limit exceeded, drop message and let Kafka handle redelivery
-	allow, waitDuration := c.resourceGuard.AllowKafkaMessage(c.ctx)
-	if !allow {
-		c.incrementDropped(record.Topic)
-
-		// Log every 100th drop to avoid log spam
-		dropped := c.getDroppedCount()
-		if dropped%100 == 0 {
-			c.logger.Warn().
-				Uint64("dropped_count", dropped).
-				Dur("would_wait", waitDuration).
-				Str(LabelTopic, record.Topic).
-				Msg("Kafka rate limit exceeded - dropping messages")
-		}
-		// Deliberate drop — mark so offset is not re-delivered after rebalance.
-		c.committer.MarkCommitRecords(record)
-		return false
+	// Pace on the limiter instead of dropping. Dropping+marking here permanently
+	// loses records during recovery catch-up, when a reassigned partition's
+	// backlog drains faster than WS_MAX_KAFKA_RATE (ADR-0022). Mirrors LAYER 2.
+	if !c.paceKafkaRate() {
+		return true // ctx canceled while pacing — abandon UNMARKED and abort
 	}
 
 	// ============================================================================
@@ -1214,11 +1280,13 @@ func (c *Consumer) extractChannel(record *kgo.Record) (channel, reason, tenant s
 	return ch, "", tenant
 }
 
-// GetMetrics returns current consumer metrics: messages processed successfully,
-// messages that failed validation, and messages dropped due to rate limiting.
+// GetMetrics returns current consumer metrics: messages processed successfully
+// and messages that failed validation. The consume path no longer drops on the
+// rate limiter — it paces (ADR-0022) — so there is no drop counter here;
+// registry-miss drops are reported separately via UnknownTopicDrops.
 // Thread-safe for concurrent access.
-func (c *Consumer) GetMetrics() (processed, failed, dropped uint64) {
-	return c.messagesProcessed.Load(), c.messagesFailed.Load(), c.messagesDropped.Load()
+func (c *Consumer) GetMetrics() (processed, failed uint64) {
+	return c.messagesProcessed.Load(), c.messagesFailed.Load()
 }
 
 // UnknownTopicDrops returns the count of records dropped because the topic→tenant
@@ -1235,15 +1303,6 @@ func (c *Consumer) incrementProcessed(topic string) {
 
 func (c *Consumer) incrementFailed() {
 	c.messagesFailed.Add(1)
-}
-
-func (c *Consumer) incrementDropped(topic string) {
-	c.messagesDropped.Add(1)
-	metrics.IncrementKafkaDropped(topic, c.consumerGroup)
-}
-
-func (c *Consumer) getDroppedCount() uint64 {
-	return c.messagesDropped.Load()
 }
 
 func (c *Consumer) incrementBatches() {

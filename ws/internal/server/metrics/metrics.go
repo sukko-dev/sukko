@@ -251,11 +251,6 @@ var (
 		Help: "Total number of messages received from Kafka",
 	}, []string{"topic", "consumer_group"})
 
-	kafkaMessagesDropped = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "ws_kafka_messages_dropped_total",
-		Help: "Total number of Kafka messages dropped due to backpressure",
-	}, []string{"topic", "consumer_group"})
-
 	kafkaMessagesPublished = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ws_kafka_messages_published_total",
 		Help: "Total number of messages published to Kafka by clients",
@@ -522,11 +517,6 @@ func SetKafkaConnected(connected bool) {
 // IncrementKafkaMessages increments Kafka message counter with topic and consumer group labels.
 func IncrementKafkaMessages(topic, consumerGroup string) {
 	kafkaMessagesReceived.WithLabelValues(topic, consumerGroup).Inc()
-}
-
-// IncrementKafkaDropped increments dropped Kafka message counter with topic and consumer group labels.
-func IncrementKafkaDropped(topic, consumerGroup string) {
-	kafkaMessagesDropped.WithLabelValues(topic, consumerGroup).Inc()
 }
 
 // IncrementMessagesPublished increments Kafka publish success counter.

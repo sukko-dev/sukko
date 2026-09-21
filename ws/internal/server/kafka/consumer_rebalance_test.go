@@ -456,19 +456,10 @@ func TestExplicitMark_BroadcastMarked_Batched(t *testing.T) {
 	}
 }
 
-func TestExplicitMark_RateLimitedMarked(t *testing.T) {
-	t.Parallel()
-	consumer, mock, _ := newRebalanceTestConsumer(t, ConsumerConfig{
-		ResourceGuard: &mockResourceGuardFixed{allowKafka: false},
-	})
-
-	record := makeRecord("sukko.test.trade")
-	consumer.processRecord(record)
-
-	if mock.markCount() != 1 {
-		t.Errorf("rate-limited record: MarkCommitRecords called %d times, want 1", mock.markCount())
-	}
-}
+// Rate-limited records are no longer marked-and-dropped: the limiter paces
+// (bounded-blocks) until a token is available (ADR-0022). That behavior — and
+// the no-mark abort when the context is canceled mid-pace — is covered by the
+// TestRateLimitPacing_* tests.
 
 func TestExplicitMark_UnknownTopicNotMarked(t *testing.T) {
 	t.Parallel()

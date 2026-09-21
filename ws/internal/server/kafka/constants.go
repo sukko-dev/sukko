@@ -118,6 +118,10 @@ const (
 const (
 	MetricBroadcastRetriesTotal        = "ws_consumer_broadcast_retries_total"
 	MetricBroadcastBlockedSecondsTotal = "ws_consumer_broadcast_blocked_seconds_total"
+	// MetricRateLimitPacedSecondsTotal counts seconds the consume loop spent
+	// pacing (bounded-blocking) on the WS_MAX_KAFKA_RATE limiter instead of
+	// dropping — the at-least-once guard for recovery catch-up (ADR-0022).
+	MetricRateLimitPacedSecondsTotal = "ws_consumer_rate_limit_paced_seconds_total"
 )
 
 // Label key and values for ws_consumer_revoke_commit_total{result=...}.
