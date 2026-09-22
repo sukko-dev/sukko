@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 
 info:
   title: Sukko WebSocket Client API
-  version: 1.4.0
+  version: 1.4.1
   description: |
     Real-time WebSocket API for subscribing to chat events and publishing messages.
 
@@ -36,7 +36,7 @@ info:
 
     - **Admission control**: The server may reject WebSocket upgrades under high CPU (>60%), memory pressure, goroutine limits, or per-tenant connection limits.
     - **Slow client disconnection**: If the server fails to deliver 3 consecutive messages to a client (send buffer full), it disconnects with close code 1008 (Policy Violation).
-    - **Graceful shutdown**: The server sends close code 1001 (Going Away) to all clients before stopping.
+    - **Server-initiated disconnect**: Graceful shutdown and token/user revocation also close the connection with 1008 (Policy Violation).
     - **Heartbeat**: Client sends `heartbeat`, server responds with `pong` containing a timestamp.
 
     ## WebSocket Close Codes
@@ -44,8 +44,8 @@ info:
     | Code | Meaning | Trigger |
     |------|---------|---------|
     | 1000 | Normal closure | Client or server initiated clean close |
-    | 1001 | Going away | Server shutting down (graceful) |
-    | 1008 | Policy violation | Slow client disconnected after max delivery attempts |
+    | 1008 | Policy violation | Slow client disconnected after max delivery attempts; server-initiated disconnect on graceful shutdown or token/user revocation |
+    | 1009 | Message too big | Client sent a frame exceeding the size limit |
     | 1011 | Internal error | Unexpected server error |
     | 4000 | force_disconnect / heartbeat timeout | Direction-dependent: server-sent = operator-initiated force-disconnect via Connections Management API (`DELETE /connections/{connId}`); client-sent = client-initiated close after heartbeat (pong) timeout. Clients MUST use the close direction to disambiguate. |
 
@@ -470,9 +470,7 @@ operations:
       Sent when a history request fails validation or encounters a storage error.
       Error codes:
         - `history_disabled`: history feature not enabled on this server (not retriable — feature is off)
-        - `not_available`: JWT expired
         - `history_not_subscribed`: client must subscribe to the channel first
-        - `history_time_range_not_supported`: from_ts/to_ts queries are not supported in v1
         - `history_invalid_limit`: limit out of range [1, MAX_HISTORY_LIMIT]
         - `history_in_progress`: history delivery already running for this channel
         - `history_storage_unavailable`: Valkey temporarily unreachable (retriable — try again after backoff)
@@ -1081,6 +1079,7 @@ components:
           description: Machine-readable error code.
           enum:
             - invalid_request
+            - subscribe_limit_exceeded
         message:
           type: string
           description: Human-readable error description.
@@ -1158,8 +1157,6 @@ components:
           description: Source of the delivered history.
           enum:
             - cache
-            - kafka
-            - mixed
         truncated:
           type: boolean
           description: Present and true when delivery was cut short by a server-side timeout. Omitted entirely (not present) when false — clients must treat absence as false.
@@ -1190,9 +1187,7 @@ components:
           description: Machine-readable error code.
           enum:
             - history_disabled
-            - not_available
             - history_not_subscribed
-            - history_time_range_not_supported
             - history_invalid_limit
             - history_in_progress
             - history_storage_unavailable

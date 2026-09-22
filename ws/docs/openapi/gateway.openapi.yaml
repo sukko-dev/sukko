@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Sukko Gateway API
-  version: 1.0.0
+  version: 1.0.1
   description: |
     REST API for the Sukko WebSocket Gateway. Provides SSE streaming, REST publish,
     push notification management, and operational endpoints.
@@ -229,6 +229,15 @@ paths:
               example:
                 code: TENANT_LIMIT_EXCEEDED
                 message: "tenant connection limit exceeded"
+        "503":
+          description: Service unavailable — tenant resolution temporarily unavailable (pre-upgrade). Retry with backoff.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: SERVICE_UNAVAILABLE
+                message: "tenant resolution temporarily unavailable"
 
   # ── SSE (Pro) ──────────────────────────────────────────────────────
   /sse:
@@ -357,8 +366,7 @@ paths:
                   description: "Target channel. Format: {tenant}.{suffix}"
                   example: "sukko.general.messages"
                 data:
-                  type: object
-                  description: Arbitrary JSON payload
+                  description: Arbitrary JSON payload (any JSON value — object, array, string, number, or boolean).
                   example: { "text": "Hello everyone!", "sender": "user123" }
       responses:
         "200":
@@ -467,6 +475,15 @@ paths:
               example:
                 code: SERVICE_UNAVAILABLE
                 message: "publish temporarily unavailable, retry"
+        "500":
+          description: Internal error — an unmapped failure from the ws-server publish RPC.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: INTERNAL_ERROR
+                message: "internal error"
 
   # ── Push Subscribe (Pro) ───────────────────────────────────────────
   /api/v1/push/subscribe:
@@ -560,6 +577,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "413":
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: BODY_TOO_LARGE
+                message: "request body exceeds maximum size"
+        "500":
+          description: Internal error — an unmapped failure from the push service.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: INTERNAL_ERROR
+                message: "internal error"
         "503":
           description: Push service not available
           content:
@@ -619,11 +654,22 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: Edition gate — requires Pro (Web Push)
+          description: |
+            Edition gate — requires Pro (Web Push) — or `FORBIDDEN` when the request is
+            authenticated with an API key: push unsubscribe requires JWT authentication.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal error — an unmapped failure from the push service.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: INTERNAL_ERROR
+                message: "internal error"
         "503":
           description: Push service not available
           content:
