@@ -7,7 +7,7 @@ canonical action sequence for the same vector — this is how cross-SDK behavior
 
 This directory is the **canonical home** (platform ADR-0023): the vectors are a contract
 artifact, versioned with the AsyncAPI (`../asyncapi/client-ws.asyncapi.yaml`, currently
-v1.4.1). Each SDK vendors a checksum-pinned copy into its own test data (sukko-go ADR-0003,
+v1.4.2). Each SDK vendors a checksum-pinned copy into its own test data (sukko-go ADR-0003,
 sukko-js ADR-0004, sukko-py ADR-0004) and never vendors from a sibling SDK.
 
 ## Schema
@@ -20,7 +20,13 @@ sukko-js ADR-0004, sukko-py ADR-0004) and never vendors from a sibling SDK.
   "description": "one-line intent",
   "inputs": [                               // ordered; each is one of:
     { "event": "gap", "channel": "acme.orders", "last_pos": "acme.orders:4" },  // a named event + canonical (snake_case) payload keys
-    { "advance": 10000 }                    // virtual-time advance in ms (drives timing-gated paths deterministically)
+    { "advance": 10000 },                   // virtual-time advance in ms (drives timing-gated paths deterministically)
+    { "backpressure": true }                // consumer stalled (true) / resumed (false). A client-side
+                                            // condition, NOT a wire effect — abstracts over JS's
+                                            // transport.pause() and Py's blocking put. While stalled,
+                                            // recovery frames stop arriving, so a detection deadline must
+                                            // SUSPEND (not fire): the silence is the consumer's, not the
+                                            // server's. Bindings map it to their park/suspension signal.
   ],
   "expect": [                               // ordered canonical actions the machine emits:
     { "action": "send_replay", "channel": "acme.orders", "from_pos": "acme.orders:4" }
