@@ -14,8 +14,8 @@
 #
 # Rollout is deliberately staged (ADR-0001) — a gate that has never gone green must
 # not be scheduled:
-#   v1 (this file)  workflow_dispatch only; proves the keyless GCP auth chain.
-#   v2              ephemeral VM create/delete + self-destruct backstop.
+#   v1              workflow_dispatch only; proves the keyless GCP auth chain.
+#   v2 (this file)  + ephemeral VM create → SSH smoke → delete + self-destruct backstop.
 #   v3              the real matrix run; needs `cmd/matrix` in the pinned bench ref.
 #   then            add `schedule` (weekly) + `release`, as a deliberate follow-up.
 #
@@ -45,6 +45,15 @@ concurrency:
   group: bench-matrix
   cancel-in-progress: false
 
+env:
+  # A run-scoped VM name: unique per dispatch, so a leaked box is unambiguous and two
+  # runs can never collide on it (the concurrency group already serializes, this is belt).
+  VM_NAME: bench-matrix-${{ github.run_id }}
+  # Self-destruct backstop: the VM deletes itself after this even if the workflow process
+  # vanishes entirely (no separate reaper — ADR-0001). v2 only boots and smoke-tests, so
+  # 30m is ample; v3's full matrix (build-from-source + faults × N × retry) will raise it.
+  MAX_RUN_DURATION: 1800s
+
 jobs:
   matrix:
     name: Fault matrix
@@ -60,10 +69,62 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
 
-      - name: Verify the impersonated identity and Compute access
-        # The gate's whole GCP surface is "create and delete one VM", so proving the
-        # exchanged credential can enumerate Compute instances proves the chain end to
-        # end: OIDC token -> STS exchange -> SA impersonation -> Compute API call.
+      - name: Verify the impersonated identity
+        # Cheap up-front proof of the keyless chain (OIDC -> STS -> SA impersonation);
+        # if this prints the bench-matrix service account, auth is sound before we spend
+        # a VM on it.
+        run: gcloud auth list --filter=status:ACTIVE --format='value(account)'
+
+      - name: Create the ephemeral benchmark VM
+        # c2-standard-8 = the dedicated 8-vCPU box the published numbers are measured on
+        # (burstable CPUs throttle mid-burst and pollute the tail). --no-service-account
+        # --no-scopes: the box only needs public GitHub/ghcr, so it carries no identity of
+        # its own. 50GB disk leaves room for v3's Docker images + a from-source sukko build
+        # (the base image is 10GB; debian auto-resizes root on boot). Self-destruct flags
+        # guarantee teardown even if this job dies before its delete step runs.
         run: |
-          gcloud auth list --filter=status:ACTIVE --format='value(account)'
-          gcloud compute instances list --project "${{ vars.GCP_PROJECT }}"
+          gcloud compute instances create "$VM_NAME" \
+            --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" \
+            --machine-type=c2-standard-8 \
+            --image-family=debian-12 --image-project=debian-cloud \
+            --boot-disk-size=50GB --boot-disk-type=pd-ssd \
+            --no-service-account --no-scopes \
+            --max-run-duration="$MAX_RUN_DURATION" \
+            --instance-termination-action=DELETE
+
+      - name: Wait for SSH and smoke-test the box
+        # The first `gcloud compute ssh` generates a keypair, writes it to project metadata,
+        # and waits for it to propagate — ~30-60s after the guest boots — so a single early
+        # attempt reliably fails; retry until reachable. The smoke asserts the box really is
+        # a c2-standard-8 (8 vCPUs); Docker is intentionally absent on the base image (v3
+        # installs it), so its absence is not a failure here.
+        run: |
+          # SC2016: the $(nproc)/$n in --command must expand on the REMOTE box, not here.
+          # shellcheck disable=SC2016
+          for i in $(seq 1 12); do
+            if gcloud compute ssh "$VM_NAME" \
+                 --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" --quiet \
+                 --command='set -e; n=$(nproc); echo "vCPUs=$n"; free -h; df -h /; test "$n" -eq 8'; then
+              echo "VM reachable and smoke-passed on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: not reachable yet, retrying in 20s"
+            sleep 20
+          done
+          echo "::error::VM $VM_NAME never became reachable over SSH"
+          exit 1
+
+      - name: Delete the VM
+        if: always()
+        # Fail-closed teardown: describe first — if the VM is present, delete it and let a
+        # real delete failure fail the job (a leaked box must be visible, never masked with
+        # `|| true`); if it is already gone (self-destruct fired, or create never succeeded),
+        # say so and pass.
+        run: |
+          if gcloud compute instances describe "$VM_NAME" \
+               --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" >/dev/null 2>&1; then
+            gcloud compute instances delete "$VM_NAME" \
+              --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" --quiet
+          else
+            echo "$VM_NAME already gone (self-destruct fired or create failed); nothing to delete"
+          fi
