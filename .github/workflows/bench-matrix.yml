@@ -1,0 +1,69 @@
+# =============================================================================
+# Bench Fault Matrix — broadcast-loss + latency regression gate (bench ADR-0001)
+# =============================================================================
+# The fault matrix (kill Valkey / Redpanda / a ws-server shard owner mid-burst and
+# assert zero data loss, plus the x8-burst latency headline) is what caught the
+# cycle-1 and cycle-2 broadcast data loss — the whole v1.0.4 arc. This workflow
+# institutionalizes it: it rents an ephemeral GCE box, runs the pinned harness from
+# sukko-dev/bench over SSH, and fails on a *reproduced* regression.
+#
+# The workflow lives here (not in sukko-dev/bench) because this is where the code it
+# gates lives: `release` fires natively where releases happen, the main-branch trigger
+# watches sukko's own main, and a sukko developer sees the gate in sukko's Actions.
+# The harness stays a separate, pinned, reusable tool in sukko-dev/bench.
+#
+# Rollout is deliberately staged (ADR-0001) — a gate that has never gone green must
+# not be scheduled:
+#   v1 (this file)  workflow_dispatch only; proves the keyless GCP auth chain.
+#   v2              ephemeral VM create/delete + self-destruct backstop.
+#   v3              the real matrix run; needs `cmd/matrix` in the pinned bench ref.
+#   then            add `schedule` (weekly) + `release`, as a deliberate follow-up.
+#
+# Trigger:
+#   gh workflow run bench-matrix.yml --ref main
+#
+# GCP prerequisites (provisioned 2026-09-26, project `sukko-bench`): a Workload
+# Identity Federation pool + provider conditioned on this repository, and the
+# `bench-matrix@` service account it impersonates. No long-lived key is stored —
+# auth is keyless OIDC. The four GCP_* repository variables below carry the wiring.
+
+name: Bench Fault Matrix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required for keyless Workload Identity Federation: the job mints a GitHub OIDC
+  # token and exchanges it for short-lived Google credentials.
+  id-token: write
+
+concurrency:
+  # One run at a time, never cancelled. C2_CPUS quota in the bench region is exactly
+  # 8 — one c2-standard-8 — so an overlapping run would fail on quota, and a run that
+  # is cancelled mid-flight can leak a VM.
+  group: bench-matrix
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    name: Fault matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to GCP (keyless, Workload Identity Federation)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      - name: Verify the impersonated identity and Compute access
+        # The gate's whole GCP surface is "create and delete one VM", so proving the
+        # exchanged credential can enumerate Compute instances proves the chain end to
+        # end: OIDC token -> STS exchange -> SA impersonation -> Compute API call.
+        run: |
+          gcloud auth list --filter=status:ACTIVE --format='value(account)'
+          gcloud compute instances list --project "${{ vars.GCP_PROJECT }}"
