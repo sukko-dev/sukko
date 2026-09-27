@@ -15,8 +15,9 @@
 # Rollout is deliberately staged (ADR-0001) — a gate that has never gone green must
 # not be scheduled:
 #   v1              workflow_dispatch only; proves the keyless GCP auth chain.
-#   v2 (this file)  + ephemeral VM create → SSH smoke → delete + self-destruct backstop.
-#   v3              the real matrix run; needs `cmd/matrix` in the pinned bench ref.
+#   v2              + ephemeral VM create → SSH smoke → delete + self-destruct backstop.
+#   v3 (this file)  + clone the pinned bench harness on the box and run the real matrix
+#                     (ci/vm-run.sh → task matrix), fetch matrix.json, fail on a reproduced regression.
 #   then            add `schedule` (weekly) + `release`, as a deliberate follow-up.
 #
 # Trigger:
@@ -168,48 +169,70 @@ jobs:
         # install toolchain → resolve sukko images for MODE → `task matrix`. The runner's Go
         # verdict core is the gate; this workflow only drives it (ADR-0001). A non-zero exit here
         # is a reproduced regression — it fails the job, and the artifact fetched below carries the
-        # evidence. Env is passed on the remote command line; single-quote so it expands on the VM.
-        # shellcheck disable=SC2016
+        # evidence. Operator inputs reach the remote shell only through `printf %q`, never spliced
+        # into the script text — so a value with spaces/quotes/`$(…)` can neither break the command
+        # nor execute on this credentialed runner. Full clone + checkout so bench_ref may be a
+        # branch, tag, OR commit SHA (--branch rejects SHAs). ServerAlive* keeps the ~hour-long
+        # session alive through the runner's SNAT idle-drop during silent build/boot windows.
+        env:
+          MODE: ${{ inputs.mode }}
+          SUKKO_REF: ${{ inputs.sukko_ref }}
+          BENCH_REF: ${{ inputs.bench_ref }}
+          SCENARIO: ${{ inputs.scenario }}
+          MATRIX_ARGS: ${{ inputs.matrix_args }}
         run: |
+          remote=$(printf 'set -euo pipefail
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq git
+            rm -rf ~/bench
+            git clone -q https://github.com/sukko-dev/bench.git ~/bench
+            cd ~/bench
+            git checkout -q %q
+            MODE=%q SUKKO_REF=%q SCENARIO=%q MATRIX_ARGS=%q OUT=%q bash ci/vm-run.sh\n' \
+            "$BENCH_REF" "$MODE" "$SUKKO_REF" "$SCENARIO" "$MATRIX_ARGS" "$VM_OUT")
           gcloud compute ssh "$VM_NAME" \
             --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" --quiet \
-            --ssh-key-expire-after="$SSH_KEY_EXPIRE" --ssh-flag=-oConnectTimeout=10 \
-            --command='set -euo pipefail
-              sudo apt-get update -qq
-              sudo apt-get install -y -qq git
-              rm -rf ~/bench
-              git clone -q --depth 1 --branch "'"${{ inputs.bench_ref }}"'" https://github.com/sukko-dev/bench.git ~/bench
-              cd ~/bench
-              MODE="'"${{ inputs.mode }}"'" \
-              SUKKO_REF="'"${{ inputs.sukko_ref }}"'" \
-              SCENARIO="'"${{ inputs.scenario }}"'" \
-              MATRIX_ARGS="'"${{ inputs.matrix_args }}"'" \
-              OUT="'"$VM_OUT"'" \
-                bash ci/vm-run.sh'
+            --ssh-key-expire-after="$SSH_KEY_EXPIRE" \
+            --ssh-flag=-oConnectTimeout=10 --ssh-flag=-oServerAliveInterval=30 --ssh-flag=-oServerAliveCountMax=6 \
+            --command="$remote"
 
       - name: Fetch the matrix artifact
         # Always attempt the fetch — even on a failed matrix the artifact is the evidence (matrix.json
         # + per-run result.json). Runs before the delete step (which is always()), so the box still
-        # exists here. A fetch failure is surfaced, not masked.
+        # exists here. On failure the scp error is surfaced (not discarded), so a key/quota/network
+        # problem is not misread as "the matrix produced nothing".
         if: always()
         run: |
           mkdir -p matrix-artifact
-          if gcloud compute scp --recurse --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" \
-               --quiet --ssh-key-expire-after="$SSH_KEY_EXPIRE" --scp-flag=-oConnectTimeout=10 \
-               "$VM_NAME:$VM_OUT" matrix-artifact/ 2>/dev/null; then
+          if err=$(gcloud compute scp --recurse --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" \
+               --quiet --ssh-key-expire-after="$SSH_KEY_EXPIRE" \
+               --scp-flag=-oConnectTimeout=10 --scp-flag=-oServerAliveInterval=30 \
+               "$VM_NAME:$VM_OUT" matrix-artifact/ 2>&1); then
             echo "fetched $VM_OUT"
             find matrix-artifact -name '*.json' | sort
           else
-            echo "::warning::could not fetch $VM_OUT (matrix may have failed before writing it)"
+            printf '%s\n' "$err"
+            echo "::warning::could not fetch $VM_OUT (see scp error above)"
           fi
 
       - name: Upload the matrix artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: bench-matrix-${{ github.run_id }}
+          # run_attempt keeps a `gh run rerun` from 409-ing on the immutable per-run artifact name.
+          name: bench-matrix-${{ github.run_id }}-${{ github.run_attempt }}
           path: matrix-artifact/
           if-no-files-found: warn
+
+      - name: Assert the matrix artifact was captured
+        # Closes the one remaining "green with no evidence" path: the matrix ran and passed, but the
+        # scp silently failed. success() ⇒ the Run step (the gate) passed; then matrix.json MUST be
+        # present. This checks artifact presence, not the verdict, so it keeps the decision in the Go
+        # core (ADR-0001).
+        if: success()
+        run: |
+          test -f matrix-artifact/matrix-out/matrix.json || {
+            echo "::error::matrix passed but matrix.json was not fetched — evidence missing"; exit 1; }
 
       - name: Delete the VM
         if: always()
