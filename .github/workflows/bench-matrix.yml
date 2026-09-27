@@ -175,6 +175,8 @@ jobs:
             --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" --quiet \
             --ssh-key-expire-after="$SSH_KEY_EXPIRE" --ssh-flag=-oConnectTimeout=10 \
             --command='set -euo pipefail
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq git
               rm -rf ~/bench
               git clone -q --depth 1 --branch "'"${{ inputs.bench_ref }}"'" https://github.com/sukko-dev/bench.git ~/bench
               cd ~/bench
