@@ -31,6 +31,28 @@ name: Bench Fault Matrix
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "main = build sukko from source (weekly regression pass); release = pull the immutable :vX.Y.Z digests (release gate)"
+        type: choice
+        options: [main, release]
+        default: main
+      sukko_ref:
+        description: "main mode: the sukko git ref to build (default main). release mode: the vX.Y.Z tag (required)."
+        type: string
+        default: main
+      bench_ref:
+        description: "The pinned sukko-dev/bench ref (harness + runner) to run on the VM."
+        type: string
+        default: main
+      scenario:
+        description: "Scenario TOML (blank = the runner default, odds-burst)."
+        type: string
+        default: ""
+      matrix_args:
+        description: "Extra cmd/matrix flags, e.g. '--faults clean,valkey --runs 1' for a scoped check (blank = full matrix)."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -50,18 +72,27 @@ env:
   # runs can never collide on it (the concurrency group already serializes, this is belt).
   VM_NAME: bench-matrix-${{ github.run_id }}
   # Self-destruct backstop: the VM deletes itself after this even if the workflow process
-  # vanishes entirely (no separate reaper — ADR-0001). v2 only boots and smoke-tests, so
-  # 30m is ample; v3's full matrix (build-from-source + faults × N × retry) will raise it.
-  MAX_RUN_DURATION: 1800s
+  # vanishes entirely (no separate reaper — ADR-0001). The full matrix (build-from-source +
+  # faults × N × retry) can run over an hour; 4h leaves generous headroom above the job timeout.
+  MAX_RUN_DURATION: 14400s
+  # SSH key lifetime in project metadata. Must exceed the whole run: the post-run scp connects
+  # after the matrix finishes (60-90 min in), and a 30m-expired key would fail that fetch (a
+  # leaked box + lost artifact). 4h matches the self-destruct. It only bounds accumulation on the
+  # scheduled cadence, so a long lifetime is fine.
+  SSH_KEY_EXPIRE: 4h
+  # Where the runner writes matrix.json + per-run result.json on the VM (absolute, so scp is
+  # unambiguous regardless of the runner's cwd or which user wrote it).
+  VM_OUT: /tmp/matrix-out
 
 jobs:
   matrix:
     name: Fault matrix
     runs-on: ubuntu-latest
-    # Bounds the whole job well under MAX_RUN_DURATION so a wedged step can never let the VM
+    # Bounds the whole job under MAX_RUN_DURATION so a wedged step can never let the VM
     # self-destruct mid-run and read as a mystery failure; a job-timeout cancellation still
-    # runs the always() teardown, so the delete fires before the self-destruct would.
-    timeout-minutes: 20
+    # runs the always() teardown, so the delete fires before the self-destruct would. 150m
+    # covers a full from-source build + the matrix with margin, and stays well under the 4h VM cap.
+    timeout-minutes: 150
     steps:
       - name: Authenticate to GCP (keyless, Workload Identity Federation)
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
@@ -109,7 +140,7 @@ jobs:
         # intentionally absent on the base image (v3 installs it), so its absence is fine here.
         run: |
           ssh_common=(--project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" --quiet
-            --ssh-key-expire-after=30m --ssh-flag=-oConnectTimeout=10)
+            --ssh-key-expire-after="$SSH_KEY_EXPIRE" --ssh-flag=-oConnectTimeout=10)
           reachable=false
           for i in $(seq 1 12); do
             if gcloud compute ssh "$VM_NAME" "${ssh_common[@]}" --command=true; then
@@ -131,6 +162,52 @@ jobs:
             echo "::error::smoke failed on $VM_NAME — box is not the expected c2-standard-8 shape"
             exit 1
           fi
+
+      - name: Run the fault matrix on the VM
+        # Clone the pinned harness on the box and run its committed on-VM runner (ci/vm-run.sh):
+        # install toolchain → resolve sukko images for MODE → `task matrix`. The runner's Go
+        # verdict core is the gate; this workflow only drives it (ADR-0001). A non-zero exit here
+        # is a reproduced regression — it fails the job, and the artifact fetched below carries the
+        # evidence. Env is passed on the remote command line; single-quote so it expands on the VM.
+        # shellcheck disable=SC2016
+        run: |
+          gcloud compute ssh "$VM_NAME" \
+            --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" --quiet \
+            --ssh-key-expire-after="$SSH_KEY_EXPIRE" --ssh-flag=-oConnectTimeout=10 \
+            --command='set -euo pipefail
+              rm -rf ~/bench
+              git clone -q --depth 1 --branch "'"${{ inputs.bench_ref }}"'" https://github.com/sukko-dev/bench.git ~/bench
+              cd ~/bench
+              MODE="'"${{ inputs.mode }}"'" \
+              SUKKO_REF="'"${{ inputs.sukko_ref }}"'" \
+              SCENARIO="'"${{ inputs.scenario }}"'" \
+              MATRIX_ARGS="'"${{ inputs.matrix_args }}"'" \
+              OUT="'"$VM_OUT"'" \
+                bash ci/vm-run.sh'
+
+      - name: Fetch the matrix artifact
+        # Always attempt the fetch — even on a failed matrix the artifact is the evidence (matrix.json
+        # + per-run result.json). Runs before the delete step (which is always()), so the box still
+        # exists here. A fetch failure is surfaced, not masked.
+        if: always()
+        run: |
+          mkdir -p matrix-artifact
+          if gcloud compute scp --recurse --project "${{ vars.GCP_PROJECT }}" --zone "${{ vars.GCP_ZONE }}" \
+               --quiet --ssh-key-expire-after="$SSH_KEY_EXPIRE" --scp-flag=-oConnectTimeout=10 \
+               "$VM_NAME:$VM_OUT" matrix-artifact/ 2>/dev/null; then
+            echo "fetched $VM_OUT"
+            find matrix-artifact -name '*.json' | sort
+          else
+            echo "::warning::could not fetch $VM_OUT (matrix may have failed before writing it)"
+          fi
+
+      - name: Upload the matrix artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bench-matrix-${{ github.run_id }}
+          path: matrix-artifact/
+          if-no-files-found: warn
 
       - name: Delete the VM
         if: always()
