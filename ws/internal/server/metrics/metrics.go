@@ -683,6 +683,17 @@ var ReconnectChannelDenied = promauto.NewCounter(prometheus.CounterOpts{
 	Help: "Reconnect last_pos channels denied because they are not owned by the connection's authenticated tenant.",
 })
 
+// ReconnectChannelLimitExceeded counts NEW reconnect last_pos channels skipped
+// because registering them would exceed WS_MAX_CHANNELS_PER_CLIENT (ADR-0026 —
+// reconnect registers live delivery for last_pos channels, so the same per-client
+// cap applies as on subscribe). Already-held channels are exempt and never count
+// here. A nonzero rate means clients are re-homing more channels than the
+// per-client limit and losing replay coverage on the excess.
+var ReconnectChannelLimitExceeded = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "ws_reconnect_channel_limit_exceeded_total",
+	Help: "Reconnect last_pos channels skipped because registering them would exceed the per-client channel limit.",
+})
+
 // =============================================================================
 // HTTP Handler
 // =============================================================================

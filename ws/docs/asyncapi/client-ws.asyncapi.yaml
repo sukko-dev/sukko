@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 
 info:
   title: Sukko WebSocket Client API
-  version: 1.4.2
+  version: 1.4.3
   description: |
     Real-time WebSocket API for subscribing to chat events and publishing messages.
 
@@ -282,6 +282,16 @@ operations:
       connection's authenticated tenant — a channel belonging to another tenant is
       silently ignored and never replayed. If no named channel is replayable, the
       server returns a reconnect_ack with messages_replayed 0 (not an error).
+
+      The server also begins live delivery for those tenant-authorized last_pos
+      channels immediately, before the replay runs, so no message is lost in the seam
+      between the replay snapshot and a later subscribe. As a result, live `message`
+      frames for these channels may arrive during or right after replay and may
+      overlap replayed messages; clients deduplicate by `mid` and order by `pos`,
+      exactly as for mid-session gap replay. A subsequent explicit `subscribe` for the
+      same channels is an idempotent re-add. If last_pos names more channels than
+      WS_MAX_CHANNELS_PER_CLIENT allows, the excess new channels are skipped (a
+      legitimate client can never have held more than the limit before disconnecting).
     messages:
       - $ref: "#/channels/clientSend/messages/reconnect"
 

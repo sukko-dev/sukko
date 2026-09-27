@@ -64,7 +64,8 @@ type mockBackend struct {
 	replayErr     error
 	lastReplayReq backend.ReplayRequest
 	blockCh       chan struct{}
-	notReady      bool // when true, Ready() reports false (readiness gate tests); default = ready
+	notReady      bool   // when true, Ready() reports false (readiness gate tests); default = ready
+	onReplay      func() // optional hook invoked when Replay is entered — lets a test observe state at replay time
 }
 
 func (m *mockBackend) Start(_ context.Context) error { return nil }
@@ -77,7 +78,12 @@ func (m *mockBackend) Replay(ctx context.Context, req backend.ReplayRequest) ([]
 	blockCh := m.blockCh
 	msgs := m.replayMsgs
 	err := m.replayErr
+	hook := m.onReplay
 	m.mu.Unlock()
+
+	if hook != nil {
+		hook()
+	}
 
 	if blockCh != nil {
 		select {

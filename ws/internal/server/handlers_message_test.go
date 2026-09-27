@@ -1035,13 +1035,15 @@ func newReconnectTestServer(t *testing.T, mb *mockBackend) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	return &Server{
-		backend: mb,
-		logger:  zerolog.Nop(),
-		ctx:     ctx,
-		stats:   stats.NewStats(),
+		backend:           mb,
+		logger:            zerolog.Nop(),
+		ctx:               ctx,
+		stats:             stats.NewStats(),
+		subscriptionIndex: NewSubscriptionIndex(), // handleReconnect registers live delivery here (ADR-0026)
 		config: &platform.ServerConfig{
-			ReplayTimeout:     2 * time.Second,
-			MaxReplayMessages: 100,
+			ReplayTimeout:        2 * time.Second,
+			MaxReplayMessages:    100,
+			MaxChannelsPerClient: 100,
 		},
 	}
 }
