@@ -260,17 +260,27 @@ func TestRoutingRuleWrites_PerTenantLockScoping(t *testing.T) {
 	}
 
 	// No leaked pool connections. The two blocked writes above each timed out
-	// inside pg_advisory_xact_lock — the exact path a conditional/ shadowed-err
-	// rollback abandons, leaking a checked-out connection permanently. With the
-	// unconditional deferred rollback every write returns its connection, so once
-	// lockTx is released and the final Add commits the pool is fully idle.
-	// (Poll briefly: pgxpool returns connections synchronously on Commit/Rollback,
-	// but the lock-holding lockTx.Rollback above may settle a beat later.)
-	// pgxpool returns a connection synchronously on Commit/Rollback, so once the
-	// lock-holding lockTx.Rollback (step 3) and the final Add's Commit have both
-	// returned, every connection is back in the pool. A nonzero count here means a
-	// blocked write above returned without rolling back — the leak this guards.
-	if acquired := h.pool.Stat().AcquiredConns(); acquired != 0 {
+	// inside pg_advisory_xact_lock, then unwound through their unconditional
+	// `defer tx.Rollback(ctx)` (routing_rules.go) — the path a conditional or
+	// shadowed-err rollback would abandon, leaking a checked-out connection
+	// permanently.
+	//
+	// That rollback runs with an already-canceled context, so pgxpool cannot
+	// cleanly reset the connection it just canceled a query on and instead
+	// destroys and replaces it — a return that completes ASYNCHRONOUSLY, a beat
+	// after the write call returns. So poll rather than read once: a transient
+	// async return settles in milliseconds, while a genuine leak never clears and
+	// the bounded wait still fails (the guard this test exists for).
+	var acquired int32
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		acquired = h.pool.Stat().AcquiredConns()
+		if acquired == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired != 0 {
 		t.Fatalf("pool has %d acquired connections after all writes settled, want 0 — a blocked write leaked its transaction", acquired)
 	}
 }
