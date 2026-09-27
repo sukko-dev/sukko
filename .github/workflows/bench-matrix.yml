@@ -60,6 +60,8 @@ permissions:
   # Required for keyless Workload Identity Federation: the job mints a GitHub OIDC
   # token and exchanges it for short-lived Google credentials.
   id-token: write
+  # The alert step opens / updates / closes the de-duped `bench-regression` issue.
+  issues: write
 
 concurrency:
   # One run at a time, never cancelled. C2_CPUS quota in the bench region is exactly
@@ -233,6 +235,63 @@ jobs:
         run: |
           test -f matrix-artifact/matrix-out/matrix.json || {
             echo "::error::matrix passed but matrix.json was not fetched — evidence missing"; exit 1; }
+
+      - name: Alert on a reproduced regression
+        # Reporting, not verdict (the verdict is matrix.json's `ok`, decided by the Go core). On a
+        # reproduced regression (ok=false) open — or update, de-duped by the bench-regression label —
+        # a GitHub issue carrying the fault table + this run's link; on green, auto-close any open one
+        # so the tracker reflects current state. No matrix.json means the matrix never completed (an
+        # infra failure, already red via the Run step) — not a regression, so the issue is left alone.
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT: bench-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          mj=matrix-artifact/matrix-out/matrix.json
+          if [ ! -f "$mj" ]; then
+            echo "no matrix.json — the matrix did not complete (infra failure, not a regression); leaving the issue untouched"
+            exit 0
+          fi
+          ok=$(jq -r '.ok' "$mj")
+          existing=$(gh issue list --repo "$REPO" --label bench-regression --state open \
+            --json number --jq '.[0].number // empty')
+
+          if [ "$ok" = "true" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --repo "$REPO" \
+                --comment "Fault matrix green again — auto-closing. Run: $RUN_URL"
+              echo "closed bench-regression issue #$existing (recovered)"
+            else
+              echo "green, no open bench-regression issue — nothing to do"
+            fi
+            exit 0
+          fi
+
+          # ok=false → a reproduced regression. Build a compact table + the failing reasons.
+          table=$(jq -r '
+            "| fault | verdict | retried | holes |",
+            "|---|---|---|---|",
+            (.faults[] | "| \(.fault) | \(if .ok then "PASS" else "**FAIL**" end) | \(.retried // false) | \((.runs | map(.holes) | max) // 0) |")
+          ' "$mj")
+          # SC2016: `$f` is a jq variable in the single-quoted jq program, not a shell expansion.
+          # shellcheck disable=SC2016
+          reasons=$(jq -r '
+            [.faults[] | select(.ok | not) | .fault as $f
+             | (.runs[] | select(.ok | not) | "- **\($f)**: \(.reasons | join("; "))")] | join("\n")
+          ' "$mj")
+          body=$(printf '%s\n\n**Failing runs:**\n%s\n\n**Run:** %s\n**Artifact:** %s\n' \
+            "$table" "$reasons" "$RUN_URL" "$ARTIFACT")
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+            echo "updated bench-regression issue #$existing"
+          else
+            gh issue create --repo "$REPO" --label bench-regression \
+              --title "Fault-matrix regression detected" --body "$body"
+            echo "opened a bench-regression issue"
+          fi
 
       - name: Delete the VM
         if: always()
