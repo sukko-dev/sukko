@@ -974,10 +974,20 @@ func TestHistoryWriter_HeartbeatDualMode(t *testing.T) {
 	// FastForward miniredis clock past the key TTL so the key expires on the next access.
 	mr2.FastForward(300 * time.Millisecond)
 
-	// Wait for a heartbeat tick to fire and acquire the now-expired lock.
-	time.Sleep(50 * time.Millisecond)
-
-	active := prometheustestutil.ToFloat64(w2.Metrics().WriterActive)
+	// Poll for the passive writer to acquire the now-expired lock on a heartbeat
+	// tick. The writer ticks every 20ms in real time; under CI scheduling latency
+	// a single fixed sleep is not enough to guarantee a tick has fired and the
+	// acquire has completed — that is what made this assertion flaky. A genuine
+	// failure to acquire never flips the metric, so the bounded wait still fails.
+	var active float64
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		active = prometheustestutil.ToFloat64(w2.Metrics().WriterActive)
+		if active == 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	cancel2()
 	wg2.Wait()
 
