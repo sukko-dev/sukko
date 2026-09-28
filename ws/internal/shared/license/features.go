@@ -99,9 +99,12 @@ const (
 
 	// Note: the AuditLogging gate covers only the audit-log query API (GET /audit-log). Audit record writes are unconditional — not gated.
 	AuditLogging Feature = "audit logging" // Implemented
-	// MobilePush (FCM + APNs) is frozen per ADR-0009 — e2e-unvalidated; no
-	// further investment until a buyer asks. The gate stays enforced.
-	MobilePush          Feature = "mobile push notifications (FCM + APNs)" // Implemented
+	// MobilePush (FCM + APNs) is implemented in code but e2e-unvalidated (#175)
+	// and frozen per ADR-0009 — no further investment until a buyer asks. It is
+	// therefore advertised as planned (StatusFuture below), not supported. The
+	// Enterprise gate stays enforced so any tenant already wired to it is not
+	// stranded; this is a positioning change only.
+	MobilePush          Feature = "mobile push notifications (FCM + APNs)" // Future
 	IPAllowlisting      Feature = "per-tenant IP allowlisting"             // Future
 	PriorityRouting     Feature = "priority message routing"               // Future
 	CustomQuotaPolicies Feature = "custom quota policies"                  // Future
@@ -180,7 +183,6 @@ var featureMetadata = map[Feature]FeatureInfo{
 
 	// Note: AuditLogging covers only the audit-log query API (GET /audit-log); writes are unconditional.
 	AuditLogging: {Description: "Audit trail of all provisioning API actions", Status: StatusImplemented, Priority: PriorityNone},
-	MobilePush:   {Description: "Mobile push notifications (FCM + APNs)", Status: StatusImplemented, Priority: PriorityNone},
 
 	// ── Future — Pro ─────────────────────────────────────────────────────
 
@@ -189,6 +191,9 @@ var featureMetadata = map[Feature]FeatureInfo{
 
 	// ── Future — Enterprise ──────────────────────────────────────────────
 
+	// MobilePush is implemented but frozen and e2e-unvalidated (ADR-0009); listed
+	// as planned rather than supported. The Enterprise gate stays enforced.
+	MobilePush:          {Description: "Mobile push notifications (FCM + APNs)", Status: StatusFuture, Priority: PriorityLow},
 	IPAllowlisting:      {Description: "Per-tenant IP allowlisting for connection filtering", Status: StatusFuture, Priority: PriorityLow},
 	PriorityRouting:     {Description: "Priority-based message delivery under load", Status: StatusFuture, Priority: PriorityLow},
 	CustomQuotaPolicies: {Description: "Tenant-specific quota rules beyond simple limits", Status: StatusFuture, Priority: PriorityLow},
