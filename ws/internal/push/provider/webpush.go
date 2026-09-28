@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/rs/zerolog"
@@ -24,6 +26,7 @@ type vapidCredentials struct {
 type WebPushProvider struct {
 	logger     zerolog.Logger
 	lookupCred CredentialLookup
+	httpClient *http.Client
 }
 
 // NewWebPushProvider creates a Web Push provider that resolves VAPID keys per
@@ -32,9 +35,27 @@ func NewWebPushProvider(logger zerolog.Logger, lookupCred CredentialLookup) (*We
 	if lookupCred == nil {
 		return nil, errors.New("creating webpush provider: credential lookup function is required")
 	}
+	// Own the outbound transport rather than sharing http.DefaultTransport: the
+	// provider then has an isolated connection pool that is not disturbed by
+	// unrelated callers of DefaultTransport.CloseIdleConnections() (e.g. an
+	// httptest server shutting down elsewhere in the process), and cannot pollute
+	// the global pool in turn. Fields mirror net/http's DefaultTransport tuning.
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 	return &WebPushProvider{
 		logger:     logger.With().Str("provider", "webpush").Logger(),
 		lookupCred: lookupCred,
+		httpClient: &http.Client{Transport: transport},
 	}, nil
 }
 
@@ -76,6 +97,7 @@ func (p *WebPushProvider) Send(ctx context.Context, job PushJob) error {
 	}
 
 	opts := &webpush.Options{
+		HTTPClient:      p.httpClient,
 		Subscriber:      creds.VAPIDContact,
 		VAPIDPublicKey:  creds.VAPIDPublicKey,
 		VAPIDPrivateKey: creds.VAPIDPrivateKey,
