@@ -115,15 +115,23 @@ func (s *Server) handleClientMessage(c *Client, data []byte) {
 			return
 		}
 
-		// Enforce per-client channel limit before subscribing.
-		// Check remaining capacity against the full batch — a batch of 5 against a limit of 100
-		// with count=99 must be rejected, not partially admitted.
-		remaining := s.config.MaxChannelsPerClient - c.subscriptions.Count()
-		if remaining <= 0 || len(channels) > remaining {
+		// Enforce per-client channel limit before subscribing. Count only channels NOT already
+		// subscribed: re-subscribing a channel the client already holds is idempotent and must not
+		// consume limit budget. This makes the resume `subscribe` after a reconnect (which re-sends
+		// the whole desired set, already registered by handleReconnect per ADR-0026) a free re-add,
+		// and still rejects a batch that would push the resulting set past the cap.
+		newChannels := 0
+		for _, ch := range channels {
+			if !c.subscriptions.Has(ch) {
+				newChannels++
+			}
+		}
+		if c.subscriptions.Count()+newChannels > s.config.MaxChannelsPerClient {
 			s.logger.Warn().
 				Int64("client_id", c.id).
 				Int("limit", s.config.MaxChannelsPerClient).
-				Int("requested", len(channels)).
+				Int("requested_new", newChannels).
+				Int("current", c.subscriptions.Count()).
 				Msg("Client exceeded channel subscription limit")
 			s.sendErrorToClient(c, RespTypeSubscribeError, protocol.ErrCodeSubscribeLimitExceeded, "channel subscription limit reached")
 			return
@@ -311,6 +319,7 @@ func (s *Server) handleReconnect(c *Client, data []byte) {
 	// reconnect before subscribe — passing that empty set let the replay fail
 	// open and dump every channel on the shared topic to the client.
 	authorizedChannels := make([]string, 0, len(reconnectReq.LastPos))
+	newChannels := 0 // channels not already held; only these grow the subscription set toward the cap
 	for channel, posStr := range reconnectReq.LastPos {
 		// L1 authorization: a client may only replay channels owned by its
 		// authenticated tenant. Denied channels are skipped, logged, and counted
@@ -344,6 +353,28 @@ func (s *Server) handleReconnect(c *Client, data []byte) {
 				Msg("handleReconnect: no topic mapping for channel — channel skipped")
 			continue
 		}
+		// §IX: cap reconnect registration + replay at the per-client channel limit, exactly as the
+		// subscribe path does. handleReconnect now registers authorizedChannels for live delivery
+		// (ADR-0026), so without this cap a client could name thousands of last_pos channels — every
+		// tenant-prefixed name resolves to a topic — and have them all registered in the index and
+		// replayed (fan-out amplification, defeating MaxChannelsPerClient). Only genuinely-new
+		// channels count toward the cap: a channel already held adds zero live fan-out, and a client
+		// re-homing its existing K channels at K == limit must still have them replayed (counting a
+		// held channel twice — once in Count(), once in the loop — would break the reconnect and ack
+		// a false "completed"). Skip only the over-budget NEW channel and keep scanning, so held
+		// channels later in map order are still replayed.
+		if !c.subscriptions.Has(channel) {
+			if c.subscriptions.Count()+newChannels >= s.config.MaxChannelsPerClient {
+				metrics.ReconnectChannelLimitExceeded.Inc()
+				s.logger.Warn().
+					Int64("client_id", c.id).
+					Str("channel", channel).
+					Int("limit", s.config.MaxChannelsPerClient).
+					Msg("handleReconnect: new channel over per-client limit — channel skipped")
+				continue
+			}
+			newChannels++
+		}
 		nextOffset := offset + 1 // replay from the message AFTER the last received
 		if positions[topic] == nil {
 			positions[topic] = make(map[int32]int64)
@@ -373,6 +404,26 @@ func (s *Server) handleReconnect(c *Client, data []byte) {
 			}
 		}
 		return
+	}
+
+	// ADR-0026: register live delivery for the tenant-validated last_pos channels BEFORE replaying,
+	// closing the replay↔live seam. On the reconnect-then-subscribe protocol, the replay is a Kafka
+	// snapshot up to now and live delivery would otherwise begin only when a later `subscribe`
+	// registers the client — so a message reaching the bus after the snapshot but before that
+	// subscribe is lost by both. Registering first means the two windows overlap; the client dedupes
+	// the overlap by `mid` (ADR-0008), exactly as it already does for mid-session gap replay. The
+	// client's subsequent explicit subscribe is an idempotent re-add. Both calls are non-blocking
+	// map operations and live fan-out is already non-blocking, so the hot path is unaffected (§VII).
+	c.subscriptions.AddMultiple(authorizedChannels)
+	s.subscriptionIndex.AddMultiple(authorizedChannels, c)
+
+	// Push subscribe event to registry so the connections view reflects the live subscriptions
+	// registered on reconnect — not only those from a later explicit subscribe (§XVIII: same
+	// pairing as the subscribe path; snapshot after add, non-blocking).
+	if s.config != nil && s.config.ConnectionsRegistryEnabled && s.registryWriter != nil && c.connID != "" {
+		snapshot := c.subscriptions.List()
+		capped := len(snapshot) >= s.config.MaxChannelsPerClient
+		s.registryWriter.PushSubscribe(c.connID, snapshot, capped)
 	}
 
 	// Create context with timeout for replay operation

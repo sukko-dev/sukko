@@ -36,6 +36,7 @@ func newReplayTestServer(t *testing.T, mb *mockBackend) *Server {
 			MaxReplayMessages:       100,
 			ReplayTimeout:           10 * time.Second,
 			ReplayRateLimitInterval: 10 * time.Second,
+			MaxChannelsPerClient:    100,
 		},
 	}
 }
