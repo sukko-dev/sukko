@@ -60,6 +60,8 @@ permissions:
   # Required for keyless Workload Identity Federation: the job mints a GitHub OIDC
   # token and exchanges it for short-lived Google credentials.
   id-token: write
+  # The alert step opens / updates / closes the de-duped `bench-regression` issue.
+  issues: write
 
 concurrency:
   # One run at a time, never cancelled. C2_CPUS quota in the bench region is exactly
@@ -165,6 +167,7 @@ jobs:
           fi
 
       - name: Run the fault matrix on the VM
+        id: matrix_run
         # Clone the pinned harness on the box and run its committed on-VM runner (ci/vm-run.sh):
         # install toolchain → resolve sukko images for MODE → `task matrix`. The runner's Go
         # verdict core is the gate; this workflow only drives it (ADR-0001). A non-zero exit here
@@ -233,6 +236,111 @@ jobs:
         run: |
           test -f matrix-artifact/matrix-out/matrix.json || {
             echo "::error::matrix passed but matrix.json was not fetched — evidence missing"; exit 1; }
+
+      - name: Alert on a reproduced regression
+        # Reporting, not verdict (the verdict is matrix.json's `ok`, decided by the Go core). Only a
+        # WEEKLY FULL MAIN run — no scenario/matrix_args narrowing, main mode, main ref (a schedule
+        # event has empty inputs, which reads as exactly that) — may open or close the de-duped
+        # bench-regression issue: its verdict speaks for main. A scoped or off-ref dispatch is
+        # exploratory (someone triaging or bisecting), so it must never erase a standing alert nor
+        # invent one about code that isn't main — it only logs. (Release-gate alerting is deferred to
+        # the release trigger in Part F.)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT: bench-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          MODE: ${{ inputs.mode }}
+          SUKKO_REF: ${{ inputs.sukko_ref }}
+          SCENARIO: ${{ inputs.scenario }}
+          MATRIX_ARGS: ${{ inputs.matrix_args }}
+          RUN_OUTCOME: ${{ steps.matrix_run.outcome }}
+        run: |
+          ctx=$(printf 'mode=%s sukko_ref=%s scenario=%s matrix_args=[%s]' \
+            "${MODE:-main}" "${SUKKO_REF:-main}" "${SCENARIO:-<default>}" "$MATRIX_ARGS")
+          open_issue() {
+            gh issue list --repo "$REPO" --label bench-regression --state open --json number --jq '.[0].number // empty'
+          }
+          # Full default = the verdict speaks for main. Empty inputs (a schedule event) satisfy it.
+          full_default=false
+          if [ -z "$MATRIX_ARGS" ] && [ -z "$SCENARIO" ] \
+             && { [ "$MODE" = "main" ] || [ -z "$MODE" ]; } \
+             && { [ "$SUKKO_REF" = "main" ] || [ -z "$SUKKO_REF" ]; }; then
+            full_default=true
+          fi
+
+          mj=matrix-artifact/matrix-out/matrix.json
+          if [ ! -f "$mj" ]; then
+            # No local matrix.json = the matrix never completed OR it completed but the fetch failed
+            # (the Fetch step tolerates scp failure). Either way we cannot read the verdict, so never
+            # open/close on it — but if the run went red, say so loudly (a regression's evidence may
+            # have been lost), and note it on any standing issue.
+            if [ "$RUN_OUTCOME" = "failure" ]; then
+              echo "::warning::the matrix run failed and no matrix.json was fetched — a regression with a lost artifact or an infra failure; investigate $RUN_URL"
+              if [ "$full_default" = true ]; then
+                existing=$(open_issue)
+                [ -n "$existing" ] && gh issue comment "$existing" --repo "$REPO" \
+                  --body "A gate run failed without producing matrix.json — evidence missing. Context: $ctx. Run: $RUN_URL" || true
+              fi
+            else
+              echo "::warning::no matrix.json (matrix did not complete, or the fetch failed); nothing to report"
+            fi
+            exit 0
+          fi
+
+          ok=$(jq -r '.ok' "$mj")
+          if [ "$ok" != "true" ] && [ "$ok" != "false" ]; then
+            echo "::warning::matrix.json has an indeterminate ok='$ok' (schema drift?); leaving the tracker untouched"
+            exit 0
+          fi
+
+          if [ "$full_default" != true ]; then
+            echo "non-default dispatch ($ctx), verdict ok=$ok — exploratory, not touching the bench-regression tracker"
+            exit 0
+          fi
+
+          existing=$(open_issue)
+          if [ "$ok" = "true" ]; then
+            if [ -n "$existing" ]; then
+              # Tolerate a close failure with a warning: a transient gh blip must not redden a green
+              # verdict (reporting != verdict). Opening/commenting a regression stays fail-loud below.
+              if gh issue close "$existing" --repo "$REPO" \
+                   --comment "Fault matrix green again — auto-closing. $ctx. Run: $RUN_URL"; then
+                echo "closed bench-regression issue #$existing (recovered)"
+              else
+                echo "::warning::failed to close #$existing (green verdict stands regardless)"
+              fi
+            else
+              echo "green, no open bench-regression issue — nothing to do"
+            fi
+            exit 0
+          fi
+
+          # ok=false on a full default run → a reproduced main regression. Build a table + reasons,
+          # tolerating schema edges (missing runs/reasons) so the alert still fires when it matters.
+          table=$(jq -r '
+            "| fault | verdict | retried | holes |",
+            "|---|---|---|---|",
+            (.faults[] | "| \(.fault) | \(if .ok then "PASS" else "**FAIL**" end) | \(.retried // false) | \(((.runs // []) | map(.holes) | max) // 0) |")
+          ' "$mj")
+          # SC2016: `$f` is a jq variable in the single-quoted jq program, not a shell expansion.
+          # shellcheck disable=SC2016
+          reasons=$(jq -r '
+            [.faults[] | select(.ok | not) | .fault as $f
+             | ((.runs // [])[] | select(.ok | not) | "- **\($f)**: \((.reasons // []) | join("; "))")] | join("\n")
+          ' "$mj")
+          body=$(printf '%s\n\n**Failing runs:**\n%s\n\n**Context:** %s\n**Run:** %s\n**Artifact:** %s\n' \
+            "$table" "$reasons" "$ctx" "$RUN_URL" "$ARTIFACT")
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+            echo "updated bench-regression issue #$existing"
+          else
+            gh issue create --repo "$REPO" --label bench-regression \
+              --title "Fault-matrix regression detected" --body "$body"
+            echo "opened a bench-regression issue"
+          fi
 
       - name: Delete the VM
         if: always()
