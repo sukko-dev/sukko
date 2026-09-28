@@ -899,9 +899,13 @@ func TestHistoryWriter_BackoffResetAfterSuccess(t *testing.T) {
 	// Phase 2: force failure — because processed > 0, backoff resets to initialBackoff (10ms).
 	bus.setHealthy(false)
 
-	// The restart cycle should complete in ~(10ms hb + [10ms,20ms) backoff) = ~20-30ms.
-	// Without the reset, after 3+ failures backoff would be ≥80ms and no restart in 60ms.
-	deadline := time.Now().Add(60 * time.Millisecond)
+	// Because the prior run processed > 0 messages, the supervisor resets the restart
+	// backoff to its initial value, so the restart after this failure fires promptly.
+	// Poll for it with a generous deadline rather than racing a tight fixed one — the
+	// original 60ms wall-clock window was the flake: under CI scheduling latency even a
+	// ~10ms-backoff restart can land later than 60ms. The deadline only bounds the wait;
+	// a restart that never fires still fails the assertion, so the guard is preserved.
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if prometheustestutil.ToFloat64(w.Metrics().WriterRestartTotal) >= 1 {
 			break
