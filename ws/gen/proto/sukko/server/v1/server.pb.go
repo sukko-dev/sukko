@@ -250,11 +250,13 @@ func (x *SubscribeRequest) GetLastPos() map[string]string {
 // SubscribeResponse is a message delivered on the subscription stream.
 type SubscribeResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// sequence is the per-connection monotonic sequence number.
-	// Used by the gateway as the SSE id: field for Last-Event-ID reconnection.
+	// sequence is the per-connection monotonic counter (diagnostics only). The SSE
+	// reconnect id: is now an opaque per-channel cursor the gateway builds from the
+	// delivered messages' pos (ADR-0030); this field is no longer the resume token.
 	Sequence int64 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	// payload is the full JSON envelope from BroadcastEnvelope.Build(seq).
-	// Written as-is to the SSE data: line. No parsing needed by the gateway.
+	// payload is the full JSON envelope from BroadcastEnvelope.Build(seq), written
+	// as-is to the SSE data: line. The gateway also reads its channel and pos to
+	// maintain the opaque Last-Event-ID reconnect cursor (ADR-0030).
 	Payload       []byte `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

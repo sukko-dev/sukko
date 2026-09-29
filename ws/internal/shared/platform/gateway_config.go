@@ -74,6 +74,8 @@ type GatewayConfig struct {
 	PushEnabled          bool          `env:"GATEWAY_PUSH_ENABLED" envDefault:"false"`              // Enables the gateway's push endpoints and push-service client; when false the /api/v1/push/* routes are not registered (404) and no push connection is made. Explicit deployment mode — the push service is deploy-optional.
 	PushGRPCAddr         string        `env:"PUSH_GRPC_ADDR" envDefault:"localhost:3008"`           // Push service gRPC address for device registration and VAPID key endpoints; required (and used) only when GATEWAY_PUSH_ENABLED=true.
 	SSEKeepAliveInterval time.Duration `env:"SSE_KEEPALIVE_INTERVAL" envDefault:"45s"`              // Interval for SSE keepalive messages sent to prevent proxy timeouts on long-lived connections.
+	SSECursorEveryN      int           `env:"SSE_CURSOR_EVERY_N" envDefault:"20"`                   // Emit the Last-Event-ID reconnect cursor at most every Nth delivered SSE message (and on each keepalive tick if it advanced), keeping the per-message delivery path light; a client resuming from a slightly-stale cursor replays a few extra messages, deduplicated by mid.
+	SSEMaxChannels       int           `env:"SSE_MAX_CHANNELS" envDefault:"64"`                     // Maximum channels a single SSE connection may subscribe to; bounds the reconnect cursor token so it stays within request-header size limits.
 	CORSAllowedOrigins   []string      `env:"GATEWAY_CORS_ORIGINS" envDefault:"*" envSeparator:","` // CORS allowed origins (* = all, production: restrict)
 
 	// Channel rules provider cache TTLs
@@ -223,6 +225,12 @@ func (c *GatewayConfig) Validate() error {
 	}
 	if c.SSEKeepAliveInterval <= 0 {
 		return fmt.Errorf("SSE_KEEPALIVE_INTERVAL must be > 0, got %v", c.SSEKeepAliveInterval)
+	}
+	if c.SSEMaxChannels <= 0 {
+		return fmt.Errorf("SSE_MAX_CHANNELS must be > 0, got %d", c.SSEMaxChannels)
+	}
+	if c.SSECursorEveryN < 0 {
+		return fmt.Errorf("SSE_CURSOR_EVERY_N must be >= 0 (0 emits the reconnect cursor only on the first message and keepalive ticks), got %d", c.SSECursorEveryN)
 	}
 	if len(c.CORSAllowedOrigins) == 0 {
 		return errors.New("GATEWAY_CORS_ORIGINS must have at least one entry")

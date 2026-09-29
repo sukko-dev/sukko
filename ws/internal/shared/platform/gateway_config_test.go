@@ -46,6 +46,8 @@ func newValidGatewayConfig() *GatewayConfig {
 		ServerGRPCAddr:               "localhost:3006",
 		PushGRPCAddr:                 "localhost:3008",
 		SSEKeepAliveInterval:         45 * time.Second,
+		SSECursorEveryN:              20,
+		SSEMaxChannels:               64,
 		CORSAllowedOrigins:           []string{"*"},
 	}
 }
