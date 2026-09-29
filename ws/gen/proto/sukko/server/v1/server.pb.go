@@ -170,7 +170,14 @@ type SubscribeRequest struct {
 	// channels is the list of channels to subscribe to.
 	Channels []string `protobuf:"bytes,3,rep,name=channels,proto3" json:"channels,omitempty"`
 	// remote_addr is the original client IP (for logging/metrics).
-	RemoteAddr    string `protobuf:"bytes,4,opt,name=remote_addr,json=remoteAddr,proto3" json:"remote_addr,omitempty"`
+	RemoteAddr string `protobuf:"bytes,4,opt,name=remote_addr,json=remoteAddr,proto3" json:"remote_addr,omitempty"`
+	// last_pos requests replay of missed messages per channel on reconnect: a map
+	// of channel -> "(partition+1)-offset" (the same cursor shape as the WebSocket
+	// reconnect last_pos). When present, the server registers the live subscription
+	// first, then replays last_pos..now for each tenant-validated channel, so no
+	// message falls into a seam between the replay snapshot and live delivery
+	// (ADR-0026 ordering, ADR-0030). Empty for a fresh subscription.
+	LastPos       map[string]string `protobuf:"bytes,5,rep,name=last_pos,json=lastPos,proto3" json:"last_pos,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -231,6 +238,13 @@ func (x *SubscribeRequest) GetRemoteAddr() string {
 		return x.RemoteAddr
 	}
 	return ""
+}
+
+func (x *SubscribeRequest) GetLastPos() map[string]string {
+	if x != nil {
+		return x.LastPos
+	}
+	return nil
 }
 
 // SubscribeResponse is a message delivered on the subscription stream.
@@ -304,14 +318,18 @@ const file_sukko_server_v1_server_proto_rawDesc = "" +
 	"\x0fPublishResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x18\n" +
 	"\achannel\x18\x02 \x01(\tR\achannel\x12\x10\n" +
-	"\x03mid\x18\x03 \x01(\tR\x03mid\"\x8e\x01\n" +
+	"\x03mid\x18\x03 \x01(\tR\x03mid\"\x95\x02\n" +
 	"\x10SubscribeRequest\x12\x1f\n" +
 	"\vtenant_slug\x18\x01 \x01(\tR\n" +
 	"tenantSlug\x12\x1c\n" +
 	"\tprincipal\x18\x02 \x01(\tR\tprincipal\x12\x1a\n" +
 	"\bchannels\x18\x03 \x03(\tR\bchannels\x12\x1f\n" +
 	"\vremote_addr\x18\x04 \x01(\tR\n" +
-	"remoteAddr\"I\n" +
+	"remoteAddr\x12I\n" +
+	"\blast_pos\x18\x05 \x03(\v2..sukko.server.v1.SubscribeRequest.LastPosEntryR\alastPos\x1a:\n" +
+	"\fLastPosEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"I\n" +
 	"\x11SubscribeResponse\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x03R\bsequence\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload2\xb5\x01\n" +
@@ -331,23 +349,25 @@ func file_sukko_server_v1_server_proto_rawDescGZIP() []byte {
 	return file_sukko_server_v1_server_proto_rawDescData
 }
 
-var file_sukko_server_v1_server_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_sukko_server_v1_server_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_sukko_server_v1_server_proto_goTypes = []any{
 	(*PublishRequest)(nil),    // 0: sukko.server.v1.PublishRequest
 	(*PublishResponse)(nil),   // 1: sukko.server.v1.PublishResponse
 	(*SubscribeRequest)(nil),  // 2: sukko.server.v1.SubscribeRequest
 	(*SubscribeResponse)(nil), // 3: sukko.server.v1.SubscribeResponse
+	nil,                       // 4: sukko.server.v1.SubscribeRequest.LastPosEntry
 }
 var file_sukko_server_v1_server_proto_depIdxs = []int32{
-	0, // 0: sukko.server.v1.RealtimeService.Publish:input_type -> sukko.server.v1.PublishRequest
-	2, // 1: sukko.server.v1.RealtimeService.Subscribe:input_type -> sukko.server.v1.SubscribeRequest
-	1, // 2: sukko.server.v1.RealtimeService.Publish:output_type -> sukko.server.v1.PublishResponse
-	3, // 3: sukko.server.v1.RealtimeService.Subscribe:output_type -> sukko.server.v1.SubscribeResponse
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	4, // 0: sukko.server.v1.SubscribeRequest.last_pos:type_name -> sukko.server.v1.SubscribeRequest.LastPosEntry
+	0, // 1: sukko.server.v1.RealtimeService.Publish:input_type -> sukko.server.v1.PublishRequest
+	2, // 2: sukko.server.v1.RealtimeService.Subscribe:input_type -> sukko.server.v1.SubscribeRequest
+	1, // 3: sukko.server.v1.RealtimeService.Publish:output_type -> sukko.server.v1.PublishResponse
+	3, // 4: sukko.server.v1.RealtimeService.Subscribe:output_type -> sukko.server.v1.SubscribeResponse
+	3, // [3:5] is the sub-list for method output_type
+	1, // [1:3] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_sukko_server_v1_server_proto_init() }
@@ -361,7 +381,7 @@ func file_sukko_server_v1_server_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_sukko_server_v1_server_proto_rawDesc), len(file_sukko_server_v1_server_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

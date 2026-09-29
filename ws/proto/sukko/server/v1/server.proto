@@ -61,6 +61,14 @@ message SubscribeRequest {
 
   // remote_addr is the original client IP (for logging/metrics).
   string remote_addr = 4;
+
+  // last_pos requests replay of missed messages per channel on reconnect: a map
+  // of channel -> "(partition+1)-offset" (the same cursor shape as the WebSocket
+  // reconnect last_pos). When present, the server registers the live subscription
+  // first, then replays last_pos..now for each tenant-validated channel, so no
+  // message falls into a seam between the replay snapshot and live delivery
+  // (ADR-0026 ordering, ADR-0030). Empty for a fresh subscription.
+  map<string, string> last_pos = 5;
 }
 
 // SubscribeResponse is a message delivered on the subscription stream.
