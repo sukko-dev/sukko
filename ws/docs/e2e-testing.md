@@ -213,9 +213,9 @@ Named anchor cells wrap the runner with their suite sets:
 | `community-direct` | Community (no license) | direct | positive | `channels pubsub ordering reconnect auth edition-limits rest-publish tenant-isolation provisioning api-key upgrade ratelimit` |
 | `pro-direct` | Pro | direct | positive | `channels pubsub ordering reconnect sse auth edition-limits rest-publish tenant-isolation provisioning token-revocation` |
 | `enterprise-direct` | Enterprise | direct | positive | `channels pubsub ordering reconnect sse auth edition-limits rest-publish` |
-| `pro-kafka` | Pro | kafka | positive | `channels pubsub ordering reconnect sse auth rest-publish tenant-isolation provisioning token-revocation history gap-recovery` |
+| `pro-kafka` | Pro | kafka | positive | `channels pubsub ordering reconnect sse auth rest-publish tenant-isolation provisioning token-revocation history gap-recovery sse-recovery` |
 | `enterprise-kafka` | Enterprise | kafka | positive | `channels pubsub ordering reconnect sse auth rest-publish` |
-| `community-kafka` | Community (no license) | kafka | positive | `channels auth edition-limits kafka-ingest history gap-recovery` — the ADR-0009 boot + gate surface AND the license-free ingest→fan-out, history, and gap-recovery delivery proofs on Community+kafka |
+| `community-kafka` | Community (no license) | kafka | positive | `channels auth edition-limits kafka-ingest history gap-recovery` — the ADR-0009 boot + gate surface AND the license-free ingest→fan-out, history, and gap-recovery delivery proofs on Community+kafka (`sse-recovery` is Pro-gated, so it runs on `pro-kafka` only) |
 | `expired-direct` | Pro, expired (`-1d`) → Community | direct | degradation | gate `edition=community`+`expired=true`; suite `edition-limits` |
 | `community-direct-sentinel` | Community (no license) | direct (Valkey **Sentinel** topology) | positive + chaos (P2) | `channels pubsub ordering reconnect` + sentinel positive controls; P2 kills the master and asserts recovery (§2.20) |
 
@@ -298,7 +298,10 @@ the tester's `KAFKA_BROKERS` wiring is absent), `history:history delivery` +
 license-free), and `gap-recovery:gap replay delivery` + `gap-recovery:live replay delivery`
 (§2.22 — the benchmark's "gap-recovery-under-kill" leg, license-free). The same four
 history/gap-recovery checks are also `REQUIRE_PASS` on `pro-kafka` (proving the paid path
-is identical). The only declared skip is `edition-limits:connection limit rejection` (the
+is identical), which additionally forces `sse-recovery:sse gap replay delivery` +
+`sse-recovery:sse replay mid equality` (§2.23 — the gap-recovery-under-kill leg on the SSE
+transport via the Last-Event-ID cursor, ADR-0030). `sse-recovery` is `pro-kafka`-only
+because the SSE transport is Pro-gated (§2.9); the recovery itself adds no further gate. The only declared skip is `edition-limits:connection limit rejection` (the
 shared 100-connection test cap). The kafka compose override sets `WS_HISTORY_ENABLED=true`
 (default is off) so the history writer runs on every kafka cell.
 
@@ -369,6 +372,7 @@ load/soak/stress are scale tests.
 | 19 | `kafka-ingest` | Community | no | Direct-to-Kafka ingestion: publishes straight to the broker (SASL/TLS) and verifies a gateway-subscribed client receives it. Skips when `KAFKA_BROKERS` unset; delivery requires the server under test to run `MESSAGE_BACKEND=kafka` (Community, ADR-0009). Run continuously by `task e2e:kafka-ingest` / the CI workflow's `e2e-kafka-ingest` job (see §1.3). |
 | 20 | `history` | Community | no | Message-history delivery over ingested records: a late-joining client fetches history and every historical copy's `mid` byte-equals the live copy's (§2.21). Skips when `KAFKA_BROKERS` unset; requires `WS_HISTORY_ENABLED=true` on the server under test. Gated into `community-kafka`/`pro-kafka` |
 | 21 | `gap-recovery` | Community | no | Gap recovery under client kill: a killed subscriber reconnects with `last_pos` and receives exactly the missed messages (exclusive cursor, ordered, mid-stable), plus a live `replay` leg (§2.22). Skips when `KAFKA_BROKERS` unset. Gated into `community-kafka`/`pro-kafka` |
+| 22 | `sse-recovery` | **Pro** | no | SSE reconnect recovery: a killed SSE subscriber reconnects with the opaque `Last-Event-ID` cursor and receives exactly the missed messages (exclusive cursor, ordered, mid-stable) on the SSE transport (§2.23, ADR-0030). Pro because the SSE transport is Pro-gated (`SSETransport`); the recovery adds no further gate. Skips when `KAFKA_BROKERS` unset. Gated into `pro-kafka` |
 
 ### 3. Load Suite Battery
 
@@ -1123,6 +1127,48 @@ server rate-limits `replay` to 1 request / 10 s / channel — the suite issues e
 live `replay`, under the limit. No admin key. **Minimum edition**: Community. Gated into
 `community-kafka` and `pro-kafka`; both cells force `gap replay delivery` and
 `live replay delivery` present-and-`pass` via `REQUIRE_PASS`.
+
+### 2.23 sse-recovery
+
+```sh
+sukko test validate --suite sse-recovery
+```
+
+Proves **gap recovery under client kill on the SSE transport** (ADR-0030) — the SSE
+counterpart to `gap-recovery`'s reconnect leg. SSE has no in-band `replay` request (it is
+receive-only), so recovery is *only* the `Last-Event-ID` reconnect path, and this suite is
+that single leg.
+
+A **control** subscriber C (WebSocket, the mid reference) subscribes to the recovery
+channel, then an SSE **victim** connects. M1 is the first — and only — record published to
+the recovery channel before the kill, so it is the victim's first pos-bearing message and
+carries the anchor cursor (the gateway emits the opaque `id:` cursor on the first
+pos-bearing message per connection, then only every `SSE_CURSOR_EVERY_N`; nothing else is
+published to the channel in between, so nothing can steal that emission). M1 is ingested
+(direct-to-broker); the victim reads until M1 and captures its event's `id:` as the
+**anchor cursor**. The victim's connection is closed. M2
+and M3 are ingested — only the control receives them (the gap). A revived SSE client
+reconnects to `GET /sse` with `Last-Event-ID: <anchor cursor>`; the server registers the
+live subscription first, then replays `anchor..now` for each tenant-validated channel
+(ADR-0026 ordering).
+
+| Check | Asserts |
+|---|---|
+| `sse cursor present` | the gateway emitted an opaque `id:` cursor on the victim's M1 event (fail-fast: blank ⇒ server not on `MESSAGE_BACKEND=kafka`) |
+| `sse gap replay delivery` | M2 **and** M3 are delivered to the revived SSE client |
+| `sse no duplicate replay` | M1 is **absent** — `Last-Event-ID` is an exclusive cursor; the anchor itself is never re-delivered |
+| `sse replay order` | M2 arrives before M3 (broker order preserved) |
+| `sse replay mid equality` | replayed copies' top-level `mid`s byte-equal the control's live copies — identity is stable across live and SSE replay (ADR-0008) |
+
+**Requirements:** `KAFKA_BROKERS` set on the tester (unset ⇒ single skip), server on
+`MESSAGE_BACKEND=kafka`. Replay is served from the broker — the kafka cells run with
+`WS_HISTORY_ENABLED=true` anyway (§2.21). No admin key. **Minimum edition**: Pro — the SSE
+transport itself is Pro-gated (`features.go` `SSETransport`; a Community SSE connect is
+403'd), so the suite runs on `pro-kafka` (not the Community cells), matching where the
+basic `sse` suite runs. SSE reconnect recovery adds no *further* gate beyond the transport
+(ADR-0030 — it is the same replay path the WebSocket reconnect uses). `pro-kafka` forces
+`sse gap replay delivery` and `sse replay mid equality` present-and-`pass` via
+`REQUIRE_PASS`.
 
 ## 3. Load / Stress / Soak Testing
 

@@ -30,11 +30,12 @@ type Client struct {
 
 // ConnectConfig configures an SSE connection.
 type ConnectConfig struct {
-	GatewayURL string   // base URL, e.g. "http://localhost:3000"
-	Channels   []string // channels to subscribe to
-	Token      string   // JWT via ?token= query param
-	APIKey     string   // X-API-Key header
-	Logger     zerolog.Logger
+	GatewayURL  string   // base URL, e.g. "http://localhost:3000"
+	Channels    []string // channels to subscribe to
+	Token       string   // JWT via ?token= query param
+	APIKey      string   // X-API-Key header
+	LastEventID string   // Last-Event-ID reconnect cursor (opaque); sent only when non-empty (ADR-0030)
+	Logger      zerolog.Logger
 }
 
 // Connect opens an SSE connection to GET {GatewayURL}/sse?channels=...&token=...
@@ -63,6 +64,12 @@ func ConnectRaw(ctx context.Context, cfg ConnectConfig) (client *Client, statusC
 
 	if cfg.APIKey != "" {
 		req.Header.Set("X-API-Key", cfg.APIKey)
+	}
+
+	// Last-Event-ID triggers server-side reconnect replay (ADR-0030). Sent only
+	// when non-empty so a fresh subscription carries no header at all.
+	if cfg.LastEventID != "" {
+		req.Header.Set("Last-Event-ID", cfg.LastEventID)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
