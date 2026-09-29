@@ -63,6 +63,13 @@ func (gw *Gateway) HandleSSE(w http.ResponseWriter, r *http.Request) {
 			"no channels remaining after permission filtering")
 		return
 	}
+	// Cap the channel count so the reconnect cursor token stays within request-header
+	// size limits on reconnect (ADR-0030).
+	if gw.config.SSEMaxChannels > 0 && len(channels) > gw.config.SSEMaxChannels {
+		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST",
+			fmt.Sprintf("too many channels: %d exceeds the SSE limit of %d", len(channels), gw.config.SSEMaxChannels))
+		return
+	}
 
 	// 4. Acquire tenant connection slot
 	if gw.connTracker != nil && authRes.TenantSlug != "" {
@@ -92,11 +99,21 @@ func (gw *Gateway) HandleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Decode the Last-Event-ID reconnect cursor (ADR-0030). An empty, foreign, or
+	// unparseable token yields no last_pos → live-only; the cursor's channels are
+	// tenant-validated server-side before any replay (ADR-0020), so the untrusted
+	// token can never replay a channel the connection does not own.
+	var lastPos map[string]string
+	if cursor, ok := decodeSSECursor(r.Header.Get("Last-Event-ID")); ok {
+		lastPos = cursor
+	}
+
 	stream, err := gw.serverClient.Client().Subscribe(ctx, &serverv1.SubscribeRequest{
 		TenantSlug: authRes.TenantSlug,
 		Principal:  authRes.Principal,
 		Channels:   channels,
 		RemoteAddr: httputil.GetClientIP(r),
+		LastPos:    lastPos,
 	})
 	if err != nil {
 		gw.logger.Error().Err(err).
@@ -174,6 +191,17 @@ func (gw *Gateway) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	keepaliveTicker := time.NewTicker(gw.config.SSEKeepAliveInterval)
 	defer keepaliveTicker.Stop()
 
+	// SSE reconnect cursor (ADR-0030): track the latest pos per channel from the
+	// delivered messages and emit it as the opaque, versioned Last-Event-ID at a
+	// bounded cadence — the first pos-bearing message (so an early disconnect still
+	// leaves a resume point), then at most every SSECursorEveryN messages, plus a
+	// keepalive-tick flush if it advanced. Encoding the cursor therefore never sits
+	// on the per-message delivery path (§VII).
+	cursor := make(map[string]string, len(channels))
+	sinceCursor := 0
+	cursorDirty := false
+	cursorSent := false
+
 	for {
 		select {
 		case resp, ok := <-msgCh:
@@ -181,21 +209,35 @@ func (gw *Gateway) HandleSSE(w http.ResponseWriter, r *http.Request) {
 				// gRPC stream ended
 				goto done
 			}
-			// Format as SSE event:
-			//   id: {sequence}
-			//   event: message
-			//   data: {payload}
-			//
-			// Payload is the full JSON envelope from ws-server — written as-is.
-			// Sequence is used for Last-Event-ID reconnection.
-			if _, err := fmt.Fprintf(w, "id: %d\nevent: message\ndata: %s\n\n", resp.GetSequence(), resp.GetPayload()); err != nil {
+			payload := resp.GetPayload()
+			if ch, pos, hasPos := sseMsgPos(payload); hasPos {
+				cursor[ch] = pos
+				cursorDirty = true
+			}
+			sinceCursor++
+			idLine := ""
+			if cursorDirty && (!cursorSent || (gw.config.SSECursorEveryN > 0 && sinceCursor >= gw.config.SSECursorEveryN)) {
+				if tok := encodeSSECursor(cursor); tok != "" {
+					idLine = "id: " + tok + "\n"
+					sinceCursor, cursorDirty, cursorSent = 0, false, true
+				}
+			}
+			if _, err := fmt.Fprintf(w, "%sevent: message\ndata: %s\n\n", idLine, payload); err != nil {
 				goto done
 			}
 			flusher.Flush()
 
 		case <-keepaliveTicker.C:
-			// SSE comment — not an event, keeps connection alive
-			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+			// Flush a bare cursor id: if it advanced since the last emission (bounds
+			// staleness for low-traffic streams); otherwise a keepalive comment.
+			line := ": keepalive\n\n"
+			if cursorDirty {
+				if tok := encodeSSECursor(cursor); tok != "" {
+					line = "id: " + tok + "\n\n"
+					sinceCursor, cursorDirty, cursorSent = 0, false, true
+				}
+			}
+			if _, err := fmt.Fprint(w, line); err != nil {
 				goto done
 			}
 			flusher.Flush()

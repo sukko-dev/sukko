@@ -61,15 +61,25 @@ message SubscribeRequest {
 
   // remote_addr is the original client IP (for logging/metrics).
   string remote_addr = 4;
+
+  // last_pos requests replay of missed messages per channel on reconnect: a map
+  // of channel -> "(partition+1)-offset" (the same cursor shape as the WebSocket
+  // reconnect last_pos). When present, the server registers the live subscription
+  // first, then replays last_pos..now for each tenant-validated channel, so no
+  // message falls into a seam between the replay snapshot and live delivery
+  // (ADR-0026 ordering, ADR-0030). Empty for a fresh subscription.
+  map<string, string> last_pos = 5;
 }
 
 // SubscribeResponse is a message delivered on the subscription stream.
 message SubscribeResponse {
-  // sequence is the per-connection monotonic sequence number.
-  // Used by the gateway as the SSE id: field for Last-Event-ID reconnection.
+  // sequence is the per-connection monotonic counter (diagnostics only). The SSE
+  // reconnect id: is now an opaque per-channel cursor the gateway builds from the
+  // delivered messages' pos (ADR-0030); this field is no longer the resume token.
   int64 sequence = 1;
 
-  // payload is the full JSON envelope from BroadcastEnvelope.Build(seq).
-  // Written as-is to the SSE data: line. No parsing needed by the gateway.
+  // payload is the full JSON envelope from BroadcastEnvelope.Build(seq), written
+  // as-is to the SSE data: line. The gateway also reads its channel and pos to
+  // maintain the opaque Last-Event-ID reconnect cursor (ADR-0030).
   bytes payload = 2;
 }

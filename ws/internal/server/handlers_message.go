@@ -1,17 +1,12 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/sukko-dev/sukko/internal/server/backend"
 	"github.com/sukko-dev/sukko/internal/server/history"
-	"github.com/sukko-dev/sukko/internal/server/messaging"
 	"github.com/sukko-dev/sukko/internal/server/metrics"
-	"github.com/sukko-dev/sukko/internal/shared/auth"
-	"github.com/sukko-dev/sukko/internal/shared/logging"
 	"github.com/sukko-dev/sukko/internal/shared/protocol"
 )
 
@@ -308,82 +303,10 @@ func (s *Server) handleReconnect(c *Client, data []byte) {
 		return
 	}
 
-	// Decode client's pos strings into topic→partition→startOffset for the
-	// Kafka replay backend. The partition is preserved: pos identifies a record
-	// on ONE partition, and replaying the whole topic at that offset would be
-	// out of range on partitions with shorter logs.
-	positions := make(map[string]map[int32]int64, len(reconnectReq.LastPos))
-	// authorizedChannels is the replay filter: exactly the channels the client
-	// named in last_pos that pass tenant authorization (ADR-0020). It replaces
-	// the live subscription set, which is empty here because the protocol sends
-	// reconnect before subscribe — passing that empty set let the replay fail
-	// open and dump every channel on the shared topic to the client.
-	authorizedChannels := make([]string, 0, len(reconnectReq.LastPos))
-	newChannels := 0 // channels not already held; only these grow the subscription set toward the cap
-	for channel, posStr := range reconnectReq.LastPos {
-		// L1 authorization: a client may only replay channels owned by its
-		// authenticated tenant. Denied channels are skipped, logged, and counted
-		// so a client cannot name another tenant's channel to have its topic
-		// replayed (§IX). ValidateChannelTenant fails closed on an empty tenant.
-		if !auth.ValidateChannelTenant(channel, c.TenantID()) {
-			metrics.ReconnectChannelDenied.Inc()
-			s.logger.Warn().
-				Int64("client_id", c.id).
-				Str("channel", channel).
-				Str(logging.LogKeyTenantSlug, c.TenantID()).
-				Msg("handleReconnect: channel not owned by tenant — denied")
-			continue
-		}
-		partition, offset, ok := history.DecodePos(posStr)
-		if !ok {
-			metrics.ReconnectPosDecodeFailures.Inc()
-			s.logger.Warn().
-				Int64("client_id", c.id).
-				Str("channel", channel).
-				Str("pos", posStr).
-				Msg("handleReconnect: undecodable pos — channel skipped")
-			continue
-		}
-		topic, ok := s.backend.ChannelTopic(channel)
-		if !ok {
-			metrics.ReconnectPosDecodeFailures.Inc()
-			s.logger.Warn().
-				Int64("client_id", c.id).
-				Str("channel", channel).
-				Msg("handleReconnect: no topic mapping for channel — channel skipped")
-			continue
-		}
-		// §IX: cap reconnect registration + replay at the per-client channel limit, exactly as the
-		// subscribe path does. handleReconnect now registers authorizedChannels for live delivery
-		// (ADR-0026), so without this cap a client could name thousands of last_pos channels — every
-		// tenant-prefixed name resolves to a topic — and have them all registered in the index and
-		// replayed (fan-out amplification, defeating MaxChannelsPerClient). Only genuinely-new
-		// channels count toward the cap: a channel already held adds zero live fan-out, and a client
-		// re-homing its existing K channels at K == limit must still have them replayed (counting a
-		// held channel twice — once in Count(), once in the loop — would break the reconnect and ack
-		// a false "completed"). Skip only the over-budget NEW channel and keep scanning, so held
-		// channels later in map order are still replayed.
-		if !c.subscriptions.Has(channel) {
-			if c.subscriptions.Count()+newChannels >= s.config.MaxChannelsPerClient {
-				metrics.ReconnectChannelLimitExceeded.Inc()
-				s.logger.Warn().
-					Int64("client_id", c.id).
-					Str("channel", channel).
-					Int("limit", s.config.MaxChannelsPerClient).
-					Msg("handleReconnect: new channel over per-client limit — channel skipped")
-				continue
-			}
-			newChannels++
-		}
-		nextOffset := offset + 1 // replay from the message AFTER the last received
-		if positions[topic] == nil {
-			positions[topic] = make(map[int32]int64)
-		}
-		if existing, alreadySet := positions[topic][partition]; !alreadySet || nextOffset < existing {
-			positions[topic][partition] = nextOffset
-		}
-		authorizedChannels = append(authorizedChannels, channel)
-	}
+	// Validate the client's last_pos cursor: tenant-scope each channel (ADR-0020),
+	// decode positions, map to Kafka topics, and cap new channels (§IX). Shared
+	// with the SSE Subscribe-with-last_pos path (ADR-0030).
+	positions, authorizedChannels := s.authorizeLastPos(c, reconnectReq.LastPos)
 
 	// Nothing left to replay after authorization/decoding (e.g. every last_pos
 	// channel was denied or undecodable): send a clean zero-message ack, not a
@@ -426,62 +349,14 @@ func (s *Server) handleReconnect(c *Client, data []byte) {
 		s.registryWriter.PushSubscribe(c.connID, snapshot, capped)
 	}
 
-	// Create context with timeout for replay operation
-	ctx, cancel := context.WithTimeout(s.ctx, s.config.ReplayTimeout)
-	defer cancel()
-
-	// Perform replay from backend. Subscriptions is the tenant-validated
-	// last_pos channel set (ADR-0020) — never the empty live subscription set.
-	replayedMsgs, err := s.backend.Replay(ctx, backend.ReplayRequest{
-		Positions:     positions,
-		MaxMessages:   s.config.MaxReplayMessages,
-		Subscriptions: authorizedChannels,
-	})
-
+	replayedCount, _, err := s.replayAuthorizedToClient(c, positions, authorizedChannels)
 	if err != nil {
 		s.logger.Error().
 			Int64("client_id", c.id).
 			Err(err).
 			Msg("Failed to replay messages from backend")
-
 		s.sendErrorToClient(c, RespTypeReconnectError, protocol.ErrCodeReplayFailed, "Message replay failed")
 		return
-	}
-
-	// Send replayed messages to client
-	replayedCount := 0
-replayLoop:
-	for _, msg := range replayedMsgs {
-		// Wrap in message envelope with sequence number
-		envelope := &messaging.MessageEnvelope{
-			Type:      MsgTypeMessage,
-			Seq:       c.seqGen.Next(),
-			Timestamp: time.Now().UnixMilli(),
-			Channel:   msg.Subject,
-			Priority:  messaging.PriorityNormal,
-			Data:      json.RawMessage(msg.Data),
-			Pos:       msg.Pos,
-			Mid:       msg.Mid,
-		}
-
-		envelopeData, err := envelope.Serialize()
-		if err != nil {
-			s.logger.Warn().
-				Err(err).
-				Int64("client_id", c.id).
-				Str("channel", msg.Subject).
-				Msg("Failed to serialize replay message")
-			continue
-		}
-		select {
-		case c.send <- RawMsg(envelopeData):
-			replayedCount++
-		default:
-			s.logger.Warn().
-				Int64("client_id", c.id).
-				Msg("Client send buffer full during replay, stopping")
-			break replayLoop
-		}
 	}
 
 	// Send acknowledgment with replay statistics
