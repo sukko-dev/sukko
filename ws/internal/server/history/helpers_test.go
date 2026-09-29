@@ -278,3 +278,16 @@ func waitForStreamEntry(t *testing.T, client valkey.Client, streamKey string, ti
 	}
 	t.Fatalf("stream key %q did not receive an entry within %s (HistoryWriter did not process in time)", streamKey, timeout)
 }
+
+// waitFor polls cond every few milliseconds until it holds or the timeout
+// elapses, then returns — replacing a fixed time.Sleep used to wait for the
+// async writer goroutine to produce an observable effect. The writer runs in
+// real time, so a single fixed sleep races CI scheduling latency and flakes;
+// polling waits for the actual condition. The caller's own assertion runs
+// afterward and reports the specific failure if the condition never held.
+func waitFor(cond func() bool, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for !cond() && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+}

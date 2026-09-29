@@ -104,8 +104,9 @@ func TestHistoryWriter_XADDEntrySchema(t *testing.T) {
 		w.Run()
 	})
 
-	// Wait for the HistoryWriter to subscribe (subscribe happens inside runOnce).
-	time.Sleep(20 * time.Millisecond)
+	// Wait for the HistoryWriter to become active (subscribe happens inside runOnce)
+	// instead of a fixed startup sleep that races CI scheduling latency.
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	msg := &broadcast.Message{
 		Subject:  "tenantA.BTC.trade",
@@ -168,7 +169,7 @@ func TestHistoryWriter_NoMidOmitsField(t *testing.T) {
 	wg.Go(func() {
 		w.Run()
 	})
-	time.Sleep(20 * time.Millisecond)
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	bus.fanOut(&broadcast.Message{
 		Subject:  "tenantB.BTC.trade",
@@ -265,8 +266,8 @@ func TestHistoryWriter_LockReleasedOnShutdown(t *testing.T) {
 		w.Run()
 	})
 
-	// Give writer time to acquire the lock.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the writer to acquire the lock (become active) instead of a fixed sleep.
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	// Cancel the context — triggers shutdown.
 	cancel()
@@ -299,7 +300,7 @@ func TestHistoryWriter_TenantIsolation(t *testing.T) {
 		w.Run()
 	})
 
-	time.Sleep(20 * time.Millisecond)
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	for _, msg := range []*broadcast.Message{
 		{Subject: "tenantA.BTC.trade", Payload: []byte(`{"t":"A"}`), TenantID: "tenantA", Channel: "BTC.trade"},
@@ -366,7 +367,8 @@ func TestHistoryWriter_LockTTLMillisConversion(t *testing.T) {
 		w.Run()
 	})
 
-	time.Sleep(30 * time.Millisecond) // allow lock acquisition
+	// Wait for lock acquisition (writer active) instead of a fixed sleep.
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	cancel()
 	wg.Wait()
@@ -402,9 +404,12 @@ func TestHistoryWriter_BusUnhealthyTriggersRestart(t *testing.T) {
 		w.Run()
 	})
 
-	time.Sleep(10 * time.Millisecond)
+	// Wait for the writer to become active, then knock the bus unhealthy and wait
+	// for the restart to fire — polling the actual conditions instead of fixed
+	// sleeps that race CI scheduling latency.
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 	bus.setHealthy(false) // trigger unhealthy → restart
-	time.Sleep(100 * time.Millisecond)
+	waitFor(func() bool { return metricCounterValue(t, w.Metrics().WriterRestartTotal) >= 1 }, 2*time.Second)
 	cancel()
 	wg.Wait()
 
@@ -513,9 +518,11 @@ func TestHistoryWriter_RestartCounter(t *testing.T) {
 		w.Run()
 	})
 
-	time.Sleep(10 * time.Millisecond)
+	// Wait for the writer to become active, knock the bus unhealthy, then wait for
+	// the restart to fire — polling the actual conditions instead of fixed sleeps.
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 	bus.setHealthy(false)
-	time.Sleep(80 * time.Millisecond)
+	waitFor(func() bool { return metricCounterValue(t, w.Metrics().WriterRestartTotal) >= 1 }, 2*time.Second)
 	cancel()
 	wg.Wait()
 
@@ -574,7 +581,8 @@ func TestHistoryWriter_RelayGoroutineExitsCleanly(t *testing.T) {
 		w.Run()
 	})
 
-	time.Sleep(20 * time.Millisecond)
+	// Wait for the writer to become active before shutting down, instead of a fixed sleep.
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 	cancel()
 
 	done := make(chan struct{})
@@ -603,7 +611,7 @@ func TestHistoryWriter_PayloadFieldStoresRawDataOnly(t *testing.T) {
 	wg.Go(func() {
 		w.Run()
 	})
-	time.Sleep(20 * time.Millisecond)
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	rawPayload := []byte(`{"event":"tick","bid":1234.5}`)
 	bus.fanOut(&broadcast.Message{
@@ -647,7 +655,7 @@ func TestHistoryWriter_RelayNonBlockingSignal(t *testing.T) {
 	wg.Go(func() {
 		w.Run()
 	})
-	time.Sleep(20 * time.Millisecond)
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	// Send a burst of messages; the notifyChan has capacity 1.
 	// If the relay blocks on the non-blocking send, the test will time out.
@@ -660,7 +668,11 @@ func TestHistoryWriter_RelayNonBlockingSignal(t *testing.T) {
 		})
 	}
 
-	time.Sleep(80 * time.Millisecond)
+	// Poll for the last message in the burst to be written instead of a fixed sleep:
+	// if the relay blocked partway through the burst, this entry never lands and the
+	// bounded wait fails rather than false-passing.
+	burstClient := newTestValkeyClient(t, mr)
+	waitForStreamEntry(t, burstClient, history.HistoryStreamKeyPrefix+opts.env+":tenantA:channel19", 2*time.Second)
 
 	done := make(chan struct{})
 	go func() {
@@ -687,7 +699,7 @@ func TestHistoryWriter_XADDAndExpireCoBatched(t *testing.T) {
 
 	var wg syncWaitGroup
 	wg.Go(func() { w.Run() })
-	time.Sleep(20 * time.Millisecond)
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	bus.fanOut(&broadcast.Message{
 		Subject: "t1.KEY", Payload: []byte(`{}`), TenantID: "t1", Channel: "KEY",
@@ -809,7 +821,8 @@ func TestHistoryWriter_LuaCASAtomicity(t *testing.T) {
 	w, cancel, _ := newTestWriter(t, mr, opts)
 	var wg syncWaitGroup
 	wg.Go(func() { w.Run() })
-	time.Sleep(30 * time.Millisecond) // let pod-A acquire lock (isActiveWriter=true)
+	// Wait for pod-A to acquire the lock (become active) instead of a fixed sleep.
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	// Pod-B steals the lock; pod-A's isActiveWriter is still true (no heartbeat tick yet).
 	lockKey := history.HistoryWriterLockKeyPrefix + opts.env
