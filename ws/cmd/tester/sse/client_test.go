@@ -368,3 +368,61 @@ func TestClient_APIKeyHeader(t *testing.T) {
 		t.Errorf("X-API-Key = %q, want %q", gotAPIKey, "test-api-key-123")
 	}
 }
+
+// TestClient_LastEventIDHeader asserts the Last-Event-ID reconnect cursor (ADR-0030)
+// is sent as a request header exactly when ConnectConfig.LastEventID is non-empty, and
+// omitted entirely otherwise — the server treats the header's presence as the reconnect
+// signal, so a stray empty header on a fresh subscription would be a protocol bug.
+func TestClient_LastEventIDHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		lastEventID string
+		wantHeader  string
+		wantPresent bool
+	}{
+		{name: "sent when set", lastEventID: "v1:abc123", wantHeader: "v1:abc123", wantPresent: true},
+		{name: "absent when empty", lastEventID: "", wantPresent: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotHeader := make(chan string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				h, present := r.Header["Last-Event-Id"] // canonicalized form of Last-Event-ID
+				if present {
+					gotHeader <- h[0]
+				} else {
+					gotHeader <- "\x00absent"
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, "event: message\ndata: ok\n\n")
+			}))
+			defer srv.Close()
+
+			client, status, err := Connect(context.Background(), ConnectConfig{
+				GatewayURL:  srv.URL,
+				Channels:    []string{"test.ch"},
+				Token:       "test-token",
+				LastEventID: tc.lastEventID,
+				Logger:      zerolog.Nop(),
+			})
+			if err != nil {
+				t.Fatalf("connect: %v (status=%d)", err, status)
+			}
+			defer client.Close()
+
+			got := <-gotHeader
+			switch {
+			case tc.wantPresent && got != tc.wantHeader:
+				t.Errorf("Last-Event-ID header = %q, want %q", got, tc.wantHeader)
+			case !tc.wantPresent && got != "\x00absent":
+				t.Errorf("Last-Event-ID header = %q, want absent", got)
+			}
+		})
+	}
+}

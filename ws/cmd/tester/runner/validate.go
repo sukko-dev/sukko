@@ -97,6 +97,8 @@ func runValidate(ctx context.Context, run *TestRun, logger zerolog.Logger) (*met
 		checks, err = validateHistory(ctx, run, logger)
 	case SuiteGapRecovery:
 		checks, err = validateGapRecovery(ctx, run, logger)
+	case SuiteSSERecovery:
+		checks, err = validateSSERecovery(ctx, run, logger)
 	default:
 		checks = []metrics.CheckResult{{
 			Name:   "unknown suite",
