@@ -198,6 +198,32 @@ func (svc *GRPCService) Subscribe(req *serverv1.SubscribeRequest, stream serverv
 		Str("remote_addr", req.GetRemoteAddr()).
 		Msg("SSE Subscribe stream started")
 
+	// SSE reconnect replay (ADR-0030). If the client resumed with a last_pos
+	// cursor, replay the missed messages per tenant-validated channel. Live
+	// delivery for these channels is already registered above — replay runs
+	// AFTER that registration, so the replay and live windows overlap and the
+	// client dedupes the boundary by mid (ADR-0026 ordering, ADR-0008). Channels
+	// with no Kafka topic mapping (direct backend) are skipped, yielding no
+	// replay; the explicit no_replay / replay_truncated client events are added
+	// with the gateway envelope work.
+	if lastPos := req.GetLastPos(); len(lastPos) > 0 {
+		positions, authorized := s.authorizeLastPos(client, lastPos)
+		if len(positions) > 0 {
+			count, truncated, err := s.replayAuthorizedToClient(client, positions, authorized)
+			switch {
+			case err != nil:
+				svc.logger.Warn().Int64("client_id", client.id).Err(err).
+					Msg("SSE reconnect replay failed; serving live-only")
+			case truncated:
+				svc.logger.Warn().Int64("client_id", client.id).Int("replayed", count).
+					Msg("SSE reconnect replay truncated at MaxReplayMessages; a gap remains")
+			default:
+				svc.logger.Info().Int64("client_id", client.id).Int("replayed", count).
+					Msg("SSE reconnect replay completed")
+			}
+		}
+	}
+
 	// Block until stream closes (client disconnect or server shutdown)
 	<-ctx.Done()
 
