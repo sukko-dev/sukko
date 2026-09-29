@@ -38,6 +38,12 @@ type Writer struct {
 	workChan   chan *broadcast.Message
 	notifyChan chan struct{}
 	metrics    *Metrics
+
+	// clock and randInt64N seam the supervised restart-backoff and heartbeat
+	// timing so tests can drive them deterministically (ADR-0029). Production
+	// uses realClock and rand.Int64N; behavior is unchanged.
+	clock      Clock
+	randInt64N func(n int64) int64
 }
 
 // ValkeyClient returns the dedicated Streams client. Used by history delivery handlers.
@@ -72,6 +78,8 @@ func NewWriter(
 		workChan:     make(chan *broadcast.Message, cfg.HistoryWriterBuffer),
 		notifyChan:   make(chan struct{}, 1),
 		metrics:      newMetrics(reg),
+		clock:        realClock{},
+		randInt64N:   rand.Int64N,
 	}
 	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "ws_history_writer_buffer_depth",
@@ -125,14 +133,14 @@ func (h *Writer) Run() {
 		jitterBase := min(currentBackoff, h.cfg.HistoryWriterRestartMaxBackoff/2)
 		jitteredDelay := currentBackoff
 		if ns := int64(jitterBase); ns > 0 {
-			jitteredDelay += time.Duration(rand.Int64N(ns)) //nolint:gosec // G404: math/rand/v2 is sufficient for backoff jitter; cryptographic randomness is not required
+			jitteredDelay += time.Duration(h.randInt64N(ns))
 		}
 		if jitteredDelay > h.cfg.HistoryWriterRestartMaxBackoff {
 			jitteredDelay = h.cfg.HistoryWriterRestartMaxBackoff
 		}
 
 		select {
-		case <-time.After(jitteredDelay):
+		case <-h.clock.After(jitteredDelay):
 			h.logger.Warn().Dur("backoff", jitteredDelay).Msg("historyWriter: restarting after delay")
 		case <-h.ctx.Done():
 			return
@@ -162,7 +170,7 @@ func (h *Writer) runOnce(parentCtx context.Context) (processed int, _ error) {
 	// any early return from SubscribeAll does not create a leaked context.
 	runOnceCtx, runOnceCancelFn := context.WithCancel(parentCtx)
 
-	ticker := time.NewTicker(h.cfg.HistoryWriterHeartbeatInterval)
+	ticker := h.clock.NewTicker(h.cfg.HistoryWriterHeartbeatInterval)
 
 	var relayWg sync.WaitGroup
 
@@ -224,7 +232,7 @@ func (h *Writer) runOnce(parentCtx context.Context) (processed int, _ error) {
 		case <-runOnceCtx.Done():
 			return processed, nil
 
-		case <-ticker.C:
+		case <-ticker.Chan():
 			if err := h.handleHeartbeatTick(runOnceCtx, lockKey, &consecutiveLockFailures); err != nil {
 				return processed, err
 			}

@@ -892,46 +892,59 @@ func TestHistoryWriter_RestartBackoffJitter(t *testing.T) {
 // Observable consequence: after fail→success→fail, a restart happens within ~initialBackoff,
 // not within a doubled-and-growing backoff.
 func TestHistoryWriter_BackoffResetAfterSuccess(t *testing.T) {
-	t.Parallel()
-
+	t.Parallel() // fake clock + writer are local to this test (ADR-0029)
 	mr := newTestMiniredis(t)
 	opts := defaultTestOpts()
-	opts.heartbeatInterval = 10 * time.Millisecond
+	opts.heartbeatInterval = 50 * time.Millisecond
 	opts.restartInitialBackoff = 10 * time.Millisecond
-	opts.restartMaxBackoff = 10 * time.Second // high cap so doubling would compound
+	opts.restartMaxBackoff = 10 * time.Second // high cap so doubling compounds
 
 	w, cancel, bus := newTestWriter(t, mr, opts)
+	clk := newFakeClock()
+	history.SetClockForTest(w, clk, func(int64) int64 { return 0 }) // zero jitter → exact delays
+
 	var wg syncWaitGroup
 	wg.Go(func() { w.Run() })
-	time.Sleep(20 * time.Millisecond) // let writer subscribe and acquire lock
+	t.Cleanup(func() { cancel(); wg.Wait() })
 
-	// Phase 1: process a message while healthy so processed > 0 in the first runOnce.
-	bus.fanOut(&broadcast.Message{Subject: "t1.c", Payload: []byte(`{}`), TenantID: "t1", Channel: "c"})
-	time.Sleep(30 * time.Millisecond) // allow flush
-
-	// Phase 2: force failure — because processed > 0, backoff resets to initialBackoff (10ms).
-	bus.setHealthy(false)
-
-	// Because the prior run processed > 0 messages, the supervisor resets the restart
-	// backoff to its initial value, so the restart after this failure fires promptly.
-	// Poll for it with a generous deadline rather than racing a tight fixed one — the
-	// original 60ms wall-clock window was the flake: under CI scheduling latency even a
-	// ~10ms-backoff restart can land later than 60ms. The deadline only bounds the wait;
-	// a restart that never fires still fails the assertion, so the guard is preserved.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if prometheustestutil.ToFloat64(w.Metrics().WriterRestartTotal) >= 1 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	// drive one no-progress restart and return the backoff delay the writer parks on.
+	restartAndReadBackoff := func() time.Duration {
+		clk.BlockUntil(1)                   // writer parked on the heartbeat ticker inside runOnce
+		clk.Advance(opts.heartbeatInterval) // fire a heartbeat → health check → runOnce exits
+		clk.blockUntilOneShots(1)           // Run loop now parked on clock.After(backoff)
+		d := clk.oneShotDelays()[0]
+		clk.Advance(d) // fire the restart → next runOnce
+		return d
 	}
-	restarts := prometheustestutil.ToFloat64(w.Metrics().WriterRestartTotal)
 
-	cancel()
-	wg.Wait()
+	// Bus unhealthy from the start: each restart makes no progress, so the backoff
+	// doubles. Assert the parked delay compounds exactly — deterministic, impossible
+	// with real time.
+	bus.setHealthy(false)
+	for _, want := range []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond} {
+		if got := restartAndReadBackoff(); got != want {
+			t.Fatalf("compounding backoff = %v, want %v", got, want)
+		}
+	}
 
-	if restarts < 1 {
-		t.Errorf("BackoffResetAfterSuccess: expected restart within 60ms after success-then-failure (reset backoff=10ms), got %.0f restarts", restarts)
+	// A run that does useful work resets the backoff to its initial value. Make the
+	// bus healthy and feed a message so the next runOnce processes it.
+	bus.setHealthy(true)
+	client := newTestValkeyClient(t, mr)
+	streamKey := history.HistoryStreamKeyPrefix + opts.env + ":t1:c"
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
+	bus.fanOut(&broadcast.Message{Subject: "t1.c", Payload: []byte(`{}`), TenantID: "t1", Channel: "c"})
+	waitForStreamEntry(t, client, streamKey, 2*time.Second) // processed > 0 this run
+
+	// Failure after the successful run: the backoff MUST reset to initial (10ms), not
+	// the compounded 160ms. Without the reset this assertion fails — the discrimination
+	// a fixed wall-clock deadline could not make robustly.
+	bus.setHealthy(false)
+	clk.BlockUntil(1)
+	clk.Advance(opts.heartbeatInterval)
+	clk.blockUntilOneShots(1)
+	if got := clk.oneShotDelays()[0]; got != opts.restartInitialBackoff {
+		t.Fatalf("backoff after success-then-failure = %v, want reset to %v", got, opts.restartInitialBackoff)
 	}
 }
 
