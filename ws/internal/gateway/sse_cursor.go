@@ -59,3 +59,30 @@ func sseMsgPos(payload []byte) (channel, pos string, ok bool) {
 	}
 	return e.Channel, e.Pos, true
 }
+
+// intersectCursorChannels returns the subset of the decoded reconnect cursor whose channels
+// are in the (permission-filtered) requested set, or nil when there is no overlap. The SSE
+// Last-Event-ID cursor is opaque to the client, so after an unsubscribe it still carries the
+// dropped channel; the server's replay path live-registers whatever it replays, so replaying
+// a stale cursor entry would resurrect a channel the client no longer wants. Restricting the
+// cursor to the channels this connection actually requests closes that (§II: the gateway
+// validates its own inputs — defense in depth over the server-side tenant check).
+func intersectCursorChannels(cursor map[string]string, channels []string) map[string]string {
+	if len(cursor) == 0 {
+		return nil
+	}
+	requested := make(map[string]struct{}, len(channels))
+	for _, ch := range channels {
+		requested[ch] = struct{}{}
+	}
+	out := make(map[string]string, len(cursor))
+	for ch, pos := range cursor {
+		if _, ok := requested[ch]; ok {
+			out[ch] = pos
+		}
+	}
+	if len(out) == 0 {
+		return nil // no overlap → live-only, no replay
+	}
+	return out
+}
