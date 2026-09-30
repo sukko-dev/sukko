@@ -103,9 +103,17 @@ func (gw *Gateway) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	// unparseable token yields no last_pos → live-only; the cursor's channels are
 	// tenant-validated server-side before any replay (ADR-0020), so the untrusted
 	// token can never replay a channel the connection does not own.
+	//
+	// Intersect the decoded cursor against the channels this connection is actually
+	// requesting: the cursor is opaque to the SSE client, so on a resubscribe after an
+	// unsubscribe it still carries the dropped channel — and the server's replay path
+	// live-registers any channel it replays. Without this filter, an unsubscribe→reconnect
+	// would resurrect the removed channel from the stale cursor. Only replay cursor
+	// entries for channels present in the (permission-filtered) request set (§II: the
+	// gateway validates its own inputs; defense in depth over the server-side check).
 	var lastPos map[string]string
 	if cursor, ok := decodeSSECursor(r.Header.Get("Last-Event-ID")); ok {
-		lastPos = cursor
+		lastPos = intersectCursorChannels(cursor, channels)
 	}
 
 	stream, err := gw.serverClient.Client().Subscribe(ctx, &serverv1.SubscribeRequest{

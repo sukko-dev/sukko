@@ -56,3 +56,54 @@ func TestSSEMsgPos(t *testing.T) {
 		t.Error("non-JSON payload must return ok=false")
 	}
 }
+
+func TestIntersectCursorChannels(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		cursor   map[string]string
+		channels []string
+		want     map[string]string
+	}{
+		{
+			name:     "keeps only requested channels (unsubscribe: b dropped from request)",
+			cursor:   map[string]string{"t.a": "1-5", "t.b": "1-9"},
+			channels: []string{"t.a"},
+			want:     map[string]string{"t.a": "1-5"},
+		},
+		{
+			name:     "full overlap keeps all",
+			cursor:   map[string]string{"t.a": "1-5", "t.b": "1-9"},
+			channels: []string{"t.a", "t.b"},
+			want:     map[string]string{"t.a": "1-5", "t.b": "1-9"},
+		},
+		{
+			name:     "no overlap → nil (live-only, no replay)",
+			cursor:   map[string]string{"t.b": "1-9"},
+			channels: []string{"t.a"},
+			want:     nil,
+		},
+		{name: "empty cursor → nil", cursor: map[string]string{}, channels: []string{"t.a"}, want: nil},
+		{name: "nil cursor → nil", cursor: nil, channels: []string{"t.a"}, want: nil},
+		{
+			name:     "requested channel absent from cursor is not invented",
+			cursor:   map[string]string{"t.a": "1-5"},
+			channels: []string{"t.a", "t.c"},
+			want:     map[string]string{"t.a": "1-5"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := intersectCursorChannels(tt.cursor, tt.channels)
+			if len(got) != len(tt.want) {
+				t.Fatalf("intersectCursorChannels() = %v, want %v", got, tt.want)
+			}
+			for k, v := range tt.want {
+				if got[k] != v {
+					t.Errorf("key %q = %q, want %q", k, got[k], v)
+				}
+			}
+		})
+	}
+}
