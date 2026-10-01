@@ -1,5 +1,6 @@
-h1:e+v7+3skqTIAWejfu1faL7HpUr7N6fWmO8eCgf6600M=
+h1:FzVMIWEFBIDjtoAnHKwfNfLyFP8VZNEQ+dakdFVGj3s=
 001_initial.sql h1:5BHJlDLYPX8AWImpX48znFJqjxigOJMaQff7ydFEgeA=
 002_analytics_partition.sql h1:JdM7r9rl40YKOc6SzY9mHObcGAWccXECVHBaIUHBJoI=
 003_routing_rule_ingress_egress.sql h1:HnEx+bbJOjxStGvtFhrotrBJMjJK3JbUsen78X13Iv4=
 004_topics_table.sql h1:TtV/KmD5e/jZbZTDteh/U8jOMgswTFvFtZBI0tfWRlU=
+005_audit_actor_type_admin.sql h1:DsCmvLRcNptMI0rW3BCfbL7MCefDv/KNAC51npISkCk=

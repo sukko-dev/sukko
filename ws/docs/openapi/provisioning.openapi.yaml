@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Sukko Provisioning API
-  version: 1.0.1
+  version: 1.0.2
   description: |
     REST API for managing tenants, JWT signing keys, API keys, routing rules,
     channel rules, and quotas in the Sukko multi-tenant WebSocket platform.
@@ -3157,7 +3157,8 @@ components:
           description: Principal or user ID that performed the action
         actor_type:
           type: string
-          enum: [user, system, api_key]
+          description: Type of actor that performed the action.
+          enum: [user, system, api_key, admin]
         ip_address:
           type: ["string", "null"]
         details:

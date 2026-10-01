@@ -380,7 +380,7 @@ type AuditEntry struct {
 	// Actor is who performed the action (principal/user ID).
 	Actor string `json:"actor"`
 
-	// ActorType is the type of actor (user, system, api_key).
+	// ActorType is the type of actor (user, system, api_key, admin).
 	ActorType string `json:"actor_type"`
 
 	// IPAddress is the client IP address (if available).

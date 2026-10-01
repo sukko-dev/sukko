@@ -45,6 +45,50 @@ func TestAuditRepository_Log_TenantIDColumnIsUUID(t *testing.T) {
 	}
 }
 
+// TestAuditRepository_Log_AllActorTypesPersist is the §IX drift guard for the audit actor_type
+// constraint. Every code-level ActorType constant MUST be accepted by the DB valid_actor_type CHECK.
+// The realistic failure mode — which this regresses — is adding a constant (as ActorTypeAdmin was)
+// without widening the constraint: the audit insert then fails silently with SQLSTATE 23514 and the
+// security-relevant action goes unlogged (migration 005 fixed admin). Go cannot enumerate constants
+// reflectively, so this is a maintained list: add a row whenever a new ActorType* constant lands.
+func TestAuditRepository_Log_AllActorTypesPersist(t *testing.T) {
+	t.Parallel()
+	pool := testutil.NewTestPool(t)
+	repo := repository.NewAuditRepository(pool)
+	ctx := context.Background()
+	tenantUUID := mustCreateTenant(t, pool, "auditactor-"+uniqueSuffix(t))
+
+	actorTypes := []string{
+		provisioning.ActorTypeUser,
+		provisioning.ActorTypeSystem,
+		provisioning.ActorTypeAPIKey,
+		provisioning.ActorTypeAdmin, // added in code before the DB CHECK — the drift this guards
+	}
+	for i, at := range actorTypes {
+		t.Run(at, func(t *testing.T) {
+			t.Parallel()
+			entry := &provisioning.AuditEntry{
+				TenantID:  tenantUUID,
+				Action:    fmt.Sprintf("test.actor.%d", i),
+				Actor:     "tester",
+				ActorType: at,
+			}
+			if err := repo.Log(ctx, entry); err != nil {
+				t.Fatalf("audit entry with actor_type %q must persist (§IX audit trail); got: %v", at, err)
+			}
+			var stored string
+			if err := pool.QueryRow(ctx,
+				`SELECT actor_type FROM provisioning_audit WHERE id = $1`, entry.ID,
+			).Scan(&stored); err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if stored != at {
+				t.Errorf("actor_type = %q, want %q", stored, at)
+			}
+		})
+	}
+}
+
 // TestAuditRepository_Log_NormalizesIPAddress is the §II backstop for the INET
 // ip_address column: the middleware now strips ports, but the audit layer must
 // never lose a whole audit record to a malformed IP a future caller passes in.
