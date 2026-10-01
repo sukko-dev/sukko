@@ -21,6 +21,13 @@ const (
 	MsgTypePong    = "pong"
 	MsgTypeError   = "error"
 	MsgTypeGap     = "gap" // server→client: gap notification (message drop detected)
+	// MsgTypeNoReplay tells an SSE reconnecting client that one or more channels in its
+	// Last-Event-ID cursor could not be replayed (unauthorized, no Kafka mapping on a direct
+	// backend, or the replay failed) — so it must treat them as a possible gap (ADR-0030 §XV).
+	MsgTypeNoReplay = "no_replay"
+	// MsgTypeReplayTruncated tells an SSE reconnecting client its replay was cut short at
+	// MaxReplayMessages — recovery delivered a prefix and a gap remains (ADR-0030 §XV).
+	MsgTypeReplayTruncated = "replay_truncated"
 )
 
 // Replay response type constants (server→client gap recovery protocol).

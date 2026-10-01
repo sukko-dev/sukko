@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Sukko Gateway API
-  version: 1.0.2
+  version: 1.0.3
   description: |
     REST API for the Sukko WebSocket Gateway. Provides SSE streaming, REST publish,
     push notification management, and operational endpoints.
@@ -269,6 +269,25 @@ paths:
         Kafka message backend; on the direct backend, or with an absent/foreign/unparseable
         cursor, the stream serves live-only. A stale cursor simply replays a few extra
         (deduplicated) messages.
+
+
+        **Explicit recovery outcome frames.** Every SSE frame is delivered as `event: message`;
+        the client routes on the envelope's `type` in `data:` (the same way live messages and
+        `gap` notifications are carried). After the replayed messages (same stream order), the
+        server emits a typed frame when a cursor channel could not be fully recovered — so a
+        client never has to infer a gap from silence:
+
+        - `data: {"type":"no_replay","channels":[...]}` — one or more cursor channels were not
+          replayed (unauthorized, no Kafka mapping on the direct backend, or the replay failed);
+          treat the named channels as a possible gap. Channels you unsubscribed before reconnecting
+          are NOT reported here — the gateway drops them from the cursor before the server sees it,
+          and their silence is intentional.
+
+        - `data: {"type":"replay_truncated","replayed":N}` — replay hit the server's
+          `MaxReplayMessages` cap; `N` messages were delivered (possibly 0) and a gap remains.
+
+        A client that does not recognize these `type` values ignores the frame; recovery still
+        works, just without the explicit gap signal.
       tags: [SSE]
       security:
         - bearerToken: []

@@ -218,6 +218,10 @@ func (gw *Gateway) HandleSSE(w http.ResponseWriter, r *http.Request) {
 				goto done
 			}
 			payload := resp.GetPayload()
+			// Every server frame is delivered as `event: message`; the client routes on the
+			// envelope's `type` in `data:` — this carries delivery messages, gap notifications, and
+			// the reconnect-outcome frames (no_replay / replay_truncated, ADR-0030 §XV) uniformly.
+			// Only pos-bearing delivery messages advance the opaque reconnect cursor (id:).
 			if ch, pos, hasPos := sseMsgPos(payload); hasPos {
 				cursor[ch] = pos
 				cursorDirty = true
