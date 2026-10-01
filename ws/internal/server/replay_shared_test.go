@@ -1,7 +1,11 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/sukko-dev/sukko/internal/server/backend"
 )
@@ -98,5 +102,114 @@ func TestReplayAuthorizedToClient_TruncatesOnFullBuffer(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("replayed count = %d, want 1 (buffer capacity 1)", count)
+	}
+}
+
+func TestUnreplayableCursorChannels(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		lastPos    map[string]string
+		authorized []string
+		want       []string
+	}{
+		{"all authorized → none", map[string]string{"t.a": "1-5", "t.b": "1-9"}, []string{"t.a", "t.b"}, nil},
+		{"partial → the unauthorized ones", map[string]string{"t.a": "1-5", "t.b": "1-9"}, []string{"t.a"}, []string{"t.b"}},
+		{"none authorized → all", map[string]string{"t.a": "1-5", "t.b": "1-9"}, nil, []string{"t.a", "t.b"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := unreplayableCursorChannels(tt.lastPos, tt.authorized)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestSendReplayControl_DeliversNoReplayEnvelope(t *testing.T) {
+	s := newReplayTestServer(t, &mockBackend{})
+	c := newReplayTestClient(1)
+	c.send = make(chan OutgoingMsg, 2)
+
+	s.sendReplayControl(context.Background(), c, replayControlEnvelope{
+		Type: MsgTypeNoReplay, Channels: []string{"acme.x", "acme.y"},
+	})
+
+	select {
+	case msg := <-c.send:
+		var env struct {
+			Type     string   `json:"type"`
+			Channels []string `json:"channels"`
+		}
+		if err := json.Unmarshal(msg.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if env.Type != MsgTypeNoReplay || len(env.Channels) != 2 {
+			t.Fatalf("envelope = %+v, want no_replay with 2 channels", env)
+		}
+	default:
+		t.Fatal("no control frame delivered on c.send")
+	}
+}
+
+func TestSendReplayControl_AbandonsOnContextCancel(t *testing.T) {
+	s := newReplayTestServer(t, &mockBackend{})
+	c := newReplayTestClient(1)
+	c.send = make(chan OutgoingMsg) // unbuffered + no reader → send would block
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled → the blocking send must abandon, not hang
+	done := make(chan struct{})
+	go func() {
+		s.sendReplayControl(ctx, c, replayControlEnvelope{Type: MsgTypeReplayTruncated, Replayed: 3})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendReplayControl hung on a full buffer with a canceled ctx")
+	}
+}
+
+func TestReplayOutcome(t *testing.T) {
+	t.Parallel()
+	cur := map[string]string{"t.a": "1-5", "t.b": "1-9"}
+	tests := []struct {
+		name          string
+		authorized    []string
+		truncated     bool
+		replayErr     error
+		wantNoReplay  []string
+		wantTruncated bool
+	}{
+		{"all authorized, clean", []string{"t.a", "t.b"}, false, nil, nil, false},
+		{"partial auth → the unauthorized one", []string{"t.a"}, false, nil, []string{"t.b"}, false},
+		{"truncated only", []string{"t.a", "t.b"}, true, nil, nil, true},
+		{"partial auth AND truncated (co-occur)", []string{"t.a"}, true, nil, []string{"t.b"}, true},
+		{"replay error → all channels, never truncated", []string{"t.a"}, true, errors.New("boom"), []string{"t.a", "t.b"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			noReplay, isTrunc := replayOutcome(cur, tt.authorized, tt.truncated, tt.replayErr)
+			if isTrunc != tt.wantTruncated {
+				t.Errorf("isTruncated = %v, want %v", isTrunc, tt.wantTruncated)
+			}
+			if len(noReplay) != len(tt.wantNoReplay) {
+				t.Fatalf("noReplay = %v, want %v", noReplay, tt.wantNoReplay)
+			}
+			for i := range tt.wantNoReplay {
+				if noReplay[i] != tt.wantNoReplay[i] {
+					t.Fatalf("noReplay = %v, want %v", noReplay, tt.wantNoReplay)
+				}
+			}
+		})
 	}
 }

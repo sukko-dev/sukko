@@ -208,19 +208,31 @@ func (svc *GRPCService) Subscribe(req *serverv1.SubscribeRequest, stream serverv
 	// with the gateway envelope work.
 	if lastPos := req.GetLastPos(); len(lastPos) > 0 {
 		positions, authorized := s.authorizeLastPos(client, lastPos)
+		count, truncated := 0, false
+		var replayErr error
 		if len(positions) > 0 {
-			count, truncated, err := s.replayAuthorizedToClient(client, positions, authorized)
-			switch {
-			case err != nil:
-				svc.logger.Warn().Int64("client_id", client.id).Err(err).
-					Msg("SSE reconnect replay failed; serving live-only")
-			case truncated:
-				svc.logger.Warn().Int64("client_id", client.id).Int("replayed", count).
-					Msg("SSE reconnect replay truncated at MaxReplayMessages; a gap remains")
-			default:
-				svc.logger.Info().Int64("client_id", client.id).Int("replayed", count).
-					Msg("SSE reconnect replay completed")
-			}
+			count, truncated, replayErr = s.replayAuthorizedToClient(client, positions, authorized)
+		}
+		noReplay, isTruncated := replayOutcome(lastPos, authorized, truncated, replayErr)
+		switch {
+		case replayErr != nil:
+			svc.logger.Warn().Int64("client_id", client.id).Err(replayErr).
+				Msg("SSE reconnect replay failed; serving live-only")
+		case truncated:
+			svc.logger.Warn().Int64("client_id", client.id).Int("replayed", count).
+				Msg("SSE reconnect replay truncated at MaxReplayMessages; a gap remains")
+		default:
+			svc.logger.Info().Int64("client_id", client.id).Int("replayed", count).
+				Msg("SSE reconnect replay completed")
+		}
+		// Emit the explicit outcome signals AFTER the replayed messages (same c.send FIFO), so the
+		// client sees the recovered records then the verdict. no_replay and replay_truncated are
+		// independent and may co-occur (some channels gapped, the replayed ones cut short).
+		if len(noReplay) > 0 {
+			s.sendReplayControl(ctx, client, replayControlEnvelope{Type: MsgTypeNoReplay, Channels: noReplay})
+		}
+		if isTruncated {
+			s.sendReplayControl(ctx, client, replayControlEnvelope{Type: MsgTypeReplayTruncated, Replayed: count})
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/sukko-dev/sukko/internal/server/backend"
@@ -138,4 +139,71 @@ func (s *Server) replayAuthorizedToClient(c *Client, positions map[string]map[in
 		}
 	}
 	return replayedCount, false, nil
+}
+
+// replayControlEnvelope is a server→client control frame reporting a reconnect-replay outcome the
+// client cannot infer from the message stream (ADR-0030 §XV). For no_replay, Channels names the
+// affected cursor channels (treat as a possible gap); for replay_truncated, Replayed is the count
+// delivered before the cut.
+type replayControlEnvelope struct {
+	Type     string   `json:"type"`
+	Channels []string `json:"channels,omitempty"`
+	// Replayed has NO omitempty: replay_truncated{replayed:0} is reachable (the send buffer was
+	// full at the very first replay message), and the contract documents the field unconditionally.
+	Replayed int `json:"replayed"`
+}
+
+// replayOutcome decides the explicit reconnect-recovery signals (ADR-0030 §XV) from a replay
+// attempt: the cursor channels to report as no_replay, and whether the replay was truncated. A
+// replay that errored delivered nothing, so every cursor channel is a gap; otherwise the no_replay
+// set is the cursor channels that weren't replay-eligible (unauthorized / no Kafka mapping), and
+// truncation is reported as-is. The two are independent and may co-occur.
+func replayOutcome(lastPos map[string]string, authorized []string, truncated bool, replayErr error) (noReplay []string, isTruncated bool) {
+	if replayErr != nil {
+		return sortedCursorChannels(lastPos), false
+	}
+	return unreplayableCursorChannels(lastPos, authorized), truncated
+}
+
+// sendReplayControl delivers one replay-outcome control frame, blocking (bounded by ctx) until the
+// write pump drains a send slot. Unlike the replay messages' non-blocking send, this signal MUST
+// NOT be dropped — and for replay_truncated the send buffer is full by definition, so a
+// non-blocking send would drop exactly the message that matters. A ctx cancel (client gone)
+// abandons it.
+func (s *Server) sendReplayControl(ctx context.Context, c *Client, env replayControlEnvelope) {
+	data, _ := json.Marshal(env) // only JSON-safe types; Marshal cannot fail
+	select {
+	case c.send <- RawMsg(data):
+	case <-ctx.Done():
+	}
+}
+
+// unreplayableCursorChannels returns, sorted, the cursor channels that were NOT replay-eligible —
+// the keys of lastPos not present in authorized (unauthorized, or no Kafka mapping on a direct
+// backend). Channels the gateway's cursor∩channels intersect (#34) already dropped never appear in
+// lastPos, so they are correctly not reported (the client unsubscribed them).
+func unreplayableCursorChannels(lastPos map[string]string, authorized []string) []string {
+	ok := make(map[string]struct{}, len(authorized))
+	for _, ch := range authorized {
+		ok[ch] = struct{}{}
+	}
+	var out []string
+	for ch := range lastPos {
+		if _, found := ok[ch]; !found {
+			out = append(out, ch)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// sortedCursorChannels returns all cursor channels sorted (the no_replay set when replay failed
+// outright — nothing was replayed).
+func sortedCursorChannels(lastPos map[string]string) []string {
+	out := make([]string, 0, len(lastPos))
+	for ch := range lastPos {
+		out = append(out, ch)
+	}
+	slices.Sort(out)
+	return out
 }
