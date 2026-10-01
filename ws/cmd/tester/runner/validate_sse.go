@@ -19,6 +19,22 @@ import (
 // validation suites — qualified with the run's tenant via tenantChannel().
 const validateSSEChannel = "general.validate"
 
+// sseEventIDError validates a received SSE `id:` line, returning "" when valid or a
+// human-readable reason otherwise. The id is the ADR-0030 reconnect cursor, NOT a per-message id:
+// the gateway emits it only for pos-bearing (Kafka) messages, and then only at a bounded cadence
+// (the first one, then every SSECursorEveryN). So a delivered event legitimately carries no id —
+// on a direct backend (never pos-bearing) or between cadence emissions on Kafka. Requiring presence
+// encoded the pre-ADR-0030 per-message-sequence contract (removed in the SSE-recovery work), which
+// failed on direct cells and would fail on Kafka too for any message past the first. We assert only
+// that a PRESENT id is a well-formed opaque cursor (the public `v1:` version prefix); end-to-end
+// cursor-resume correctness is covered by the sse-recovery suite.
+func sseEventIDError(id string) string {
+	if id != "" && !strings.HasPrefix(id, "v1:") {
+		return fmt.Sprintf("event id %q is not a v1 reconnect cursor", id)
+	}
+	return ""
+}
+
 func validateSSE(ctx context.Context, run *TestRun, logger zerolog.Logger) ([]metrics.CheckResult, error) {
 	provClient := run.authResult.ProvClient
 	tenantID := run.authResult.TenantID
@@ -92,8 +108,8 @@ func validateSSE(ctx context.Context, run *TestRun, logger zerolog.Logger) ([]me
 
 			// Verify event format
 			var errs []string
-			if event.ID == "" {
-				errs = append(errs, "missing event id")
+			if e := sseEventIDError(event.ID); e != "" {
+				errs = append(errs, e)
 			}
 			if event.Type != "message" {
 				errs = append(errs, fmt.Sprintf("event type = %q, want %q", event.Type, "message"))
