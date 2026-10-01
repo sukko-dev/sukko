@@ -20,13 +20,13 @@ Client SDKs ──┐
 - **ws-gateway** — WebSocket/SSE/REST reverse proxy with JWT auth, tenant isolation, rate limiting, connection tracking, token revocation
 - **ws-server** — Core WebSocket server with sharded connections, Kafka/Redpanda consumption, Valkey broadcast
 - **provisioning** — Multi-tenant management API (tenants, signing keys, API keys, routing rules, channel rules, license, token revocation)
-- **push** — Push notification service (Web Push, FCM, APNs) with Kafka-driven delivery
+- **push** — Push notification service (Web Push; mobile FCM/APNs planned) with Kafka-driven delivery
 
 **Transports:**
 - WebSocket (`/ws`) — bidirectional, real-time
 - SSE (`/sse`) — server-sent events, read-only stream
 - REST Publish (`POST /api/v1/publish`) — HTTP message injection
-- Push Notifications — offline delivery via Web Push, FCM, APNs
+- Push Notifications — offline delivery via Web Push (mobile FCM/APNs planned)
 
 ## Quick Start
 
@@ -134,7 +134,9 @@ sukko rules channels set --tenant <tenant> --public "*"
 | Message history & gap recovery | Yes | Yes | Yes |
 | Token revocation | - | Yes | Yes |
 | Web Push | - | Yes | Yes |
-| Mobile push (FCM/APNs) | - | - | Yes |
+| Mobile push (FCM/APNs) | - | - | Planned |
+
+_Planned = on the roadmap, not yet available._
 
 ## Key Technologies
 
