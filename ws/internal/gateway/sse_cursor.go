@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/base64"
 	"encoding/json"
+	"maps"
 	"strings"
 )
 
@@ -85,4 +86,17 @@ func intersectCursorChannels(cursor map[string]string, channels []string) map[st
 		return nil // no overlap → live-only, no replay
 	}
 	return out
+}
+
+// seedCursor builds the per-connection reconnect-cursor map, seeded with the inbound Last-Event-ID
+// positions (ADR-0030). A channel that receives no pos-bearing message this connection keeps its
+// resume baseline: without the seed, the emitted cursor is rebuilt from delivered messages alone, so
+// an intermittently-quiet channel erodes out of the token on the next reconnect and loses its resume
+// point (a silent gap). lastPos is already intersected against the requested channels, so the seed
+// never resurrects a channel the client unsubscribed. The returned map is always non-nil and mutable
+// — a first connect (nil lastPos) yields an empty map the delivery loop can still write into.
+func seedCursor(lastPos map[string]string) map[string]string {
+	cursor := make(map[string]string, len(lastPos))
+	maps.Copy(cursor, lastPos)
+	return cursor
 }

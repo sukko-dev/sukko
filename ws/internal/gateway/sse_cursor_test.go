@@ -107,3 +107,45 @@ func TestIntersectCursorChannels(t *testing.T) {
 		})
 	}
 }
+
+// TestSeedCursor_PreservesQuietChannelOnAdvance is the PR1 regression for Last-Event-ID erosion:
+// when a reconnect's inbound cursor covers A and B and only B advances this connection (A stays
+// quiet), the emitted cursor must still carry A's baseline. Before the seed, the cursor was rebuilt
+// from delivered messages alone, so A silently dropped out of the next token.
+func TestSeedCursor_PreservesQuietChannelOnAdvance(t *testing.T) {
+	t.Parallel()
+	inbound := map[string]string{"acme.md-1": "2-5", "acme.md-2": "3-9"}
+	cursor := seedCursor(inbound)
+
+	// Mutating the seed must not alias the caller's inbound map.
+	cursor["acme.md-2"] = "3-20" // B advances; A (md-1) stays quiet
+	if inbound["acme.md-2"] != "3-9" {
+		t.Fatalf("seedCursor aliased the inbound map: inbound md-2 = %q, want 3-9", inbound["acme.md-2"])
+	}
+
+	out, ok := decodeSSECursor(encodeSSECursor(cursor))
+	if !ok {
+		t.Fatal("re-decode of the emitted cursor failed")
+	}
+	if out["acme.md-1"] != "2-5" {
+		t.Errorf("quiet channel eroded: md-1 = %q, want 2-5 (preserved baseline)", out["acme.md-1"])
+	}
+	if out["acme.md-2"] != "3-20" {
+		t.Errorf("advanced channel md-2 = %q, want 3-20", out["acme.md-2"])
+	}
+}
+
+// TestSeedCursor_NilInboundIsEmptyMutable guards the first-connect path: a nil inbound cursor must
+// yield an empty, non-nil map the delivery loop can still write into (maps.Clone(nil) would return
+// nil and the later cursor[ch]=pos would panic).
+func TestSeedCursor_NilInboundIsEmptyMutable(t *testing.T) {
+	t.Parallel()
+	cursor := seedCursor(nil)
+	if cursor == nil {
+		t.Fatal("seedCursor(nil) returned a nil map; the delivery loop would panic writing to it")
+	}
+	if len(cursor) != 0 {
+		t.Fatalf("seedCursor(nil) = %v, want empty", cursor)
+	}
+	cursor["acme.md-1"] = "1-1" // must not panic
+}

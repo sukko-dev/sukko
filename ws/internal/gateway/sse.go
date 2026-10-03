@@ -204,8 +204,10 @@ func (gw *Gateway) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	// bounded cadence — the first pos-bearing message (so an early disconnect still
 	// leaves a resume point), then at most every SSECursorEveryN messages, plus a
 	// keepalive-tick flush if it advanced. Encoding the cursor therefore never sits
-	// on the per-message delivery path (§VII).
-	cursor := make(map[string]string, len(channels))
+	// on the per-message delivery path (§VII). Seed it from the inbound cursor so a
+	// channel that stays quiet this connection keeps its resume baseline instead of
+	// eroding out of the next emitted token (see seedCursor).
+	cursor := seedCursor(lastPos)
 	sinceCursor := 0
 	cursorDirty := false
 	cursorSent := false
