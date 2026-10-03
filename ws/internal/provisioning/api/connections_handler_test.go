@@ -33,13 +33,12 @@ func newTestConnectionsHandler() *ConnectionsHandler {
 	})
 }
 
-// withTenantClaims injects JWT claims (the source of the tenant slug for registry reads,
-// via getTenantSlugFromClaims) and stashes the tenant UUID (for audit-log writes),
-// simulating what AuthMiddleware + RequireTenant do. uuid == slug here.
+// withTenantClaims simulates a TENANT caller after AuthMiddleware + RequireTenant: it sets the
+// tenant claim and stashes the effective slug (== claims.TenantID) and the tenant UUID. uuid == slug.
 func withTenantClaims(r *http.Request, tenantID string) *http.Request {
 	r = r.WithContext(auth.WithClaims(r.Context(), &auth.Claims{TenantID: tenantID}))
 	//nolint:contextcheck // stashTenantIdentity derives from r.Context() (mirrors RequireTenant); test helper.
-	return r.WithContext(stashTenantIdentity(r.Context(), &provisioning.Tenant{ID: tenantID, Slug: tenantID}))
+	return r.WithContext(stashTenantIdentity(r.Context(), &provisioning.Tenant{ID: tenantID, Slug: tenantID}, tenantID))
 }
 
 // withTenantIdentity injects a distinct tenant slug (in claims, the registry key) and
@@ -48,7 +47,16 @@ func withTenantClaims(r *http.Request, tenantID string) *http.Request {
 func withTenantIdentity(r *http.Request, uuid, slug string) *http.Request {
 	r = r.WithContext(auth.WithClaims(r.Context(), &auth.Claims{TenantID: slug}))
 	//nolint:contextcheck // stashTenantIdentity derives from r.Context() (mirrors RequireTenant); test helper.
-	return r.WithContext(stashTenantIdentity(r.Context(), &provisioning.Tenant{ID: uuid, Slug: slug}))
+	return r.WithContext(stashTenantIdentity(r.Context(), &provisioning.Tenant{ID: uuid, Slug: slug}, slug))
+}
+
+// withOperatorContext simulates RequireTenant's admin/system branch: an operator JWT carries NO
+// tenant claim, but the effective registry slug and the tenant UUID are stashed from the
+// URL-resolved tenant. Proves operators can manage a tenant's connections (ADR-0033) — before it,
+// the handler read the empty claims slug and 401'd.
+func withOperatorContext(r *http.Request, uuid, slug string) *http.Request {
+
+	return r.WithContext(stashTenantIdentity(r.Context(), &provisioning.Tenant{ID: uuid, Slug: slug}, slug))
 }
 
 // TestHandleListConnections_MissingClaims verifies that HandleListConnections returns
@@ -603,7 +611,7 @@ func TestHandleDeleteConnection_MissingUUIDFailsClosed(t *testing.T) {
 	h.service = svc
 
 	req := httptest.NewRequest(http.MethodDelete, "/tenants/acme/connections/conn-1", http.NoBody)
-	// Claims set (slug present) but NO stashed UUID.
+	// No stashed tenant context (RequireTenant not run): both the effective slug and UUID are empty.
 	req = req.WithContext(auth.WithClaims(req.Context(), &auth.Claims{TenantID: "acme"}))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("connId", "conn-1")
@@ -617,5 +625,27 @@ func TestHandleDeleteConnection_MissingUUIDFailsClosed(t *testing.T) {
 	}
 	if svc.auditCalled {
 		t.Error("AuditLog must not be called when the tenant UUID is missing (fail closed)")
+	}
+}
+
+// TestHandleListConnections_OperatorReachesViaStashedSlug proves an operator (admin/system JWT, no
+// tenant claim) lists a tenant's connections: the handler reads the slug RequireTenant stashed, not
+// claims. Before ADR-0033 this 401'd because the handler read the empty claims slug — a real caller
+// (admin tokens have no tenant_id) that no middleware test caught (the chain test used a passthrough).
+func TestHandleListConnections_OperatorReachesViaStashedSlug(t *testing.T) {
+	t.Parallel()
+
+	h := newTestConnectionsHandler()
+	h.reader = &fakeConnReader{listResult: []ConnectionDetail{{ConnectionID: "c1", PodID: "pod-1"}}}
+	h.service = &mockConnService{}
+
+	req := httptest.NewRequest(http.MethodGet, "/tenants/acme/connections", http.NoBody)
+	req = withOperatorContext(req, "uuid-acme", "acme")
+	rr := httptest.NewRecorder()
+
+	h.HandleListConnections(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("operator list: status = %d, want 200 (operator must reach via the stashed slug); body: %s", rr.Code, rr.Body.String())
 	}
 }

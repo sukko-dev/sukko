@@ -1992,8 +1992,7 @@ paths:
       tags: [Webhooks]
       description: Creates a new webhook registration. Operator endpoint — requires admin or system role (tenant JWTs are rejected with 403) and Pro edition. URL must use https (http allowed for local dev only).
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
       requestBody:
@@ -2054,8 +2053,7 @@ paths:
       tags: [Webhooks]
       description: Returns paginated webhooks for the tenant. Operator endpoint — requires admin or system role (tenant JWTs are rejected with 403) and Pro edition.
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - $ref: "#/components/parameters/limit"
@@ -2095,8 +2093,7 @@ paths:
       operationId: getWebhook
       tags: [Webhooks]
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - name: webhookID
@@ -2145,10 +2142,9 @@ paths:
       summary: Partially update a webhook
       operationId: updateWebhook
       tags: [Webhooks]
-      description: All fields are optional. Omitted fields are unchanged. Status transitions — enabled ↔ degraded ↔ suspended.
+      description: All fields are optional. Omitted fields are unchanged. Status transitions — enabled ↔ degraded ↔ suspended. Operator endpoint — requires admin or system role (tenant JWTs are rejected with 403) and Pro edition.
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - name: webhookID
@@ -2207,8 +2203,7 @@ paths:
       operationId: deleteWebhook
       tags: [Webhooks]
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - name: webhookID

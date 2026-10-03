@@ -30,13 +30,16 @@ type contextKey string
 const (
 	// ActorContextKey is the context key for the actor (tenant_id:user_id).
 	ActorContextKey contextKey = "actor"
-	// tenantUUIDContextKey holds the validated tenant's UUID (identity-of-record),
-	// stashed by RequireTenant for handlers that write UUID-keyed records (webhooks,
+	// tenantUUIDContextKey holds the validated tenant's UUID (identity-of-record, control
+	// plane), stashed by RequireTenant for handlers that write UUID-keyed records (webhooks,
 	// audit log). Reuses the tenant record RequireTenant already fetched — no extra query.
-	// The tenant SLUG (for data-plane/registry reads) is not stashed: it comes from the
-	// already-validated claims.TenantID via getTenantSlugFromClaims, preserving the
-	// connection registry's connect-time-slug keying (see getTenantSlugFromClaims).
 	tenantUUIDContextKey contextKey = "tenant_uuid"
+	// tenantSlugContextKey holds the effective data-path slug (registry keying), also stashed by
+	// RequireTenant. It differs by caller: a tenant passes its own claims.TenantID — the
+	// connect-time slug, correct for the connection registry even under a rename grace window; an
+	// operator (no tenant claim) passes the tenant's current slug. Handlers read it via
+	// getEffectiveTenantSlug.
+	tenantSlugContextKey contextKey = "tenant_slug"
 )
 
 // LoggingMiddleware provides structured request logging.
@@ -292,7 +295,8 @@ func RequireTenant(lookup provisioning.TenantLookupFunc, holdPeriod time.Duratio
 					httputil.WriteError(w, http.StatusServiceUnavailable, errCodeServiceUnavailable, "Service temporarily unavailable")
 					return
 				}
-				next.ServeHTTP(w, r.WithContext(stashTenantIdentity(r.Context(), tenant)))
+				// Operator: no tenant claim — the effective registry slug is the tenant's current slug.
+				next.ServeHTTP(w, r.WithContext(stashTenantIdentity(r.Context(), tenant, tenant.Slug)))
 				return
 			}
 
@@ -310,7 +314,7 @@ func RequireTenant(lookup provisioning.TenantLookupFunc, holdPeriod time.Duratio
 
 			// (3) Direct slug match.
 			if claims.TenantID == tenant.Slug {
-				next.ServeHTTP(w, r.WithContext(stashTenantIdentity(r.Context(), tenant)))
+				next.ServeHTTP(w, r.WithContext(stashTenantIdentity(r.Context(), tenant, claims.TenantID)))
 				return
 			}
 
@@ -324,7 +328,7 @@ func RequireTenant(lookup provisioning.TenantLookupFunc, holdPeriod time.Duratio
 				tenant.SlugRenamedAt != nil &&
 				time.Since(*tenant.SlugRenamedAt) < holdPeriod &&
 				claims.TenantID == tenant.PreviousSlug {
-				next.ServeHTTP(w, r.WithContext(stashTenantIdentity(r.Context(), tenant)))
+				next.ServeHTTP(w, r.WithContext(stashTenantIdentity(r.Context(), tenant, claims.TenantID)))
 				return
 			}
 
@@ -351,33 +355,33 @@ func GetActorFromContext(ctx context.Context) string {
 	return actor
 }
 
-// stashTenantIdentity stores the validated tenant's UUID (identity-of-record) in ctx.
-// Called by RequireTenant after a successful tenant match so handlers that write
-// UUID-keyed records read the UUID from the validated record rather than from
-// claims.TenantID (a slug).
-func stashTenantIdentity(ctx context.Context, tenant *provisioning.Tenant) context.Context {
-	return context.WithValue(ctx, tenantUUIDContextKey, tenant.ID)
+// stashTenantIdentity stores the validated tenant's UUID (identity-of-record, control plane) and
+// its effective data-path slug (registry keying) in ctx. Called by RequireTenant after a successful
+// match. effectiveSlug differs by caller: a tenant passes its own claims.TenantID (the connect-time
+// slug, correct for the connection registry even during a rename grace window); an operator passes
+// the tenant's current slug (operators carry no tenant claim). Handlers read these via
+// getTenantUUIDFromContext / getEffectiveTenantSlug rather than from claims.
+func stashTenantIdentity(ctx context.Context, tenant *provisioning.Tenant, effectiveSlug string) context.Context {
+	ctx = context.WithValue(ctx, tenantUUIDContextKey, tenant.ID)
+	return context.WithValue(ctx, tenantSlugContextKey, effectiveSlug)
 }
 
-// getTenantUUIDFromContext returns the validated tenant UUID stashed by RequireTenant,
-// or "" when absent (e.g. admin/system callers that bypass the tenant lookup). Handlers
-// that write UUID-keyed records (webhooks, audit log) MUST use this, not claims.TenantID.
+// getTenantUUIDFromContext returns the validated tenant UUID stashed by RequireTenant, or "" when
+// absent (no validated tenant context). Handlers that write UUID-keyed records (webhooks) MUST use
+// this, not claims.TenantID.
 func getTenantUUIDFromContext(r *http.Request) string {
 	v, _ := r.Context().Value(tenantUUIDContextKey).(string)
 	return v
 }
 
-// getTenantSlugFromClaims returns the caller's validated tenant slug (claims.TenantID),
-// or "" when absent. RequireTenant has already verified this slug matches the URL tenant
-// (directly or via the rename grace window). Handlers that read the connection registry
-// (data plane) MUST use this — the registry is keyed by the connect-time slug, so the
-// caller's authenticated slug is the correct scoping key.
-func getTenantSlugFromClaims(r *http.Request) string {
-	claims := GetClaimsFromContext(r.Context())
-	if claims == nil {
-		return ""
-	}
-	return claims.TenantID
+// getEffectiveTenantSlug returns the effective data-path slug stashed by RequireTenant, or "" when
+// absent. Handlers that read the connection registry (data plane) MUST use this: for a tenant
+// caller it is the connect-time slug (claims.TenantID), and for an operator it is the tenant's
+// current slug — so operators can manage any tenant's connections, which reading claims (empty for
+// admin JWTs) could not support.
+func getEffectiveTenantSlug(r *http.Request) string {
+	v, _ := r.Context().Value(tenantSlugContextKey).(string)
+	return v
 }
 
 // RateLimitMiddleware applies global and per-IP token-bucket rate limits.
