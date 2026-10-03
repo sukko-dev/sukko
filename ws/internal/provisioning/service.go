@@ -1984,8 +1984,12 @@ func (s *Service) UpdateWebhook(ctx context.Context, req UpdateWebhookRequest) (
 	if s.webhooks == nil {
 		return nil, ErrWebhookStoreNotConfigured
 	}
+	// SecretEnc is service-internal: only the encrypt block below may set it. Scrub any value a
+	// caller supplied so ciphertext can never reach the repository except via validated encryption.
+	req.SecretEnc = nil
+	rotating := req.Secret != nil
 
-	if req.URL == nil && req.ChannelPattern == nil && req.MaxRetries == nil && req.Status == nil {
+	if req.URL == nil && req.ChannelPattern == nil && req.MaxRetries == nil && req.Status == nil && req.Secret == nil {
 		return nil, fmt.Errorf("%w: at least one field must be provided", ErrWebhookInvalidInput)
 	}
 
@@ -2006,6 +2010,21 @@ func (s *Service) UpdateWebhook(ctx context.Context, req UpdateWebhookRequest) (
 				ErrWebhookInvalidInput, types.WebhookStatusEnabled, types.WebhookStatusSuspended, *req.Status)
 		}
 	}
+	// A secret rotation: validate non-empty (as on create) and encrypt at the service layer.
+	// The plaintext never reaches the repository, which persists only SecretEnc (ADR-0034).
+	if req.Secret != nil {
+		if *req.Secret == "" {
+			return nil, fmt.Errorf("%w: secret is required", ErrWebhookInvalidInput)
+		}
+		secretEnc, err := crypto.EncryptCredential(*req.Secret, s.config.EncryptionKey)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt webhook secret: %w", err)
+		}
+		req.SecretEnc = &secretEnc
+	}
+	// The repository persists only SecretEnc; drop the plaintext before it crosses that boundary
+	// so no downstream code (or stray struct log) can observe it (ADR-0034, §IX).
+	req.Secret = nil
 
 	w, err := s.webhooks.Update(ctx, req)
 	if err != nil {
@@ -2014,7 +2033,15 @@ func (s *Service) UpdateWebhook(ctx context.Context, req UpdateWebhookRequest) (
 	if s.config.InvalidationPublisher != nil {
 		s.config.InvalidationPublisher.Publish(req.TenantID)
 	}
-	s.auditLog(ctx, req.TenantID, ActionUpdateWebhook, Metadata{"webhook_id": req.ID})
+	// A rotation is independently auditable (§IX); non-secret fields in the same PATCH still
+	// log update_webhook, so a request carrying both produces two entries (ADR-0034). The secret
+	// itself is never recorded in the metadata.
+	if rotating {
+		s.auditLog(ctx, req.TenantID, ActionRotateWebhookSecret, Metadata{"webhook_id": req.ID})
+	}
+	if req.URL != nil || req.ChannelPattern != nil || req.MaxRetries != nil || req.Status != nil {
+		s.auditLog(ctx, req.TenantID, ActionUpdateWebhook, Metadata{"webhook_id": req.ID})
+	}
 	return w, nil
 }
 

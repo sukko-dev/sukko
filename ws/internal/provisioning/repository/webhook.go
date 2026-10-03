@@ -134,6 +134,13 @@ func (r *WebhookRepository) Update(ctx context.Context, req provisioning.UpdateW
 		args = append(args, *req.MaxRetries)
 		argIdx++
 	}
+	// Secret rotation: the service encrypted the plaintext into SecretEnc (ADR-0034); the repo
+	// persists only the ciphertext and never sees the plaintext.
+	if req.SecretEnc != nil {
+		setClauses = append(setClauses, fmt.Sprintf("secret_enc = $%d", argIdx))
+		args = append(args, *req.SecretEnc)
+		argIdx++
+	}
 	if req.Status != nil {
 		setClauses = append(setClauses, fmt.Sprintf("status = $%d", argIdx))
 		args = append(args, *req.Status)

@@ -387,3 +387,49 @@ func TestWebhookHandler_Create_InternalError(t *testing.T) {
 }
 
 func testLogger(_ *testing.T) zerolog.Logger { return zerolog.Nop() }
+
+// TestWebhookHandler_Update_SecretFlowsThrough verifies the handler decodes the optional `secret`
+// field and passes it to the service as a non-nil Secret (ADR-0034) — and that a PATCH without it
+// leaves Secret nil (no accidental rotation).
+func TestWebhookHandler_Update_SecretFlowsThrough(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		body       map[string]any
+		wantSecret *string
+	}{
+		{"secret present", map[string]any{"secret": "new-sek"}, new("new-sek")},
+		{"secret absent", map[string]any{"status": "suspended"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var captured provisioning.UpdateWebhookRequest
+			svc := &mockWebhookService{
+				updateFn: func(_ context.Context, req provisioning.UpdateWebhookRequest) (*provisioning.Webhook, error) {
+					captured = req
+					return &provisioning.Webhook{ID: req.ID, TenantID: req.TenantID}, nil
+				},
+			}
+			h := newTestWebhookHandler(t, svc)
+			body, _ := json.Marshal(tt.body)
+			r := httptest.NewRequest(http.MethodPatch, "/webhooks/wh_rot", bytes.NewReader(body))
+			r = reqWithTenantID(r, "tenant-uuid-1")
+			r = reqWithWebhookID(r, "wh_rot")
+			rr := httptest.NewRecorder()
+			h.HandleUpdate(rr, r)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rr.Code)
+			}
+			switch {
+			case tt.wantSecret == nil && captured.Secret != nil:
+				t.Errorf("Secret = %q, want nil", *captured.Secret)
+			case tt.wantSecret != nil && captured.Secret == nil:
+				t.Error("Secret = nil, want it passed through")
+			case tt.wantSecret != nil && *captured.Secret != *tt.wantSecret:
+				t.Errorf("Secret = %q, want %q", *captured.Secret, *tt.wantSecret)
+			}
+		})
+	}
+}
