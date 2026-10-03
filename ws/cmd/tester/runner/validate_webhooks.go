@@ -124,15 +124,21 @@ func runWebhookScenario(
 	token := run.authResult.TokenFunc(0)
 	pfx := "webhooks/" + name + "/"
 
-	// Step 1: generate a unique runID and secret for this scenario.
+	// Step 1: generate a unique runID and secret for this scenario. The secret is used as the
+	// hex string on the wire: CreateWebhook sends it, provisioning encrypts it as-is, and the
+	// webhook-worker HMAC-signs delivery bodies with the decrypted bytes (i.e. the hex-string
+	// bytes). The receiver MUST validate with the same key form, so register the hex-string bytes
+	// — NOT the raw random bytes, which would make every delivered signature fail (receiver 403).
 	runID := uuid.NewString()
-	secret := make([]byte, webhookTestSecretLen)
-	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
+	rawSecret := make([]byte, webhookTestSecretLen)
+	if _, err := io.ReadFull(rand.Reader, rawSecret); err != nil {
 		return fail(pfx+"setup", fmt.Sprintf("generate secret: %v", err)), nil
 	}
+	secretHex := hex.EncodeToString(rawSecret)
 
-	// Step 2: register in the store; defer removal (zeroes secret bytes).
-	run.webhookStore.register(runID, secret, failFirstN)
+	// Step 2: register the receiver's HMAC key (the hex-string bytes, matching the worker); defer
+	// removal (zeroes the key bytes).
+	run.webhookStore.register(runID, []byte(secretHex), failFirstN)
 	defer run.webhookStore.delete(runID)
 
 	// Step 3: provision routing rule so the webhook-worker receives broadcasts.
@@ -145,7 +151,7 @@ func runWebhookScenario(
 	webhookURL := run.webhookBaseURL + "/webhook-receive/" + runID
 	webhookID, err := provClient.CreateWebhook(
 		ctx, tenantID, token, webhookURL, webhookTestChannelPatt,
-		hex.EncodeToString(secret), maxRetries,
+		secretHex, maxRetries,
 	)
 	if err != nil {
 		return fail(pfx+"create-webhook", fmt.Sprintf("create webhook: %v", err)), nil
