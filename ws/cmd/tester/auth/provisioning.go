@@ -840,7 +840,7 @@ type createWebhookRequest struct {
 
 // CreateWebhook registers a new webhook for the given tenant.
 // Returns the webhook ID assigned by the provisioning service.
-func (c *ProvisioningClient) CreateWebhook(ctx context.Context, tenantSlug, token, url, channelPattern, secret string, maxRetries int) (string, error) {
+func (c *ProvisioningClient) CreateWebhook(ctx context.Context, tenantSlug, url, channelPattern, secret string, maxRetries int) (string, error) {
 	body, err := json.Marshal(createWebhookRequest{ //nolint:gosec // G117 false positive: Secret field carries the webhook signing secret intentionally sent to the provisioning API; this is not a credential leak
 		URL:            url,
 		ChannelPattern: channelPattern,
@@ -857,7 +857,7 @@ func (c *ProvisioningClient) CreateWebhook(ctx context.Context, tenantSlug, toke
 	if err != nil {
 		return "", fmt.Errorf("create webhook: build request: %w", err)
 	}
-	c.setTenantAuth(req, token)
+	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -879,14 +879,14 @@ func (c *ProvisioningClient) CreateWebhook(ctx context.Context, tenantSlug, toke
 }
 
 // GetWebhookByID fetches a webhook by ID and returns its current status.
-func (c *ProvisioningClient) GetWebhookByID(ctx context.Context, tenantSlug, token, webhookID string) (string, error) {
+func (c *ProvisioningClient) GetWebhookByID(ctx context.Context, tenantSlug, webhookID string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.baseURL+"/api/v1/tenants/"+tenantSlug+"/webhooks/"+webhookID,
 		http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("get webhook: build request: %w", err)
 	}
-	c.setTenantAuth(req, token)
+	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -908,14 +908,14 @@ func (c *ProvisioningClient) GetWebhookByID(ctx context.Context, tenantSlug, tok
 }
 
 // DeleteWebhook deletes a webhook registration.
-func (c *ProvisioningClient) DeleteWebhook(ctx context.Context, tenantSlug, token, webhookID string) error {
+func (c *ProvisioningClient) DeleteWebhook(ctx context.Context, tenantSlug, webhookID string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
 		c.baseURL+"/api/v1/tenants/"+tenantSlug+"/webhooks/"+webhookID,
 		http.NoBody)
 	if err != nil {
 		return fmt.Errorf("delete webhook: build request: %w", err)
 	}
-	c.setTenantAuth(req, token)
+	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -927,15 +927,6 @@ func (c *ProvisioningClient) DeleteWebhook(ctx context.Context, tenantSlug, toke
 		return c.readError("delete webhook", resp)
 	}
 	return nil
-}
-
-// setTenantAuth authenticates a request with a tenant JWT. Tenant-scoped endpoints (webhooks)
-// require the tenant's own token: RequireTenant stashes the tenant UUID only for tenant-role
-// callers, so an admin-signed request reaches the handler with no tenant context and is rejected
-// with "missing tenant context".
-func (c *ProvisioningClient) setTenantAuth(req *http.Request, token string) {
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
 }
 
 func (c *ProvisioningClient) setHeaders(req *http.Request) {

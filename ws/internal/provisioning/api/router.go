@@ -291,10 +291,13 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					})
 				}
 
-				// Connections management API — requires Pro edition
+				// Connections management API — requires Pro edition; operator-managed (ADR-0033).
+				// RequireFeature precedes RequireRole so a Community operator gets EDITION_LIMIT, not
+				// INSUFFICIENT_ROLE.
 				if cfg.ConnectionsHandler != nil {
 					r.Group(func(r chi.Router) {
 						r.Use(RequireFeature(cfg.EditionManager, license.ConnectionsAPI))
+						r.Use(RequireRole("admin", "system"))
 						r.Get("/connections", cfg.ConnectionsHandler.HandleListConnections)
 						r.Delete("/connections", cfg.ConnectionsHandler.HandleBulkDisconnect)
 						r.Route("/connections/{connId}", func(r chi.Router) {
@@ -304,10 +307,13 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					})
 				}
 
-				// Webhook management API — requires Pro edition (§XIII)
+				// Webhook management API — requires Pro edition (§XIII); operator-managed (ADR-0033).
+				// RequireFeature precedes RequireRole so a Community operator gets EDITION_LIMIT, not
+				// INSUFFICIENT_ROLE.
 				if cfg.WebhookHandler != nil {
 					r.Group(func(r chi.Router) {
 						r.Use(RequireFeature(cfg.EditionManager, license.Webhooks))
+						r.Use(RequireRole("admin", "system"))
 						r.Post("/webhooks", cfg.WebhookHandler.HandleCreate)
 						r.Get("/webhooks", cfg.WebhookHandler.HandleList)
 						r.Route("/webhooks/{webhookID}", func(r chi.Router) {

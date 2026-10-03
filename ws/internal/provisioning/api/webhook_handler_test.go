@@ -62,14 +62,14 @@ func stubWebhook() *provisioning.Webhook {
 // uuid == slug here; tests that must distinguish the two use reqWithTenant.
 func reqWithTenantID(r *http.Request, tenantID string) *http.Request {
 	r = withClaims(r, &auth.Claims{TenantID: tenantID, Roles: []string{"user"}})
-	return r.WithContext(stashTenantIdentity(r.Context(), &provisioning.Tenant{ID: tenantID, Slug: tenantID}))
+	return r.WithContext(stashTenantIdentity(r.Context(), &provisioning.Tenant{ID: tenantID, Slug: tenantID}, tenantID))
 }
 
 // reqWithTenant stashes distinct tenant UUID and slug, simulating RequireTenant for
 // tests that assert handlers thread the correct identity (UUID vs slug).
 func reqWithTenant(r *http.Request, uuid, slug string) *http.Request {
 	r = withClaims(r, &auth.Claims{TenantID: slug, Roles: []string{"user"}})
-	return r.WithContext(stashTenantIdentity(r.Context(), &provisioning.Tenant{ID: uuid, Slug: slug}))
+	return r.WithContext(stashTenantIdentity(r.Context(), &provisioning.Tenant{ID: uuid, Slug: slug}, slug))
 }
 
 // reqWithWebhookID injects a chi URL param for webhookID.

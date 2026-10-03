@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Sukko Provisioning API
-  version: 1.0.2
+  version: 1.1.0
   description: |
     REST API for managing tenants, JWT signing keys, API keys, routing rules,
     channel rules, and quotas in the Sukko multi-tenant WebSocket platform.
@@ -1827,7 +1827,7 @@ paths:
       summary: List active connections for a tenant
       operationId: listConnections
       tags: [Connections]
-      description: Returns live WebSocket connections for the authenticated tenant. Requires Pro edition.
+      description: Returns live WebSocket connections for the tenant. Operator endpoint — requires admin or system role (tenant JWTs are rejected with 403) and Pro edition.
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - name: api_key_id
@@ -1872,7 +1872,8 @@ paths:
       description: |
         Force-disconnects all connections matching the provided filter(s). At least one filter is required.
         Returns 202 Accepted immediately; the re-query goroutine fires after ~10s to disconnect connections
-        registered after the initial query. Requires Pro edition.
+        registered after the initial query. Operator endpoint — requires admin or system role
+        (tenant JWTs are rejected with 403) and Pro edition.
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - name: api_key_id
@@ -1989,10 +1990,9 @@ paths:
       summary: Register a webhook endpoint
       operationId: createWebhook
       tags: [Webhooks]
-      description: Creates a new webhook registration. Requires Pro edition. URL must use https (http allowed for local dev only).
+      description: Creates a new webhook registration. Operator endpoint — requires admin or system role (tenant JWTs are rejected with 403) and Pro edition. URL must use https (http allowed for local dev only).
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
       requestBody:
@@ -2051,10 +2051,9 @@ paths:
       summary: List webhook registrations
       operationId: listWebhooks
       tags: [Webhooks]
-      description: Returns paginated webhooks for the authenticated tenant.
+      description: Returns paginated webhooks for the tenant. Operator endpoint — requires admin or system role (tenant JWTs are rejected with 403) and Pro edition.
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - $ref: "#/components/parameters/limit"
@@ -2094,8 +2093,7 @@ paths:
       operationId: getWebhook
       tags: [Webhooks]
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - name: webhookID
@@ -2144,10 +2142,9 @@ paths:
       summary: Partially update a webhook
       operationId: updateWebhook
       tags: [Webhooks]
-      description: All fields are optional. Omitted fields are unchanged. Status transitions — enabled ↔ degraded ↔ suspended.
+      description: All fields are optional. Omitted fields are unchanged. Status transitions — enabled ↔ degraded ↔ suspended. Operator endpoint — requires admin or system role (tenant JWTs are rejected with 403) and Pro edition.
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - name: webhookID
@@ -2206,8 +2203,7 @@ paths:
       operationId: deleteWebhook
       tags: [Webhooks]
       security:
-        - TenantJWT: []
-        - APIKey: []
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/tenantSlug"
         - name: webhookID

@@ -150,13 +150,13 @@ func runWebhookScenario(
 	// Step 4: register webhook with the provisioning service.
 	webhookURL := run.webhookBaseURL + "/webhook-receive/" + runID
 	webhookID, err := provClient.CreateWebhook(
-		ctx, tenantID, token, webhookURL, webhookTestChannelPatt,
+		ctx, tenantID, webhookURL, webhookTestChannelPatt,
 		secretHex, maxRetries,
 	)
 	if err != nil {
 		return fail(pfx+"create-webhook", fmt.Sprintf("create webhook: %v", err)), nil
 	}
-	defer func() { _ = provClient.DeleteWebhook(context.Background(), tenantID, token, webhookID) }() //nolint:contextcheck // context.Background(): request ctx may be canceled at defer time; error: best-effort cleanup, test already reported its result
+	defer func() { _ = provClient.DeleteWebhook(context.Background(), tenantID, webhookID) }() //nolint:contextcheck // context.Background(): request ctx may be canceled at defer time; error: best-effort cleanup, test already reported its result
 
 	// Step 5: publish to the test channel to trigger delivery.
 	restClient := restpublish.NewClient(httpURL(run.Config.GatewayURL))
@@ -177,7 +177,7 @@ func runWebhookScenario(
 	// Step 6: poll for delivery or degraded status.
 	var checks []metrics.CheckResult
 	if wantDegraded {
-		checks = append(checks, pollDegradedStatus(ctx, run, logger, name, pfx, provClient, tenantID, token, webhookID)...)
+		checks = append(checks, pollDegradedStatus(ctx, run, logger, name, pfx, provClient, tenantID, webhookID)...)
 	} else {
 		checks = append(checks, pollDeliveries(ctx, run, pfx, runID, publish, failFirstN, wantCount)...)
 	}
@@ -195,9 +195,9 @@ func pollDegradedStatus(
 	name string,
 	pfx string,
 	provClient interface {
-		GetWebhookByID(context.Context, string, string, string) (string, error)
+		GetWebhookByID(context.Context, string, string) (string, error)
 	},
-	tenantID, token, webhookID string,
+	tenantID, webhookID string,
 ) []metrics.CheckResult {
 	timeout := run.webhookRetryTimeout
 	deadline := time.NewTimer(timeout)
@@ -214,7 +214,7 @@ func pollDegradedStatus(
 			return fail(pfx+"degraded-status",
 				fmt.Sprintf("webhook did not reach degraded status within %s (last: %q)", timeout, finalStatus))
 		case <-ticker.C:
-			status, err := provClient.GetWebhookByID(ctx, tenantID, token, webhookID)
+			status, err := provClient.GetWebhookByID(ctx, tenantID, webhookID)
 			if err != nil {
 				logger.Debug().Err(err).Str("scenario", name).Msg("GetWebhookByID error during poll")
 				continue

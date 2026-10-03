@@ -186,8 +186,9 @@ func NewConnectionsHandler(params ConnectionsHandlerParams) *ConnectionsHandler 
 
 // HandleListConnections handles GET /tenants/{tenantSlug}/connections.
 func (h *ConnectionsHandler) HandleListConnections(w http.ResponseWriter, r *http.Request) {
-	// Connection registry is slug-keyed (data plane) — read the caller's authenticated slug.
-	tenantSlug := getTenantSlugFromClaims(r)
+	// Connection registry is slug-keyed (data plane) — read the effective tenant slug stashed
+	// by RequireTenant (the caller's own slug for a tenant; the URL tenant's slug for an operator).
+	tenantSlug := getEffectiveTenantSlug(r)
 	if tenantSlug == "" {
 		httputil.WriteError(w, http.StatusUnauthorized, errCodeUnauthorized, "missing tenant context")
 		return
@@ -218,7 +219,7 @@ func (h *ConnectionsHandler) HandleListConnections(w http.ResponseWriter, r *htt
 // HandleGetConnection handles GET /tenants/{tenantSlug}/connections/{connId}.
 func (h *ConnectionsHandler) HandleGetConnection(w http.ResponseWriter, r *http.Request) {
 	// Connection registry is slug-keyed (data plane) — read the caller's authenticated slug.
-	tenantSlug := getTenantSlugFromClaims(r)
+	tenantSlug := getEffectiveTenantSlug(r)
 	if tenantSlug == "" {
 		httputil.WriteError(w, http.StatusUnauthorized, errCodeUnauthorized, "missing tenant context")
 		return
@@ -250,7 +251,7 @@ func (h *ConnectionsHandler) HandleDeleteConnection(w http.ResponseWriter, r *ht
 	// slug; the audit record is UUID-keyed (control plane) — from the UUID RequireTenant
 	// stashed. Guard both: both are present together for a validated tenant caller, so an
 	// empty UUID means no validated tenant context (fail closed, like the webhook handlers).
-	tenantSlug := getTenantSlugFromClaims(r)
+	tenantSlug := getEffectiveTenantSlug(r)
 	tenantUUID := getTenantUUIDFromContext(r)
 	if tenantSlug == "" || tenantUUID == "" {
 		httputil.WriteError(w, http.StatusUnauthorized, errCodeUnauthorized, "missing tenant context")
@@ -334,7 +335,7 @@ func (h *ConnectionsHandler) HandleBulkDisconnect(w http.ResponseWriter, r *http
 	// slug; the audit record is UUID-keyed (control plane) — from the UUID RequireTenant
 	// stashed. Guard both: both are present together for a validated tenant caller, so an
 	// empty UUID means no validated tenant context (fail closed, like the webhook handlers).
-	tenantSlug := getTenantSlugFromClaims(r)
+	tenantSlug := getEffectiveTenantSlug(r)
 	tenantUUID := getTenantUUIDFromContext(r)
 	if tenantSlug == "" || tenantUUID == "" {
 		httputil.WriteError(w, http.StatusUnauthorized, errCodeUnauthorized, "missing tenant context")

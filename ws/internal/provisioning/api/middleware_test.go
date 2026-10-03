@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/sukko-dev/sukko/internal/provisioning"
 	provauth "github.com/sukko-dev/sukko/internal/provisioning/auth"
 	"github.com/sukko-dev/sukko/internal/shared/auth"
+	"github.com/sukko-dev/sukko/internal/shared/license"
 )
 
 // withTenantSlug injects a chi URL param "tenantSlug" into r's context.
@@ -369,11 +371,20 @@ func TestRequireTenant_StashesTenantUUID(t *testing.T) {
 			wantUUID:  "uuid-renamed",
 		},
 		{
-			// Admin bypass returns before the lookup — nothing to stash.
-			name:      "admin bypass stashes nothing",
-			claims:    &auth.Claims{TenantID: "whatever", Roles: []string{"admin"}},
+			// Admin/system resolve and stash the tenant UUID (ADR-0033) — the ownership check is
+			// skipped, but the identity is still resolved so UUID-keyed handlers (webhooks,
+			// connections) work for operators.
+			name:      "admin resolves and stashes the uuid",
+			claims:    &auth.Claims{Roles: []string{"admin"}},
 			slugParam: "acme",
-			wantUUID:  "",
+			wantUUID:  "uuid-active",
+		},
+		{
+			// Operators act on ANY tenant: no TenantID claim, yet the URL tenant's UUID is stashed.
+			name:      "admin reaches a tenant it does not own",
+			claims:    &auth.Claims{Roles: []string{"system"}},
+			slugParam: "new-corp",
+			wantUUID:  "uuid-renamed",
 		},
 	}
 
@@ -403,6 +414,39 @@ func TestRequireTenant_StashesTenantUUID(t *testing.T) {
 				t.Errorf("stashed UUID = %q, want %q", gotUUID, tt.wantUUID)
 			}
 		})
+	}
+}
+
+// TestRequireTenant_AdminMissingTenant404 verifies the admin/system branch now 404s a missing
+// (or soft-deleted) tenant at the middleware — a non-regression, since every admin handler already
+// resolves via GetBySlug (deleted_at IS NULL) and fails for such tenants at the service layer
+// (ADR-0033).
+func TestRequireTenant_AdminMissingTenant404(t *testing.T) {
+	t.Parallel()
+
+	lookup := func(_ context.Context, _ string) (*provisioning.Tenant, error) {
+		return nil, provisioning.ErrTenantNotFound
+	}
+	reached := false
+	capture := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := RequireTenant(lookup, time.Hour)(capture)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	req = withTenantSlug(req, "ghost")
+	req = withClaims(req, &auth.Claims{Roles: []string{"admin"}})
+	req = req.WithContext(zerolog.Nop().WithContext(req.Context()))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for admin on a missing tenant", rec.Code)
+	}
+	if reached {
+		t.Error("handler must not be reached when the admin tenant lookup 404s")
 	}
 }
 
@@ -499,5 +543,58 @@ func TestRateLimitMiddleware_RetryAfterHeader(t *testing.T) {
 	}
 	if got := last.Header().Get("Retry-After"); got == "" || got == "0" {
 		t.Errorf("Retry-After = %q, want a positive integer (§IX)", got)
+	}
+}
+
+// TestWebhooksConnections_OperatorOnlyChain pins the operator-only gate for the webhooks and
+// connections groups (ADR-0033): the router composes RequireFeature THEN RequireRole, so a tenant
+// token is rejected INSUFFICIENT_ROLE, while a Community-edition OPERATOR is rejected EDITION_LIMIT
+// (the feature gate must precede the role gate — the e2e edition-limits suite discriminates on that
+// code).
+func TestWebhooksConnections_OperatorOnlyChain(t *testing.T) {
+	t.Parallel()
+
+	passthrough := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	// Exactly the router's order for both groups.
+	buildChain := func(mgr *license.Manager) http.Handler {
+		return RequireFeature(mgr, license.Webhooks)(RequireRole("admin", "system")(passthrough))
+	}
+
+	tests := []struct {
+		name       string
+		edition    license.Edition
+		roles      []string
+		wantStatus int
+		wantCode   string
+	}{
+		{"pro + tenant token is rejected by role", license.Pro, []string{"user"}, http.StatusForbidden, errCodeInsufficientRole},
+		{"community + operator is rejected by the edition gate first", license.Community, []string{"admin"}, http.StatusForbidden, errCodeEditionLimit},
+		{"pro + operator is allowed", license.Pro, []string{"admin"}, http.StatusOK, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+			req = withClaims(req, &auth.Claims{Roles: tt.roles})
+			req = req.WithContext(zerolog.Nop().WithContext(req.Context()))
+
+			rec := httptest.NewRecorder()
+			buildChain(license.NewTestManager(tt.edition)).ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if tt.wantCode != "" {
+				var resp map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if resp["code"] != tt.wantCode {
+					t.Errorf("code = %q, want %q", resp["code"], tt.wantCode)
+				}
+			}
+		})
 	}
 }
