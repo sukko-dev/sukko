@@ -441,6 +441,7 @@ const (
 	ActionCreateWebhook             = "create_webhook"
 	ActionUpdateWebhook             = "update_webhook"
 	ActionDeleteWebhook             = "delete_webhook"
+	ActionRotateWebhookSecret       = "rotate_webhook_secret" //nolint:gosec // G101: audit action identifier, not a credential
 	ActionSuspendWebhookOnDowngrade = "suspend_webhook_on_downgrade"
 )
 
@@ -489,6 +490,13 @@ type UpdateWebhookRequest struct {
 	ChannelPattern *string
 	MaxRetries     *int
 	Status         *string
+	// Secret is the operator-provided plaintext HMAC secret for a rotation (service input only).
+	// The service validates it and encrypts it into SecretEnc; the repository persists SecretEnc
+	// and never reads Secret (ADR-0034).
+	Secret *string
+	// SecretEnc is the base64 AES-256-GCM ciphertext the repository persists when a rotation is
+	// requested. Nil means no rotation. The service sets it from EncryptCredential(*Secret).
+	SecretEnc *string
 }
 
 // WebhookDelivery is a single delivery attempt record, written to webhook_deliveries.

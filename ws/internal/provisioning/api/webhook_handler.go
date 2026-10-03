@@ -100,6 +100,7 @@ type updateWebhookRequest struct {
 	ChannelPattern *string `json:"channel_pattern,omitempty"`
 	MaxRetries     *int    `json:"max_retries,omitempty"`
 	Status         *string `json:"status,omitempty"`
+	Secret         *string `json:"secret,omitempty"`
 }
 
 // toResponse converts a domain Webhook to the API response shape.
@@ -245,6 +246,7 @@ func (h *WebhookHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		ChannelPattern: body.ChannelPattern,
 		MaxRetries:     body.MaxRetries,
 		Status:         body.Status,
+		Secret:         body.Secret,
 	})
 	if err != nil {
 		h.mapError(w, err, "update webhook")

@@ -555,3 +555,44 @@ func TestWebhookRepository_RecordDelivery_Idempotent(t *testing.T) {
 		t.Errorf("expected 1 row for delivery id %s, got %d", d.ID, count)
 	}
 }
+
+// TestWebhookRepository_Update_RotatesSecretEnc covers the secret-rotation SET clause (ADR-0034):
+// a non-nil SecretEnc replaces the stored ciphertext in place and is actually persisted (re-read),
+// while non-secret fields are untouched. Dropping the `secret_enc = $n` clause reds this test.
+func TestWebhookRepository_Update_RotatesSecretEnc(t *testing.T) {
+	t.Parallel()
+	env := newWebhookTestEnv(t)
+	ctx := context.Background()
+
+	w := baseWebhook(env.tenantID, "wh_rot00001")
+	if err := env.repo.Create(ctx, w); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	newEnc := "cm90YXRlZC1jaXBoZXJ0ZXh0" // distinct base64, != baseWebhook's "dGVzdA=="
+	got, err := env.repo.Update(ctx, provisioning.UpdateWebhookRequest{
+		ID:        w.ID,
+		TenantID:  env.tenantID,
+		SecretEnc: &newEnc,
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if got.SecretEnc != newEnc {
+		t.Errorf("returned SecretEnc = %q, want %q", got.SecretEnc, newEnc)
+	}
+
+	// Persisted, not merely echoed: a re-read confirms the new ciphertext hit the row.
+	reread, err := env.repo.GetByID(ctx, w.ID, env.tenantID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if reread.SecretEnc != newEnc {
+		t.Errorf("persisted SecretEnc = %q, want %q (secret_enc SET clause dropped?)", reread.SecretEnc, newEnc)
+	}
+	// A secret-only rotation must not disturb other fields.
+	if reread.URL != w.URL || reread.ChannelPattern != w.ChannelPattern || reread.MaxRetries != w.MaxRetries {
+		t.Errorf("rotation changed non-secret fields: url=%q pattern=%q max_retries=%d",
+			reread.URL, reread.ChannelPattern, reread.MaxRetries)
+	}
+}

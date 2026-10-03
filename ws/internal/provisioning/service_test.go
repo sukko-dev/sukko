@@ -16,6 +16,7 @@ import (
 	"github.com/sukko-dev/sukko/internal/provisioning"
 	"github.com/sukko-dev/sukko/internal/provisioning/eventbus"
 	"github.com/sukko-dev/sukko/internal/provisioning/testutil"
+	"github.com/sukko-dev/sukko/internal/shared/crypto"
 	sharedkafka "github.com/sukko-dev/sukko/internal/shared/kafka"
 	"github.com/sukko-dev/sukko/internal/shared/types"
 )
@@ -2015,5 +2016,211 @@ func TestGauge_DeprovisionTenant_Suspended_GracePeriod_NoChange(t *testing.T) {
 	}
 	if got := activeTenantsGaugeValue(t); got != 0.0 {
 		t.Errorf("after DeprovisionTenant(force=false, suspended): gauge = %v, want 0.0 (must not double-decrement)", got)
+	}
+}
+
+// newWebhookSvcForRotation builds a service wired to the given webhook store, audit store, and
+// invalidation spy, with a valid encryption key — the fixtures a secret-rotation test needs to
+// inspect what was persisted, audited, and invalidated.
+func newWebhookSvcForRotation(t *testing.T, store *testutil.MockWebhookStore, audit *testutil.MockAuditStore, spy provisioning.WebhookCacheInvalidator) *provisioning.Service {
+	t.Helper()
+	svc, err := provisioning.NewService(provisioning.ServiceConfig{
+		TenantStore:                 testutil.NewMockTenantStore(),
+		KeyStore:                    testutil.NewMockKeyStore(),
+		APIKeyStore:                 testutil.NewMockAPIKeyStore(),
+		RoutingRulesStore:           testutil.NewMockRoutingRulesStore(),
+		TopicStore:                  testutil.NewMockTopicStore(),
+		QuotaStore:                  testutil.NewMockQuotaStore(),
+		AuditStore:                  audit,
+		KafkaAdmin:                  testutil.NewMockKafkaAdmin(),
+		EventBus:                    eventbus.New(zerolog.Nop()),
+		TopicNamespace:              "test",
+		DefaultPartitions:           3,
+		DefaultRetentionMs:          604800000,
+		MaxTopicsPerTenant:          50,
+		MaxRoutingRulesPerTenant:    5,
+		DeadLetterTopicPartitions:   1,
+		DeadLetterTopicRetentionMs:  86400000,
+		InfraTopicReplicationFactor: 1,
+		DeprovisionGraceDays:        30,
+		Logger:                      zerolog.Nop(),
+		WebhookStore:                provisioning.WebhookStore(store),
+		EncryptionKey:               testWebhookEncryptionKey,
+		MaxWebhooksPerTenant:        10,
+		WebhookAllowHTTP:            false,
+		InvalidationPublisher:       spy,
+	})
+	if err != nil {
+		t.Fatalf("newWebhookSvcForRotation: %v", err)
+	}
+	return svc
+}
+
+// seedWebhook creates an enabled webhook via the service and returns it.
+func seedWebhook(t *testing.T, svc *provisioning.Service, tenantID string) *provisioning.Webhook {
+	t.Helper()
+	w, err := svc.CreateWebhook(context.Background(), provisioning.CreateWebhookRequest{
+		TenantID:       tenantID,
+		URL:            "https://example.com/hook",
+		ChannelPattern: "orders.*",
+		Secret:         "original-secret",
+		MaxRetries:     3,
+	})
+	if err != nil {
+		t.Fatalf("seed CreateWebhook: %v", err)
+	}
+	return w
+}
+
+// TestService_UpdateWebhook_RotatesSecret verifies a secret-only PATCH (ADR-0034): the new secret
+// is encrypted at the service layer (round-trips to the plaintext), the change is invalidated to
+// the worker, and it audits exactly rotate_webhook_secret — never update_webhook, and never the
+// secret value itself.
+func TestService_UpdateWebhook_RotatesSecret(t *testing.T) {
+	t.Parallel()
+	store := testutil.NewMockWebhookStore()
+	audit := testutil.NewMockAuditStore()
+	spy := &spyPublisher{}
+	svc := newWebhookSvcForRotation(t, store, audit, spy)
+	ctx := context.Background()
+
+	w := seedWebhook(t, svc, "tenant-rot")
+	origEnc := w.SecretEnc
+	spy.calls.Store(0) // ignore the create-path invalidation; count only the rotation's
+
+	newSecret := "rotated-secret"
+	got, err := svc.UpdateWebhook(ctx, provisioning.UpdateWebhookRequest{
+		ID: w.ID, TenantID: "tenant-rot", Secret: &newSecret,
+	})
+	if err != nil {
+		t.Fatalf("UpdateWebhook(secret) error = %v", err)
+	}
+	if got.SecretEnc == origEnc {
+		t.Error("SecretEnc unchanged after rotation")
+	}
+	if got.SecretEnc == "" || got.SecretEnc == newSecret {
+		t.Errorf("SecretEnc = %q, want encrypted ciphertext (not empty, not plaintext)", got.SecretEnc)
+	}
+	// Round-trip: the persisted ciphertext decrypts to the operator-provided secret.
+	dec, err := crypto.DecryptCredential(got.SecretEnc, testWebhookEncryptionKey)
+	if err != nil {
+		t.Fatalf("DecryptCredential: %v", err)
+	}
+	if dec != newSecret {
+		t.Errorf("decrypted secret = %q, want %q", dec, newSecret)
+	}
+
+	// Propagated to the worker.
+	if spy.calls.Load() != 1 {
+		t.Errorf("invalidation Publish calls = %d, want 1", spy.calls.Load())
+	}
+
+	// Audited as a rotation only, and the secret never appears in the trail.
+	entries := audit.GetEntries()
+	var rotate, update int
+	for _, e := range entries {
+		switch e.Action {
+		case provisioning.ActionRotateWebhookSecret:
+			rotate++
+		case provisioning.ActionUpdateWebhook:
+			update++
+		}
+		for _, v := range e.Details {
+			if s, ok := v.(string); ok && (s == newSecret || s == "original-secret") {
+				t.Errorf("audit entry %q leaked a secret in details: %v", e.Action, e.Details)
+			}
+		}
+	}
+	if rotate != 1 {
+		t.Errorf("rotate_webhook_secret audit entries = %d, want 1", rotate)
+	}
+	if update != 0 {
+		t.Errorf("update_webhook audit entries = %d, want 0 for a secret-only PATCH", update)
+	}
+}
+
+// TestService_UpdateWebhook_RotateWithFields_TwoAuditEntries verifies a PATCH carrying both a
+// secret and a non-secret field produces two independently-findable audit entries (ADR-0034).
+func TestService_UpdateWebhook_RotateWithFields_TwoAuditEntries(t *testing.T) {
+	t.Parallel()
+	store := testutil.NewMockWebhookStore()
+	audit := testutil.NewMockAuditStore()
+	svc := newWebhookSvcForRotation(t, store, audit, &spyPublisher{})
+	ctx := context.Background()
+
+	w := seedWebhook(t, svc, "tenant-both")
+
+	newSecret := "rotated-secret"
+	suspended := types.WebhookStatusSuspended
+	if _, err := svc.UpdateWebhook(ctx, provisioning.UpdateWebhookRequest{
+		ID: w.ID, TenantID: "tenant-both", Secret: &newSecret, Status: &suspended,
+	}); err != nil {
+		t.Fatalf("UpdateWebhook(secret+status) error = %v", err)
+	}
+
+	var rotate, update int
+	for _, e := range audit.GetEntries() {
+		switch e.Action {
+		case provisioning.ActionRotateWebhookSecret:
+			rotate++
+		case provisioning.ActionUpdateWebhook:
+			update++
+		}
+	}
+	if rotate != 1 {
+		t.Errorf("rotate_webhook_secret entries = %d, want 1", rotate)
+	}
+	if update != 1 {
+		t.Errorf("update_webhook entries = %d, want 1 (status changed alongside the rotation)", update)
+	}
+}
+
+// TestService_UpdateWebhook_EmptySecretRejected verifies an explicitly-empty secret is rejected
+// (mirrors create's "secret is required"), so a rotation cannot blank the signing secret.
+func TestService_UpdateWebhook_EmptySecretRejected(t *testing.T) {
+	t.Parallel()
+	store := testutil.NewMockWebhookStore()
+	svc := newWebhookSvcForRotation(t, store, testutil.NewMockAuditStore(), &spyPublisher{})
+	ctx := context.Background()
+
+	w := seedWebhook(t, svc, "tenant-empty")
+
+	empty := ""
+	_, err := svc.UpdateWebhook(ctx, provisioning.UpdateWebhookRequest{
+		ID: w.ID, TenantID: "tenant-empty", Secret: &empty,
+	})
+	if !errors.Is(err, provisioning.ErrWebhookInvalidInput) {
+		t.Errorf("UpdateWebhook(secret=\"\") error = %v, want ErrWebhookInvalidInput", err)
+	}
+}
+
+// TestService_UpdateWebhook_IgnoresCallerSuppliedSecretEnc verifies the service scrubs any inbound
+// SecretEnc on the request — only the encrypt block may set it (ADR-0034 §II hardening). A caller
+// stuffing ciphertext alongside a non-secret field must not persist it or trigger a rotation audit.
+func TestService_UpdateWebhook_IgnoresCallerSuppliedSecretEnc(t *testing.T) {
+	t.Parallel()
+	store := testutil.NewMockWebhookStore()
+	audit := testutil.NewMockAuditStore()
+	svc := newWebhookSvcForRotation(t, store, audit, &spyPublisher{})
+	ctx := context.Background()
+
+	w := seedWebhook(t, svc, "tenant-inject")
+	origEnc := w.SecretEnc
+
+	suspended := types.WebhookStatusSuspended
+	attacker := "YXR0YWNrZXItY2lwaGVydGV4dA==" // base64 the caller tries to smuggle in
+	got, err := svc.UpdateWebhook(ctx, provisioning.UpdateWebhookRequest{
+		ID: w.ID, TenantID: "tenant-inject", Status: &suspended, SecretEnc: &attacker,
+	})
+	if err != nil {
+		t.Fatalf("UpdateWebhook() error = %v", err)
+	}
+	if got.SecretEnc != origEnc {
+		t.Errorf("SecretEnc = %q, want unchanged %q (caller-supplied ciphertext not scrubbed)", got.SecretEnc, origEnc)
+	}
+	for _, e := range audit.GetEntries() {
+		if e.Action == provisioning.ActionRotateWebhookSecret {
+			t.Error("rotation audited for a request with no plaintext secret")
+		}
 	}
 }
