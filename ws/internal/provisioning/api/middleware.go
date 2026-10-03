@@ -275,9 +275,24 @@ func RequireTenant(lookup provisioning.TenantLookupFunc, holdPeriod time.Duratio
 				return
 			}
 
-			// (1) Admin/system roles bypass tenant ownership check — service layer still enforces existence.
+			// (1) Admin/system roles may act on ANY tenant — the ownership check is skipped — but the
+			// tenant is still RESOLVED so its UUID is stashed for handlers keyed by it (webhooks,
+			// connections), uniform with every other tenant resource (ADR-0033). Skipping the stash
+			// here is what previously left those two resources unreachable by operators. A missing or
+			// soft-deleted tenant 404s at the middleware, as it already does at the service layer
+			// (every admin handler resolves via GetBySlug, which filters deleted_at IS NULL).
 			if claims.HasRole(provisioning.ActorTypeAdmin) || claims.HasRole(provisioning.ActorTypeSystem) {
-				next.ServeHTTP(w, r)
+				tenant, err := lookup(r.Context(), tenantSlug)
+				if err != nil {
+					if errors.Is(err, provisioning.ErrTenantNotFound) {
+						httputil.WriteError(w, http.StatusNotFound, errCodeTenantNotFound, "Tenant not found")
+						return
+					}
+					zerolog.Ctx(r.Context()).Error().Err(err).Str(logging.LogKeyTenantSlug, tenantSlug).Msg("tenant lookup failed")
+					httputil.WriteError(w, http.StatusServiceUnavailable, errCodeServiceUnavailable, "Service temporarily unavailable")
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(stashTenantIdentity(r.Context(), tenant)))
 				return
 			}
 
