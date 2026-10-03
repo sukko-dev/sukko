@@ -220,13 +220,14 @@ func TestHistoryWriter_PassivePodNoXADD(t *testing.T) {
 	}
 
 	w, cancel, bus := newTestWriter(t, mr, opts)
+	clk := newFakeClock()
+	history.SetClockForTest(w, clk, nil)
 
 	var wg syncWaitGroup
-	wg.Go(func() {
-		w.Run()
-	})
+	wg.Go(func() { w.Run() })
+	t.Cleanup(func() { cancel(); wg.Wait() })
 
-	time.Sleep(20 * time.Millisecond)
+	clk.BlockUntil(1) // passive writer parked on the heartbeat ticker inside runOnce
 
 	msg := &broadcast.Message{
 		Subject:  "tenantA.ETH.trade",
@@ -237,9 +238,16 @@ func TestHistoryWriter_PassivePodNoXADD(t *testing.T) {
 	}
 	bus.fanOut(msg)
 
-	time.Sleep(80 * time.Millisecond)
-	cancel()
-	wg.Wait()
+	// Drive heartbeats deterministically (each proven consumed via the restart-gate read). The
+	// message is present throughout, so a passive pod has every opportunity to wrongly write it;
+	// the fake clock advances negligible real time, so the pre-set lock TTL cannot expire and
+	// promote this pod to active mid-test.
+	const heartbeats = 5
+	for range heartbeats {
+		before := bus.getMetricsCallCount()
+		clk.Advance(opts.heartbeatInterval)
+		waitFor(func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second)
+	}
 
 	streamKey := history.HistoryStreamKeyPrefix + opts.env + ":tenantA:ETH.trade"
 	checkClient := newTestValkeyClient(t, mr)
@@ -428,7 +436,7 @@ func TestHistoryWriter_BusUnhealthyTriggersRestart(t *testing.T) {
 // sampling it would flap the writer under ordinary tenant churn. A
 // publish-path failure, by contrast, must still trigger the restart.
 func TestHistoryWriter_NonConvergenceDoesNotRestart(t *testing.T) {
-	t.Parallel()
+	t.Parallel() // fake clock + writer are local to this test (ADR-0029)
 
 	mr := newTestMiniredis(t)
 	opts := defaultTestOpts()
@@ -437,31 +445,34 @@ func TestHistoryWriter_NonConvergenceDoesNotRestart(t *testing.T) {
 	opts.restartMaxBackoff = 20 * time.Millisecond
 
 	w, cancel, bus := newTestWriter(t, mr, opts)
+	clk := newFakeClock()
+	history.SetClockForTest(w, clk, nil)
 
 	var wg syncWaitGroup
-	wg.Go(func() {
-		w.Run()
-	})
+	wg.Go(func() { w.Run() })
+	t.Cleanup(func() { cancel(); wg.Wait() })
 
-	time.Sleep(10 * time.Millisecond)
-
-	// Phase 1: non-converged but publish-healthy — many heartbeats must pass
-	// with ZERO restarts.
+	// Phase 1: non-converged but publish-healthy. Drive a fixed number of heartbeat ticks
+	// DETERMINISTICALLY and assert ZERO restarts. Each tick is proven consumed by waiting for the
+	// restart-gate's GetMetrics read to advance before firing the next — so this asserts "the writer
+	// processed N heartbeats and restarted zero times", which a fixed sleep (or a poll) could only
+	// false-pass by not having waited long enough.
 	bus.setConverged(false)
-	time.Sleep(150 * time.Millisecond)
+	clk.BlockUntil(1) // heartbeat ticker registered inside runOnce
+	const heartbeats = 10
+	for range heartbeats {
+		before := bus.getMetricsCallCount()
+		clk.Advance(opts.heartbeatInterval)
+		waitFor(func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second)
+	}
 	if restarts := metricCounterValue(t, w.Metrics().WriterRestartTotal); restarts != 0 {
-		t.Errorf("expected 0 restarts while non-converged but publish-healthy, got %v", restarts)
+		t.Errorf("expected 0 restarts over %d heartbeats while non-converged but publish-healthy, got %v", heartbeats, restarts)
 	}
 
-	// Phase 2: publish-unhealthy (still non-converged) — restart must fire.
+	// Phase 2: publish-unhealthy (still non-converged) — the next heartbeat trips the restart gate.
 	bus.setHealthy(false)
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	wg.Wait()
-
-	if restarts := metricCounterValue(t, w.Metrics().WriterRestartTotal); restarts < 1 {
-		t.Errorf("expected >=1 restart after publish path became unhealthy, got %v", restarts)
-	}
+	clk.Advance(opts.heartbeatInterval) // fire a heartbeat → publish-unhealthy → runOnce exits → restart
+	waitFor(func() bool { return metricCounterValue(t, w.Metrics().WriterRestartTotal) >= 1 }, 2*time.Second)
 }
 
 // TestHistoryWriter_CtxCancelExitsDuringBackoff verifies that canceling the parent context
@@ -475,16 +486,21 @@ func TestHistoryWriter_CtxCancelExitsDuringBackoff(t *testing.T) {
 	opts.heartbeatInterval = 20 * time.Millisecond
 
 	w, cancel, bus := newTestWriter(t, mr, opts)
+	clk := newFakeClock()
+	history.SetClockForTest(w, clk, func(int64) int64 { return 0 }) // zero jitter — delay deterministic
 
 	var wg syncWaitGroup
-	wg.Go(func() {
-		w.Run()
-	})
+	wg.Go(func() { w.Run() })
 
-	time.Sleep(10 * time.Millisecond)
-	bus.setHealthy(false) // force a restart (enters backoff)
-	time.Sleep(30 * time.Millisecond)
+	// Force a restart so the Run loop parks on clock.After(backoff), and PROVE it is parked there.
+	bus.setHealthy(false)
+	clk.BlockUntil(1)                   // heartbeat ticker registered inside runOnce
+	clk.Advance(opts.heartbeatInterval) // heartbeat → publish-unhealthy → runOnce exits → park on backoff
+	clk.blockUntilOneShots(1)           // writer now parked on the backoff timer
 
+	// Cancel WITHOUT advancing the clock: this proves cancel interrupts the backoff park itself
+	// (the ctx.Done() arm of the restart select), not the timer firing. Run must still exit. The
+	// 500ms guard is REAL time — Run's exit is goroutine scheduling, not fake time.
 	done := make(chan struct{})
 	go func() {
 		cancel()
@@ -551,16 +567,23 @@ func TestHistoryWriter_AlwaysPassivePod_ZeroLockLossMetric(t *testing.T) {
 		t.Fatalf("pre-set lock: %v", err)
 	}
 
-	w, cancel, _ := newTestWriter(t, mr, opts)
+	w, cancel, bus := newTestWriter(t, mr, opts)
+	clk := newFakeClock()
+	history.SetClockForTest(w, clk, nil)
 
 	var wg syncWaitGroup
-	wg.Go(func() {
-		w.Run()
-	})
+	wg.Go(func() { w.Run() })
+	t.Cleanup(func() { cancel(); wg.Wait() })
 
-	time.Sleep(60 * time.Millisecond)
-	cancel()
-	wg.Wait()
+	// Drive heartbeats deterministically: the lock is held by another pod (infinite TTL), so every
+	// heartbeat's SetNX fails — but a failed acquire is NOT a lock failure, so the metric stays 0.
+	clk.BlockUntil(1) // passive writer parked on the heartbeat ticker
+	const heartbeats = 5
+	for range heartbeats {
+		before := bus.getMetricsCallCount()
+		clk.Advance(opts.heartbeatInterval)
+		waitFor(func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second)
+	}
 
 	n := metricCounterValue(t, w.Metrics().LockFailuresTotal)
 	if n != 0 {
@@ -740,13 +763,18 @@ func TestHistoryWriter_LockCallFailureVsCASMiss(t *testing.T) {
 	opts.podID = "writer-pod"
 	opts.heartbeatInterval = 20 * time.Millisecond
 	w, cancel, _ := newTestWriter(t, mr, opts)
+	clk := newFakeClock()
+	history.SetClockForTest(w, clk, nil)
 
 	var wg syncWaitGroup
 	wg.Go(func() { w.Run() })
-	// Wait for the writer to acquire the lock and become active (replaces a fixed 30ms sleep).
+	// runOnce acquires the lock (real miniredis SET NX) before registering its heartbeat ticker, so
+	// once the ticker exists the writer is already active.
+	clk.BlockUntil(1)
 	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
-	// Steal the lock from under the active writer (simulates another pod acquiring it).
+	// Steal the lock from under the active writer (a one-shot value change — the CAS miss is about
+	// the lock VALUE, not its TTL, so no clock coordination is needed for the steal).
 	lockKey := history.HistoryWriterLockKeyPrefix + opts.env
 	setupClient := newTestValkeyClient(t, mr)
 	if err := setupClient.Do(context.Background(),
@@ -756,8 +784,9 @@ func TestHistoryWriter_LockCallFailureVsCASMiss(t *testing.T) {
 		t.Fatalf("steal lock: %v", err)
 	}
 
-	// Wait for a heartbeat to process the CAS miss and flip the writer passive (replaces a fixed
-	// 50ms sleep that could expire before the heartbeat ran under CI load).
+	// Fire exactly one heartbeat: the CAS renewal returns n=0 (lock stolen) and the writer flips
+	// passive. Deterministic — no reliance on a real 20ms ticker racing CI scheduling.
+	clk.Advance(opts.heartbeatInterval)
 	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 0 }, 2*time.Second)
 
 	active := prometheustestutil.ToFloat64(w.Metrics().WriterActive)
@@ -791,10 +820,18 @@ func TestHistoryWriter_PassivePodNoLockDEL(t *testing.T) {
 		t.Fatalf("pre-set lock: %v", err)
 	}
 
-	w, cancel, _ := newTestWriter(t, mr, opts)
+	w, cancel, bus := newTestWriter(t, mr, opts)
+	clk := newFakeClock()
+	history.SetClockForTest(w, clk, nil)
 	var wg syncWaitGroup
 	wg.Go(func() { w.Run() })
-	time.Sleep(50 * time.Millisecond)
+
+	// Confirm the pod is running passively (processed ≥1 heartbeat, lock held by owner-pod), then
+	// shut down and assert it did NOT delete the lock — only an active writer may release it.
+	clk.BlockUntil(1)
+	before := bus.getMetricsCallCount()
+	clk.Advance(opts.heartbeatInterval)
+	waitFor(func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second)
 	cancel()
 	wg.Wait()
 
@@ -852,40 +889,52 @@ func TestHistoryWriter_LuaCASAtomicity(t *testing.T) {
 	}
 }
 
-// TestHistoryWriter_RestartBackoffJitter verifies that the restart backoff keeps delays
-// within [initialBackoff, maxBackoff] and allows multiple restarts to occur (i.e., the
-// backoff is neither zero nor stuck).
+// TestHistoryWriter_RestartBackoffJitter verifies the restart backoff compounds, applies jitter,
+// and saturates at maxBackoff — asserting the exact parked delay each cycle via the ADR-0029 fake
+// clock and a deterministic jitter source. This is strictly stronger than the original wall-clock
+// version, which could only bound the restart COUNT over 250ms; here the delay sequence itself is
+// pinned, including the cap cycle where off-by-one jitter bugs live.
 func TestHistoryWriter_RestartBackoffJitter(t *testing.T) {
-	t.Parallel()
+	t.Parallel() // fake clock + writer are local to this test (ADR-0029)
 
 	mr := newTestMiniredis(t)
 	opts := defaultTestOpts()
-	opts.heartbeatInterval = 10 * time.Millisecond
+	opts.heartbeatInterval = 50 * time.Millisecond
 	opts.restartInitialBackoff = 5 * time.Millisecond
 	opts.restartMaxBackoff = 20 * time.Millisecond
 
 	w, cancel, bus := newTestWriter(t, mr, opts)
+	clk := newFakeClock()
+	// Deterministic half-jitter: randInt64N(n) → n/2. The Run loop adds jitter in [0, jitterBase)
+	// where jitterBase = min(currentBackoff, maxBackoff/2), so n/2 yields an exact, reproducible
+	// delay while still exercising the jitter path (a jitter silently dropped would change these).
+	history.SetClockForTest(w, clk, func(n int64) int64 { return n / 2 })
+
 	var wg syncWaitGroup
 	wg.Go(func() { w.Run() })
-	time.Sleep(5 * time.Millisecond)
-	bus.setHealthy(false) // trigger continuous restarts
+	t.Cleanup(func() { cancel(); wg.Wait() })
 
-	// With max backoff 20ms and heartbeat 10ms, each restart cycle is ≤ 30ms.
-	// In 250ms we expect at least 5 restarts but not an absurdly large number
-	// (which would indicate backoff is being skipped).
-	time.Sleep(250 * time.Millisecond)
-	cancel()
-	wg.Wait()
+	bus.setHealthy(false) // unhealthy from the start → every runOnce makes no progress → backoff doubles
 
-	restarts := prometheustestutil.ToFloat64(w.Metrics().WriterRestartTotal)
-	// Under -race the scheduler adds overhead; use a conservative lower bound.
-	// With maxBackoff=20ms over 250ms we expect well above 3 cycles under any load.
-	if restarts < 3 {
-		t.Errorf("too few restarts (%.0f) in 250ms with maxBackoff=20ms: backoff jitter may be broken", restarts)
+	// Drive one no-progress restart cycle and return the delay the Run loop parks on.
+	readBackoff := func() time.Duration {
+		clk.BlockUntil(1)                   // writer parked on the heartbeat ticker inside runOnce
+		clk.Advance(opts.heartbeatInterval) // fire a heartbeat → publish-unhealthy → runOnce exits
+		clk.blockUntilOneShots(1)           // Run loop now parked on clock.After(backoff)
+		d := clk.oneShotDelays()[0]
+		clk.Advance(d) // fire the restart → next runOnce
+		return d
 	}
-	// Sanity upper bound: with 0 backoff we'd get ~250/10 = 25 cycles; well under 50.
-	if restarts > 50 {
-		t.Errorf("too many restarts (%.0f): backoff may not be applied at all", restarts)
+
+	// currentBackoff starts at initial(5ms); each no-progress run doubles it before jitter:
+	//   cycle 1: base 10ms, jitterBase min(10,10)=10ms, +5ms  → 15ms
+	//   cycle 2: base 20ms (doubled, == max), jitterBase 10ms, +5ms = 25ms → capped to 20ms
+	//   cycle 3: base 20ms (held at cap), +5ms = 25ms          → capped to 20ms
+	want := []time.Duration{15 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
+	for i, wantDelay := range want {
+		if got := readBackoff(); got != wantDelay {
+			t.Fatalf("restart cycle %d backoff = %v, want %v", i+1, got, wantDelay)
+		}
 	}
 }
 
