@@ -29,7 +29,6 @@ const (
 	// "webhook.test.*" would fail on the first segment. "**" catches all channels, routing
 	// any publish to the test topic where the webhook-worker picks it up.
 	webhookTestRoutingPatt = "**"
-	webhookTestTopic       = "webhook-test"
 	webhookTestSecretLen   = 32
 	webhookPollInterval    = 500 * time.Millisecond
 )
@@ -95,6 +94,17 @@ func validateWebhooks(
 	return checks, nil
 }
 
+// webhookRoutingRules returns the routing rule the suite installs: a catch-all pattern routed to
+// the tenant's always-provisioned default topic. The webhook-worker consumes the broadcast bus
+// (SubscribeAll), so the target only needs to be a topic ws-server already consumes — the default
+// topic. A custom ingress topic would trip the ADR-0006 topic-universe gate (TOPIC_NOT_PROVISIONED)
+// for no benefit; this mirrors the working kafka_ingest suite (routing.DefaultTopicSuffix).
+func webhookRoutingRules() []map[string]any {
+	return []map[string]any{
+		{"pattern": webhookTestRoutingPatt, "ingress_topic": routing.DefaultTopicSuffix, "priority": routing.DefaultCatchAllPriority},
+	}
+}
+
 // runWebhookScenario provisions a webhook, publishes a message, and asserts delivery behavior.
 //
 //   - failFirstN: 0=always 200; N>0=first N fail; -1=always 500
@@ -126,9 +136,7 @@ func runWebhookScenario(
 	defer run.webhookStore.delete(runID)
 
 	// Step 3: provision routing rule so the webhook-worker receives broadcasts.
-	if err := provClient.SetRoutingRules(ctx, tenantID, []map[string]any{
-		{"pattern": webhookTestRoutingPatt, "ingress_topic": webhookTestTopic, "priority": routing.DefaultCatchAllPriority},
-	}); err != nil {
+	if err := provClient.SetRoutingRules(ctx, tenantID, webhookRoutingRules()); err != nil {
 		return fail(pfx+"routing-rule", fmt.Sprintf("set routing rules: %v", err)), nil
 	}
 	defer func() { _ = provClient.DeleteRoutingRules(context.Background(), tenantID) }() //nolint:contextcheck // context.Background(): request ctx may be canceled at defer time; error: best-effort cleanup, test already reported its result

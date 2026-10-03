@@ -8,6 +8,7 @@ import (
 
 	"github.com/sukko-dev/sukko/cmd/tester/metrics"
 	"github.com/sukko-dev/sukko/internal/shared/license"
+	"github.com/sukko-dev/sukko/internal/shared/routing"
 )
 
 // stubEditionFn returns a fixed edition for testing gate logic.
@@ -90,6 +91,26 @@ func TestValidateWebhooks_EditionFetchUsesHTTPScheme(t *testing.T) {
 	}
 	if want := "http://ws-gateway:3000"; gotURL != want {
 		t.Errorf("edition fetch URL = %q, want %q (ws:// must be rewritten to http:// — http.Get rejects the ws scheme)", gotURL, want)
+	}
+}
+
+// TestWebhookRoutingRules_TargetsDefaultTopic pins the webhook suite's routing rule to the
+// tenant's always-provisioned default topic. A custom ingress topic trips the ADR-0006
+// topic-universe gate (HTTP 400 TOPIC_NOT_PROVISIONED) — the failure that surfaced the first
+// time the pro-webhooks grid cell ran the suite against a real provisioning service. Mirrors the
+// working kafka_ingest suite, which routes "**" to routing.DefaultTopicSuffix.
+func TestWebhookRoutingRules_TargetsDefaultTopic(t *testing.T) {
+	t.Parallel()
+
+	rules := webhookRoutingRules()
+	if len(rules) != 1 {
+		t.Fatalf("got %d rules, want 1", len(rules))
+	}
+	if got := rules[0]["ingress_topic"]; got != routing.DefaultTopicSuffix {
+		t.Errorf("ingress_topic = %v, want %q (a custom topic trips the topic-universe gate)", got, routing.DefaultTopicSuffix)
+	}
+	if got := rules[0]["pattern"]; got != webhookTestRoutingPatt {
+		t.Errorf("pattern = %v, want %q", got, webhookTestRoutingPatt)
 	}
 }
 
