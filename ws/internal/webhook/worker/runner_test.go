@@ -416,19 +416,27 @@ func TestRunner_RaceCacheConcurrentAccess(t *testing.T) {
 	client.records["t1"] = []*provisioning.WebhookRecord{
 		{ID: "wh-1", TenantID: "t1", Status: "enabled"},
 	}
+	client.slugs["t1"] = "slug-t1"
 	cache := NewWebhookCache(client, zerolog.Nop())
 	if err := cache.Refresh(context.Background(), "t1"); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
 
 	var wg sync.WaitGroup
-	// 5 concurrent cache reads.
+	// 5 concurrent UUID reads.
 	for range 5 {
 		wg.Go(func() {
 			_ = cache.Get("t1")
 		})
 	}
-	// 3 concurrent invalidation refreshes.
+	// 5 concurrent slug reads — exercise GetBySlug against the slug-index rebuild (delete + re-add)
+	// that each Refresh performs under the write lock (ADR-0032).
+	for range 5 {
+		wg.Go(func() {
+			_ = cache.GetBySlug("slug-t1")
+		})
+	}
+	// 3 concurrent invalidation refreshes (each rebuilds the slug index).
 	for range 3 {
 		wg.Go(func() {
 			_ = cache.Refresh(context.Background(), "t1")

@@ -2,6 +2,7 @@ package grpcserver
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -118,7 +119,7 @@ func TestWebhookWorkerServer_ListWebhooksForTenant_StampsTenantSlug(t *testing.T
 		}
 	})
 
-	t.Run("resolver error leaves slug empty but call succeeds", func(t *testing.T) {
+	t.Run("tenant-not-found leaves slug empty but call succeeds (deletion race)", func(t *testing.T) {
 		t.Parallel()
 		srv, err := NewWebhookWorkerServer(store, stubTenantSlugResolver{err: provisioning.ErrTenantNotFound}, nil, zerolog.Nop())
 		if err != nil {
@@ -130,10 +131,25 @@ func TestWebhookWorkerServer_ListWebhooksForTenant_StampsTenantSlug(t *testing.T
 			t.Fatalf("ListWebhooksForTenant() error = %v", err)
 		}
 		if got := resp.GetTenantSlug(); got != "" {
-			t.Errorf("TenantSlug = %q, want empty on resolver error", got)
+			t.Errorf("TenantSlug = %q, want empty on tenant-not-found", got)
 		}
 		if len(resp.GetWebhooks()) != 1 {
-			t.Errorf("expected webhooks still returned on slug-resolver error, got %d", len(resp.GetWebhooks()))
+			t.Errorf("expected webhooks still returned on tenant-not-found, got %d", len(resp.GetWebhooks()))
+		}
+	})
+
+	// A transient slug-lookup failure (DB deadline, pool failover) for a LIVE tenant must fail the
+	// RPC rather than return success with an empty slug — otherwise the worker evicts a healthy slug
+	// mapping and silently drops deliveries for up to a cache-TTL cycle (ADR-0032 / §IV).
+	t.Run("transient lookup error fails the RPC (does not evict the worker mapping)", func(t *testing.T) {
+		t.Parallel()
+		srv, err := NewWebhookWorkerServer(store, stubTenantSlugResolver{err: errors.New("db deadline exceeded")}, nil, zerolog.Nop())
+		if err != nil {
+			t.Fatalf("NewWebhookWorkerServer() error = %v", err)
+		}
+		if _, err := srv.ListWebhooksForTenant(context.Background(),
+			&provisioningv1.ListWebhooksForTenantRequest{TenantUuid: "uuid-1"}); err == nil {
+			t.Fatal("expected error on transient slug-lookup failure, got nil")
 		}
 	})
 }

@@ -56,7 +56,17 @@ control plane**: the worker's broadcast consumer.
 - **Known residual (not fixed here):** a slug rename does not emit a webhook cache
   invalidation, so a renamed tenant's `slugToUUID` entry is stale until the next TTL
   refresh. The window is TTL-bounded and documented in a code comment; closing it is a
-  separate change if it ever matters.
+  separate change if it ever matters. A stale entry is bounded to at most one cache-TTL
+  cycle under normal operation, whereas `SLUG_RENAME_TOPIC_HOLD_PERIOD` (default 168h)
+  keeps a released slug unclaimable far longer — so the theoretical cross-tenant
+  mis-route (tenant B reclaims A's old slug while the worker still maps it to A) requires
+  a continuous refresh outage exceeding the hold period, the same whole-cache-stale class
+  of prolonged-outage failure that predates this change.
+- A transient `GetSlugByUUID` failure for a live tenant fails the gRPC response rather than
+  returning an empty slug: an empty slug would make `fetchAndStore` evict a healthy mapping,
+  so the worker instead keeps its last-known-good mapping (its `Refresh` leaves the cache
+  untouched on error). Only a genuine `ErrTenantNotFound` yields the empty-slug path (§IV:
+  degrade to stale, never to silent loss).
 
 ## Alternatives rejected
 

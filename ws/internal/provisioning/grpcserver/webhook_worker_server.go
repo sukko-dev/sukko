@@ -88,13 +88,25 @@ func (s *WebhookWorkerServer) ListWebhooksForTenant(ctx context.Context, req *pr
 		}
 	}
 	// Stamp the tenant's data-path slug so the worker can index its UUID-keyed cache by the slug
-	// that broadcast messages carry (ADR-0032). Best-effort: on a deletion race or lookup error the
-	// slug is left empty and the worker skips the index write — webhooks for a vanished tenant are
-	// not deliverable anyway.
+	// that broadcast messages carry (ADR-0032). The failure modes are discriminated on cause, not
+	// outcome: a genuinely deleted tenant (ErrTenantNotFound) yields an empty slug and the worker
+	// skips the index write (deletion race — webhooks for a vanished tenant are undeliverable), but
+	// a TRANSIENT lookup failure (DB deadline, pool failover) for a live tenant MUST fail the RPC.
+	// Returning success with an empty slug there would make the worker evict a healthy slug mapping
+	// (fetchAndStore rebuilds the index), silently dropping deliveries for up to a cache-TTL cycle;
+	// failing the RPC instead makes the worker keep its last-known-good mapping (its Refresh leaves
+	// the cache untouched on error) — degrade to stale, never to silent loss (§IV).
 	slug, slugErr := s.tenantSlugs.GetSlugByUUID(ctx, req.GetTenantUuid())
-	if slugErr != nil {
-		s.logger.Warn().Err(slugErr).Str(logging.LogKeyTenantUUID, req.GetTenantUuid()).
-			Msg("ListWebhooksForTenant: tenant slug lookup failed; worker slug index not updated for this tenant")
+	switch {
+	case slugErr == nil:
+		// resolved
+	case errors.Is(slugErr, provisioning.ErrTenantNotFound):
+		s.logger.Warn().Str(logging.LogKeyTenantUUID, req.GetTenantUuid()).
+			Msg("ListWebhooksForTenant: tenant not found resolving slug; worker will drop any slug index entry for it")
+	default:
+		s.logger.Error().Err(slugErr).Str(logging.LogKeyTenantUUID, req.GetTenantUuid()).
+			Msg("ListWebhooksForTenant: transient tenant slug lookup failure; failing RPC so the worker keeps its last-known slug mapping")
+		return nil, status.Errorf(codes.Internal, "resolve tenant slug: %v", slugErr)
 	}
 	return &provisioningv1.ListWebhooksForTenantResponse{Webhooks: protoRecords, TenantSlug: slug}, nil
 }
