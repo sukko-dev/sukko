@@ -17,8 +17,9 @@ type ProvisioningClient interface {
 	// Called at startup for initial cache hydration.
 	ListWebhookTenants(ctx context.Context) ([]string, error)
 
-	// ListWebhooksForTenant returns all webhook registrations for a tenant.
-	ListWebhooksForTenant(ctx context.Context, tenantID string) ([]*provisioning.WebhookRecord, error)
+	// ListWebhooksForTenant returns all webhook registrations for a tenant, plus the tenant's
+	// current data-path slug (empty if the tenant no longer exists) for the worker's slug index.
+	ListWebhooksForTenant(ctx context.Context, tenantID string) ([]*provisioning.WebhookRecord, string, error)
 
 	// UpdateWebhookStatus transitions a webhook's status and resets retry_count.
 	UpdateWebhookStatus(ctx context.Context, id, tenantID, status string, retryCount int) error

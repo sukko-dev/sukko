@@ -32,26 +32,44 @@ type WebhookRecord struct {
 // concurrent gRPC stampedes on the same tenant.
 type WebhookCache struct {
 	mu      sync.RWMutex
-	records map[string][]WebhookRecord
-	group   singleflight.Group
-	client  ProvisioningClient
-	logger  zerolog.Logger
+	records map[string][]WebhookRecord // tenant UUID -> webhooks
+	// slugToUUID maps a tenant's data-path slug to its control-plane UUID. Broadcast messages
+	// carry the slug; the cache is keyed by UUID; this index bridges the two at the data-path
+	// boundary (ADR-0032). Maintained alongside records under the same lock.
+	slugToUUID map[string]string
+	group      singleflight.Group
+	client     ProvisioningClient
+	logger     zerolog.Logger
 }
 
 // NewWebhookCache creates a WebhookCache backed by the given ProvisioningClient.
 func NewWebhookCache(client ProvisioningClient, logger zerolog.Logger) *WebhookCache {
 	return &WebhookCache{
-		records: make(map[string][]WebhookRecord),
-		client:  client,
-		logger:  logger.With().Str("component", "webhook_cache").Logger(),
+		records:    make(map[string][]WebhookRecord),
+		slugToUUID: make(map[string]string),
+		client:     client,
+		logger:     logger.With().Str("component", "webhook_cache").Logger(),
 	}
 }
 
-// Get returns the cached webhooks for a tenant. Returns nil if the tenant has no entry.
+// Get returns the cached webhooks for a tenant UUID. Returns nil if the tenant has no entry.
 func (c *WebhookCache) Get(tenantID string) []WebhookRecord {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.records[tenantID]
+}
+
+// GetBySlug returns the cached webhooks for a tenant identified by its data-path slug, resolving
+// slug -> UUID -> records in a single read lock. Broadcast messages carry the slug, so this is the
+// lookup the broadcast consumer uses (ADR-0032). Returns nil when the slug is unknown.
+func (c *WebhookCache) GetBySlug(slug string) []WebhookRecord {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	uuid, ok := c.slugToUUID[slug]
+	if !ok {
+		return nil
+	}
+	return c.records[uuid]
 }
 
 // GetByID finds a single webhook by ID within a tenant's cached records. Returns nil if absent.
@@ -125,7 +143,7 @@ func (c *WebhookCache) Hydrate(ctx context.Context) ([]WebhookRecord, error) {
 
 // fetchAndStore calls ListWebhooksForTenant and writes the result under the write lock.
 func (c *WebhookCache) fetchAndStore(ctx context.Context, tenantID string) error {
-	recs, err := c.client.ListWebhooksForTenant(ctx, tenantID)
+	recs, slug, err := c.client.ListWebhooksForTenant(ctx, tenantID)
 	if err != nil {
 		return fmt.Errorf("list webhooks for tenant %s: %w", tenantID, err)
 	}
@@ -135,6 +153,17 @@ func (c *WebhookCache) fetchAndStore(ctx context.Context, tenantID string) error
 	}
 	c.mu.Lock()
 	c.records[tenantID] = local
+	// Rebuild this tenant's slug -> UUID mapping. Drop any stale slug previously pointing at this
+	// UUID (rename-safe) before setting the current one. An empty slug (tenant deletion race)
+	// leaves the index without an entry for this UUID — its broadcasts then find no records.
+	for s, u := range c.slugToUUID {
+		if u == tenantID {
+			delete(c.slugToUUID, s)
+		}
+	}
+	if slug != "" {
+		c.slugToUUID[slug] = tenantID
+	}
 	size := len(c.records)
 	c.mu.Unlock()
 	cacheSizeGauge.Set(float64(size))

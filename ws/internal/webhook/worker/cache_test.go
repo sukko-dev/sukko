@@ -20,6 +20,7 @@ type stubProvisioningClient struct {
 	mu        sync.Mutex
 	callCount map[string]int
 	records   map[string][]*provisioning.WebhookRecord
+	slugs     map[string]string // tenant UUID -> slug returned by ListWebhooksForTenant
 	tenants   []string
 	err       error
 }
@@ -28,6 +29,7 @@ func newStubClient() *stubProvisioningClient {
 	return &stubProvisioningClient{
 		callCount: make(map[string]int),
 		records:   make(map[string][]*provisioning.WebhookRecord),
+		slugs:     make(map[string]string),
 	}
 }
 
@@ -37,7 +39,7 @@ func (s *stubProvisioningClient) ListWebhookTenants(_ context.Context) ([]string
 	return s.tenants, s.err
 }
 
-func (s *stubProvisioningClient) ListWebhooksForTenant(_ context.Context, tenantID string) ([]*provisioning.WebhookRecord, error) {
+func (s *stubProvisioningClient) ListWebhooksForTenant(_ context.Context, tenantID string) ([]*provisioning.WebhookRecord, string, error) {
 	s.mu.Lock()
 	s.callCount[tenantID]++
 	s.mu.Unlock()
@@ -46,7 +48,7 @@ func (s *stubProvisioningClient) ListWebhooksForTenant(_ context.Context, tenant
 	time.Sleep(5 * time.Millisecond)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.records[tenantID], s.err
+	return s.records[tenantID], s.slugs[tenantID], s.err
 }
 
 func (s *stubProvisioningClient) UpdateWebhookStatus(_ context.Context, _, _, _ string, _ int) error {
@@ -227,5 +229,95 @@ func TestWebhookCache_RefreshAll_LogsTenantUUID(t *testing.T) {
 	}
 	if strings.Contains(out, `"tenant_id"`) {
 		t.Errorf("log must not use the legacy tenant_id key; got: %s", out)
+	}
+}
+
+// TestWebhookCache_GetBySlug is the direct regression for the webhook-delivery keying bug
+// (ADR-0032): the cache is populated by a UUID-keyed refresh whose response carries the tenant's
+// slug, and the broadcast-path lookup is by slug. Before the fix the broadcast used Cache.Get(slug)
+// against a UUID-keyed map and missed every time.
+func TestWebhookCache_GetBySlug(t *testing.T) {
+	t.Parallel()
+	stub := newStubClient()
+	stub.records["uuid-1"] = []*provisioning.WebhookRecord{{ID: "wh-1", TenantID: "uuid-1", Status: "enabled"}}
+	stub.slugs["uuid-1"] = "acme"
+	c := NewWebhookCache(stub, zerolog.Nop())
+	if err := c.Refresh(context.Background(), "uuid-1"); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := c.GetBySlug("acme"); len(got) != 1 || got[0].ID != "wh-1" {
+		t.Errorf("GetBySlug(acme) = %v, want 1 record wh-1", got)
+	}
+	if got := c.Get("uuid-1"); len(got) != 1 {
+		t.Errorf("Get(uuid-1) = %v, want 1 record (control-plane lookup unchanged)", got)
+	}
+	if got := c.GetBySlug("unknown"); got != nil {
+		t.Errorf("GetBySlug(unknown) = %v, want nil", got)
+	}
+}
+
+// TestWebhookCache_SlugIndexRenameOverwrite verifies a refresh that reports a new slug for the same
+// UUID drops the stale slug entry (rename-safe).
+func TestWebhookCache_SlugIndexRenameOverwrite(t *testing.T) {
+	t.Parallel()
+	stub := newStubClient()
+	stub.records["uuid-1"] = []*provisioning.WebhookRecord{{ID: "wh-1", TenantID: "uuid-1", Status: "enabled"}}
+	c := NewWebhookCache(stub, zerolog.Nop())
+
+	stub.slugs["uuid-1"] = "old-slug"
+	if err := c.Refresh(context.Background(), "uuid-1"); err != nil {
+		t.Fatalf("Refresh(old): %v", err)
+	}
+	stub.slugs["uuid-1"] = "new-slug"
+	if err := c.Refresh(context.Background(), "uuid-1"); err != nil {
+		t.Fatalf("Refresh(new): %v", err)
+	}
+	if got := c.GetBySlug("old-slug"); got != nil {
+		t.Errorf("GetBySlug(old-slug) = %v, want nil after rename", got)
+	}
+	if got := c.GetBySlug("new-slug"); len(got) != 1 {
+		t.Errorf("GetBySlug(new-slug) = %v, want 1 record after rename", got)
+	}
+}
+
+// TestWebhookCache_EmptySlugSkipsIndex verifies an empty slug (tenant-deletion race) adds no index
+// entry, while the UUID-keyed records are still stored.
+func TestWebhookCache_EmptySlugSkipsIndex(t *testing.T) {
+	t.Parallel()
+	stub := newStubClient()
+	stub.records["uuid-1"] = []*provisioning.WebhookRecord{{ID: "wh-1", TenantID: "uuid-1", Status: "enabled"}}
+	// stub.slugs["uuid-1"] left unset -> "".
+	c := NewWebhookCache(stub, zerolog.Nop())
+	if err := c.Refresh(context.Background(), "uuid-1"); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := c.GetBySlug(""); got != nil {
+		t.Errorf("GetBySlug(\"\") = %v, want nil (empty slug is never indexed)", got)
+	}
+	if got := c.Get("uuid-1"); len(got) != 1 {
+		t.Errorf("Get(uuid-1) = %v, want records still present", got)
+	}
+}
+
+// TestWebhookCache_RefreshErrorKeepsSlugIndex verifies a refresh that errors (transient fetch
+// failure) leaves the existing slug -> UUID mapping intact rather than evicting it — the worker
+// degrades to a stale-but-working mapping, never to silent delivery loss (ADR-0032 / §IV). Pairs
+// with the provisioning-side guard that fails the RPC on a transient slug-lookup error.
+func TestWebhookCache_RefreshErrorKeepsSlugIndex(t *testing.T) {
+	t.Parallel()
+	stub := newStubClient()
+	stub.records["uuid-1"] = []*provisioning.WebhookRecord{{ID: "wh-1", TenantID: "uuid-1", Status: "enabled"}}
+	stub.slugs["uuid-1"] = "acme"
+	c := NewWebhookCache(stub, zerolog.Nop())
+	if err := c.Refresh(context.Background(), "uuid-1"); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	stub.err = errors.New("transient fetch failure")
+	if err := c.Refresh(context.Background(), "uuid-1"); err == nil {
+		t.Fatal("expected Refresh to error, got nil")
+	}
+	if got := c.GetBySlug("acme"); len(got) != 1 {
+		t.Errorf("GetBySlug(acme) = %v, want mapping preserved after a failed refresh", got)
 	}
 }

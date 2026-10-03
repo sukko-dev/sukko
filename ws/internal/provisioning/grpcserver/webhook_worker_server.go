@@ -14,11 +14,19 @@ import (
 	"github.com/sukko-dev/sukko/internal/shared/logging"
 )
 
+// tenantSlugResolver resolves a tenant's current data-path slug from its stable UUID.
+// Satisfied by *repository.TenantRepository (GetSlugByUUID). Consumer-defined so the gRPC
+// server depends only on the one method it needs (ADR-0032).
+type tenantSlugResolver interface {
+	GetSlugByUUID(ctx context.Context, tenantUUID string) (string, error)
+}
+
 // WebhookWorkerServer implements WebhookWorkerServiceServer using the provisioning service's
 // webhook store. All RPCs are authenticated via WebhookWorkerAuthUnaryInterceptor.
 type WebhookWorkerServer struct {
 	provisioningv1.UnimplementedWebhookWorkerServiceServer
 	store        provisioning.WebhookStore
+	tenantSlugs  tenantSlugResolver
 	invalidation provisioning.WebhookCacheInvalidator
 	logger       zerolog.Logger
 }
@@ -27,12 +35,16 @@ type WebhookWorkerServer struct {
 // Returns an error if store is nil (indicates Community edition — worker binary should not start).
 // invalidation is optional (nil-safe): when set, UpdateWebhookStatus publishes a cache
 // invalidation signal so other worker instances refresh their cache immediately.
-func NewWebhookWorkerServer(store provisioning.WebhookStore, invalidation provisioning.WebhookCacheInvalidator, logger zerolog.Logger) (*WebhookWorkerServer, error) {
+func NewWebhookWorkerServer(store provisioning.WebhookStore, tenantSlugs tenantSlugResolver, invalidation provisioning.WebhookCacheInvalidator, logger zerolog.Logger) (*WebhookWorkerServer, error) {
 	if store == nil {
 		return nil, errors.New("webhook store is required for WebhookWorkerServer (Pro/Enterprise editions only)")
 	}
+	if tenantSlugs == nil {
+		return nil, errors.New("tenant slug resolver is required for WebhookWorkerServer")
+	}
 	return &WebhookWorkerServer{
 		store:        store,
+		tenantSlugs:  tenantSlugs,
 		invalidation: invalidation,
 		logger:       logger.With().Str("component", "webhook_worker_grpc_server").Logger(),
 	}, nil
@@ -75,7 +87,28 @@ func (s *WebhookWorkerServer) ListWebhooksForTenant(ctx context.Context, req *pr
 			LastDeliveryAtMs: lastDeliveryAtMs,    // 0 when nil — worker treats 0 as "no prior delivery"
 		}
 	}
-	return &provisioningv1.ListWebhooksForTenantResponse{Webhooks: protoRecords}, nil
+	// Stamp the tenant's data-path slug so the worker can index its UUID-keyed cache by the slug
+	// that broadcast messages carry (ADR-0032). The failure modes are discriminated on cause, not
+	// outcome: a genuinely deleted tenant (ErrTenantNotFound) yields an empty slug and the worker
+	// skips the index write (deletion race — webhooks for a vanished tenant are undeliverable), but
+	// a TRANSIENT lookup failure (DB deadline, pool failover) for a live tenant MUST fail the RPC.
+	// Returning success with an empty slug there would make the worker evict a healthy slug mapping
+	// (fetchAndStore rebuilds the index), silently dropping deliveries for up to a cache-TTL cycle;
+	// failing the RPC instead makes the worker keep its last-known-good mapping (its Refresh leaves
+	// the cache untouched on error) — degrade to stale, never to silent loss (§IV).
+	slug, slugErr := s.tenantSlugs.GetSlugByUUID(ctx, req.GetTenantUuid())
+	switch {
+	case slugErr == nil:
+		// resolved
+	case errors.Is(slugErr, provisioning.ErrTenantNotFound):
+		s.logger.Warn().Str(logging.LogKeyTenantUUID, req.GetTenantUuid()).
+			Msg("ListWebhooksForTenant: tenant not found resolving slug; worker will drop any slug index entry for it")
+	default:
+		s.logger.Error().Err(slugErr).Str(logging.LogKeyTenantUUID, req.GetTenantUuid()).
+			Msg("ListWebhooksForTenant: transient tenant slug lookup failure; failing RPC so the worker keeps its last-known slug mapping")
+		return nil, status.Errorf(codes.Internal, "resolve tenant slug: %v", slugErr)
+	}
+	return &provisioningv1.ListWebhooksForTenantResponse{Webhooks: protoRecords, TenantSlug: slug}, nil
 }
 
 // UpdateWebhookStatus transitions a webhook's status and sets retry_count.

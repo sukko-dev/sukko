@@ -35,10 +35,10 @@ func (c *GRPCProvisioningClient) ListWebhookTenants(ctx context.Context) ([]stri
 }
 
 // ListWebhooksForTenant implements ProvisioningClient.
-func (c *GRPCProvisioningClient) ListWebhooksForTenant(ctx context.Context, tenantID string) ([]*provisioning.WebhookRecord, error) {
+func (c *GRPCProvisioningClient) ListWebhooksForTenant(ctx context.Context, tenantID string) ([]*provisioning.WebhookRecord, string, error) {
 	resp, err := c.client.ListWebhooksForTenant(ctx, &provisioningv1.ListWebhooksForTenantRequest{TenantUuid: tenantID})
 	if err != nil {
-		return nil, fmt.Errorf("ListWebhooksForTenant(%s): %w", tenantID, err)
+		return nil, "", fmt.Errorf("ListWebhooksForTenant(%s): %w", tenantID, err)
 	}
 	records := make([]*provisioning.WebhookRecord, len(resp.GetWebhooks()))
 	for i, w := range resp.GetWebhooks() {
@@ -58,7 +58,7 @@ func (c *GRPCProvisioningClient) ListWebhooksForTenant(ctx context.Context, tena
 		}
 		records[i] = rec
 	}
-	return records, nil
+	return records, resp.GetTenantSlug(), nil
 }
 
 // UpdateWebhookStatus implements ProvisioningClient.

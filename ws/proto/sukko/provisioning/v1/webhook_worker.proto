@@ -39,6 +39,11 @@ message ListWebhooksForTenantRequest {
 
 message ListWebhooksForTenantResponse {
   repeated WebhookRecord webhooks = 1;
+  // tenant_slug is the tenant's current data-path slug, resolved by provisioning from the
+  // tenant store. The webhook-worker indexes its UUID-keyed cache by this slug so it can
+  // match broadcast messages (which carry the slug, not the UUID). Empty when the tenant
+  // no longer exists (deletion race) — the worker then skips the slug-index write.
+  string tenant_slug = 2;
 }
 
 // WebhookRecord is the wire representation sent from provisioning to webhook-worker.
