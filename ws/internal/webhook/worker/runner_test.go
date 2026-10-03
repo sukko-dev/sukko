@@ -30,8 +30,8 @@ type recordingProvClient struct {
 func (c *recordingProvClient) ListWebhookTenants(_ context.Context) ([]string, error) {
 	return nil, nil
 }
-func (c *recordingProvClient) ListWebhooksForTenant(_ context.Context, _ string) ([]*provisioning.WebhookRecord, error) {
-	return nil, nil
+func (c *recordingProvClient) ListWebhooksForTenant(_ context.Context, _ string) ([]*provisioning.WebhookRecord, string, error) {
+	return nil, "", nil
 }
 func (c *recordingProvClient) UpdateWebhookStatus(_ context.Context, id, _, status string, _ int) error {
 	c.mu.Lock()
@@ -435,4 +435,58 @@ func TestRunner_RaceCacheConcurrentAccess(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// TestRunner_DeliversOnSlugKeyedBroadcast is the end-to-end regression for the webhook-delivery
+// keying bug (ADR-0032): a broadcast message carries the tenant SLUG as its TenantID (as ws-server
+// stamps it), while the cache is populated by a UUID-keyed refresh. The eventConsumer must resolve
+// slug -> UUID -> records (GetBySlug) and enqueue a delivery. Before the fix it looked up
+// Cache.Get(slug) against a UUID-keyed map, found nothing, and enqueued zero deliveries.
+func TestRunner_DeliversOnSlugKeyedBroadcast(t *testing.T) {
+	t.Parallel()
+
+	stub := newStubClient()
+	stub.records["uuid-1"] = []*provisioning.WebhookRecord{
+		{ID: "wh-1", TenantID: "uuid-1", URL: "https://example.com",
+			SecretEnc: encryptSecret(t, "sec"), Status: types.WebhookStatusEnabled,
+			ChannelPattern: "test.*", MaxRetries: 3},
+	}
+	stub.slugs["uuid-1"] = "acme"
+	cache := NewWebhookCache(stub, zerolog.Nop())
+	if err := cache.Refresh(context.Background(), "uuid-1"); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	client := &recordingProvClient{}
+	sub := newNoopSub()
+	deliverer := NewDeliverer(cache, &mockFastDoer{}, testKey, zerolog.Nop())
+	r, err := NewRunner(Config{
+		Clock:              time.Now,
+		RetrySchedule:      webhookconst.WebhookRetrySchedule[:],
+		WorkerConcurrency:  2,
+		RetryQueueSize:     100,
+		DeliveryTimeout:    5 * time.Second,
+		CacheTTL:           30 * time.Second,
+		ProvisioningClient: client,
+		Subscriber:         sub,
+		Cache:              cache,
+		Deliverer:          deliverer,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	ctx := t.Context()
+	go func() { _ = r.Run(ctx) }()
+
+	// Broadcast carries the slug ("acme") as TenantID, matching the webhook's "test.*" pattern.
+	sub.ch <- &broadcast.Message{TenantID: "acme", Channel: "test.event", Payload: []byte(`{"x":1}`), Mid: "m1"}
+
+	// Poll the condition (delivery recorded) rather than sleeping a fixed interval.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && client.deliveryCount() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := client.deliveryCount(); n != 1 {
+		t.Fatalf("delivery count = %d, want 1 (broadcast carries the slug; GetBySlug must resolve it to the UUID-keyed records)", n)
+	}
 }

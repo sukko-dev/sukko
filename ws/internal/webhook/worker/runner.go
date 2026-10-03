@@ -214,7 +214,7 @@ func (r *Runner) eventConsumer() {
 			if !ok {
 				return
 			}
-			records := r.cfg.Cache.Get(msg.TenantID)
+			records := r.cfg.Cache.GetBySlug(msg.TenantID)
 			for _, rec := range records {
 				matched, err := routing.MatchRoutingPattern(rec.ChannelPattern, msg.Channel)
 				if err != nil || !matched {

@@ -147,6 +147,25 @@ func (r *TenantRepository) GetBySlug(ctx context.Context, slug string) (*provisi
 	return tenant, nil
 }
 
+// GetSlugByUUID resolves a tenant's current slug from its stable UUID. The webhook-worker gRPC
+// server uses it to stamp the data-path slug onto cache-hydration responses, so the worker can
+// index its UUID-keyed cache by the slug that broadcast messages carry (ADR-0032). Returns
+// provisioning.ErrTenantNotFound for an unknown or soft-deleted tenant — the server then leaves
+// the response slug empty and the worker skips the slug-index write.
+func (r *TenantRepository) GetSlugByUUID(ctx context.Context, tenantUUID string) (string, error) {
+	query := `SELECT slug FROM tenants WHERE id = $1 AND deleted_at IS NULL`
+
+	var slug string
+	if err := r.pool.QueryRow(ctx, query, tenantUUID).Scan(&slug); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("%w: %s", provisioning.ErrTenantNotFound, tenantUUID)
+		}
+		return "", fmt.Errorf("query tenant slug: %w", err)
+	}
+
+	return slug, nil
+}
+
 // GetIDBySlugWithGrace resolves a tenant slug to its stable UUID, accepting the
 // current slug OR a previous slug that is still within the rename hold window.
 // It is the grace-aware slug->UUID lookup backing the provisioning tenant-binding

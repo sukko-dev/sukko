@@ -540,7 +540,7 @@ func main() {
 				grpcserver.WebhookWorkerAuthUnaryInterceptor(cfg.WebhookInternalToken),
 			),
 		)
-		webhookWorkerSrv, err := grpcserver.NewWebhookWorkerServer(webhookRepo, invalidationPublisher, structuredLogger)
+		webhookWorkerSrv, err := grpcserver.NewWebhookWorkerServer(webhookRepo, tenantRepo, invalidationPublisher, structuredLogger)
 		if err != nil {
 			structuredLogger.Fatal().Err(err).Msg("Failed to create webhook worker gRPC server")
 		}

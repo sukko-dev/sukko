@@ -146,8 +146,13 @@ func (x *ListWebhooksForTenantRequest) GetTenantUuid() string {
 }
 
 type ListWebhooksForTenantResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Webhooks      []*WebhookRecord       `protobuf:"bytes,1,rep,name=webhooks,proto3" json:"webhooks,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Webhooks []*WebhookRecord       `protobuf:"bytes,1,rep,name=webhooks,proto3" json:"webhooks,omitempty"`
+	// tenant_slug is the tenant's current data-path slug, resolved by provisioning from the
+	// tenant store. The webhook-worker indexes its UUID-keyed cache by this slug so it can
+	// match broadcast messages (which carry the slug, not the UUID). Empty when the tenant
+	// no longer exists (deletion race) — the worker then skips the slug-index write.
+	TenantSlug    string `protobuf:"bytes,2,opt,name=tenant_slug,json=tenantSlug,proto3" json:"tenant_slug,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -187,6 +192,13 @@ func (x *ListWebhooksForTenantResponse) GetWebhooks() []*WebhookRecord {
 		return x.Webhooks
 	}
 	return nil
+}
+
+func (x *ListWebhooksForTenantResponse) GetTenantSlug() string {
+	if x != nil {
+		return x.TenantSlug
+	}
+	return ""
 }
 
 // WebhookRecord is the wire representation sent from provisioning to webhook-worker.
@@ -542,9 +554,11 @@ const file_sukko_provisioning_v1_webhook_worker_proto_rawDesc = "" +
 	"\ftenant_uuids\x18\x01 \x03(\tR\vtenantUuids\"?\n" +
 	"\x1cListWebhooksForTenantRequest\x12\x1f\n" +
 	"\vtenant_uuid\x18\x01 \x01(\tR\n" +
-	"tenantUuid\"a\n" +
+	"tenantUuid\"\x82\x01\n" +
 	"\x1dListWebhooksForTenantResponse\x12@\n" +
-	"\bwebhooks\x18\x01 \x03(\v2$.sukko.provisioning.v1.WebhookRecordR\bwebhooks\"\x82\x02\n" +
+	"\bwebhooks\x18\x01 \x03(\v2$.sukko.provisioning.v1.WebhookRecordR\bwebhooks\x12\x1f\n" +
+	"\vtenant_slug\x18\x02 \x01(\tR\n" +
+	"tenantSlug\"\x82\x02\n" +
 	"\rWebhookRecord\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
 	"\vtenant_uuid\x18\x02 \x01(\tR\n" +
