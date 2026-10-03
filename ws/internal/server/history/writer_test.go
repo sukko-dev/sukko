@@ -246,8 +246,15 @@ func TestHistoryWriter_PassivePodNoXADD(t *testing.T) {
 	for range heartbeats {
 		before := bus.getMetricsCallCount()
 		clk.Advance(opts.heartbeatInterval)
-		waitFor(func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second)
+		mustEventually(t, func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second, "writer did not consume the heartbeat tick (fake-clock ticks would coalesce and weaken the assertion)")
 	}
+
+	// Prove the message was actually processed by flushBatch (and correctly dropped as passive)
+	// before asserting no XADD — otherwise XLEN==0 could pass vacuously because the relay simply
+	// had not moved the message from the bus channel to workChan yet.
+	mustEventually(t, func() bool {
+		return metricCounterValue(t, w.Metrics().WriteDropped.WithLabelValues(history.HistoryDropReasonPassive)) >= 1
+	}, 2*time.Second, "passive pod did not process the fanned-out message (no passive drop recorded)")
 
 	streamKey := history.HistoryStreamKeyPrefix + opts.env + ":tenantA:ETH.trade"
 	checkClient := newTestValkeyClient(t, mr)
@@ -463,16 +470,20 @@ func TestHistoryWriter_NonConvergenceDoesNotRestart(t *testing.T) {
 	for range heartbeats {
 		before := bus.getMetricsCallCount()
 		clk.Advance(opts.heartbeatInterval)
-		waitFor(func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second)
+		mustEventually(t, func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second, "writer did not consume the heartbeat tick (fake-clock ticks would coalesce and weaken the assertion)")
 	}
 	if restarts := metricCounterValue(t, w.Metrics().WriterRestartTotal); restarts != 0 {
 		t.Errorf("expected 0 restarts over %d heartbeats while non-converged but publish-healthy, got %v", heartbeats, restarts)
 	}
 
 	// Phase 2: publish-unhealthy (still non-converged) — the next heartbeat trips the restart gate.
+	// mustEventually is the assertion: a timeout here (no restart) fails the test, pinning
+	// "publish-unhealthy restarts EVEN while non-converged" — the ADR-0016 invariant from the
+	// positive side, which a bare best-effort waitFor would have silently dropped.
 	bus.setHealthy(false)
 	clk.Advance(opts.heartbeatInterval) // fire a heartbeat → publish-unhealthy → runOnce exits → restart
-	waitFor(func() bool { return metricCounterValue(t, w.Metrics().WriterRestartTotal) >= 1 }, 2*time.Second)
+	mustEventually(t, func() bool { return metricCounterValue(t, w.Metrics().WriterRestartTotal) >= 1 }, 2*time.Second,
+		"expected a restart after the publish path became unhealthy (non-converged must not suppress it)")
 }
 
 // TestHistoryWriter_CtxCancelExitsDuringBackoff verifies that canceling the parent context
@@ -582,7 +593,7 @@ func TestHistoryWriter_AlwaysPassivePod_ZeroLockLossMetric(t *testing.T) {
 	for range heartbeats {
 		before := bus.getMetricsCallCount()
 		clk.Advance(opts.heartbeatInterval)
-		waitFor(func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second)
+		mustEventually(t, func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second, "writer did not consume the heartbeat tick (fake-clock ticks would coalesce and weaken the assertion)")
 	}
 
 	n := metricCounterValue(t, w.Metrics().LockFailuresTotal)
@@ -771,7 +782,8 @@ func TestHistoryWriter_LockCallFailureVsCASMiss(t *testing.T) {
 	// runOnce acquires the lock (real miniredis SET NX) before registering its heartbeat ticker, so
 	// once the ticker exists the writer is already active.
 	clk.BlockUntil(1)
-	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
+	mustEventually(t, func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second,
+		"writer did not acquire the lock / become active")
 
 	// Steal the lock from under the active writer (a one-shot value change — the CAS miss is about
 	// the lock VALUE, not its TTL, so no clock coordination is needed for the steal).
@@ -787,7 +799,8 @@ func TestHistoryWriter_LockCallFailureVsCASMiss(t *testing.T) {
 	// Fire exactly one heartbeat: the CAS renewal returns n=0 (lock stolen) and the writer flips
 	// passive. Deterministic — no reliance on a real 20ms ticker racing CI scheduling.
 	clk.Advance(opts.heartbeatInterval)
-	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 0 }, 2*time.Second)
+	mustEventually(t, func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 0 }, 2*time.Second,
+		"writer did not flip passive after the CAS miss")
 
 	active := prometheustestutil.ToFloat64(w.Metrics().WriterActive)
 	lockFails := prometheustestutil.ToFloat64(w.Metrics().LockFailuresTotal)
@@ -831,7 +844,7 @@ func TestHistoryWriter_PassivePodNoLockDEL(t *testing.T) {
 	clk.BlockUntil(1)
 	before := bus.getMetricsCallCount()
 	clk.Advance(opts.heartbeatInterval)
-	waitFor(func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second)
+	mustEventually(t, func() bool { return bus.getMetricsCallCount() > before }, 2*time.Second, "writer did not consume the heartbeat tick (fake-clock ticks would coalesce and weaken the assertion)")
 	cancel()
 	wg.Wait()
 
