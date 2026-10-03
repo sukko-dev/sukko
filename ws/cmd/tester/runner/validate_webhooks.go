@@ -50,7 +50,10 @@ func validateWebhooks(
 	}
 
 	// Gate 2: skip when the current edition does not include webhook delivery.
-	edition, err := fetchEditionFn(ctx, run.Config.GatewayURL)
+	// fetchEditionFn does an HTTP GET; rewrite the ws:// gateway URL to http:// (sibling
+	// pattern — edition_limits.go passes httpURL(gwURL)). A raw ws:// URL fails with
+	// "unsupported protocol scheme".
+	edition, err := fetchEditionFn(ctx, httpURL(run.Config.GatewayURL))
 	if err != nil {
 		return []metrics.CheckResult{{
 			Name:   "webhooks/edition-check",

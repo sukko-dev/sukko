@@ -64,6 +64,35 @@ func TestValidateWebhooks_SkipCommunityEdition(t *testing.T) {
 	}
 }
 
+// TestValidateWebhooks_EditionFetchUsesHTTPScheme verifies the suite rewrites the gateway
+// ws:// URL to http:// before fetching /edition. fetchCurrentEdition does an HTTP GET and
+// Go's http.Client rejects a ws:// scheme ("unsupported protocol scheme \"ws\""), so passing
+// run.Config.GatewayURL raw fails the edition check. Regression guard for the pro-webhooks grid
+// cell, which first exercised this path against a real gateway.
+func TestValidateWebhooks_EditionFetchUsesHTTPScheme(t *testing.T) {
+	t.Parallel()
+
+	run := &TestRun{
+		webhookBaseURL: "http://tester.internal",
+		webhookStore:   newWebhookStore(),
+		Config:         TestConfig{GatewayURL: "ws://ws-gateway:3000"},
+	}
+	logger := zerolog.Nop()
+
+	var gotURL string
+	fetchFn := func(_ context.Context, baseURL string) (license.Edition, error) {
+		gotURL = baseURL
+		return license.Community, nil // short-circuit to a clean skip after the edition check
+	}
+
+	if _, err := validateWebhooks(context.Background(), run, logger, fetchFn); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "http://ws-gateway:3000"; gotURL != want {
+		t.Errorf("edition fetch URL = %q, want %q (ws:// must be rewritten to http:// — http.Get rejects the ws scheme)", gotURL, want)
+	}
+}
+
 func TestHttp200orFail(t *testing.T) {
 	t.Parallel()
 
