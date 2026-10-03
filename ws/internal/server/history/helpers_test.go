@@ -114,6 +114,7 @@ type mockBus struct {
 	publishLog          []*broadcast.Message
 	subscribeAllCount   int // number of SubscribeAll calls
 	unsubscribeAllCalls int // number of UnsubscribeAll calls
+	getMetricsCalls     int // number of GetMetrics calls — the writer's per-heartbeat-tick restart gate reads this, so it is the fake-clock tests' proof that a heartbeat tick was consumed (ADR-0029)
 }
 
 func newMockBus() *mockBus {
@@ -162,6 +163,12 @@ func (b *mockBus) UnsubscribeAll(ch <-chan *broadcast.Message) error {
 	return broadcast.ErrSubscriberNotFound
 }
 
+func (b *mockBus) getMetricsCallCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.getMetricsCalls
+}
+
 func (b *mockBus) getSubscribeAllCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -207,6 +214,7 @@ func (b *mockBus) IsHealthy() bool {
 func (b *mockBus) GetMetrics() broadcast.Metrics {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.getMetricsCalls++
 	return broadcast.Metrics{
 		Healthy:                b.healthy && b.converged,
 		PublishHealthy:         b.healthy,
