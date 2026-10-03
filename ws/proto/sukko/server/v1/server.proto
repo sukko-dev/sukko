@@ -69,6 +69,13 @@ message SubscribeRequest {
   // message falls into a seam between the replay snapshot and live delivery
   // (ADR-0026 ordering, ADR-0030). Empty for a fresh subscription.
   map<string, string> last_pos = 5;
+
+  // cursor_presented is true when the client reconnected with a Last-Event-ID cursor,
+  // even if last_pos ends up empty (a foreign/undecodable token, or every cursor channel
+  // intersected away). It lets the server emit the recovery verdict (no_replay +
+  // recovery_complete, ADR-0031) on those paths too, so a precise-recovery client is never
+  // left waiting for a sentinel that never comes. False on a fresh subscription.
+  bool cursor_presented = 6;
 }
 
 // SubscribeResponse is a message delivered on the subscription stream.

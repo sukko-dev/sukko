@@ -21,13 +21,20 @@ const (
 	MsgTypePong    = "pong"
 	MsgTypeError   = "error"
 	MsgTypeGap     = "gap" // server→client: gap notification (message drop detected)
-	// MsgTypeNoReplay tells an SSE reconnecting client that one or more channels in its
-	// Last-Event-ID cursor could not be replayed (unauthorized, no Kafka mapping on a direct
-	// backend, or the replay failed) — so it must treat them as a possible gap (ADR-0030 §XV).
+	// MsgTypeNoReplay tells an SSE reconnecting client which of its SUBSCRIBED channels are a
+	// possible gap: requested − recovered, where a channel is recovered only if it was in the
+	// cursor, authorized, and fully replayed. This covers unreplayable cursor channels, "quiet"
+	// channels requested with no cursor baseline, and (on truncation/error) every authorized cursor
+	// channel (ADR-0031, extends ADR-0030 §XV).
 	MsgTypeNoReplay = "no_replay"
 	// MsgTypeReplayTruncated tells an SSE reconnecting client its replay was cut short at
 	// MaxReplayMessages — recovery delivered a prefix and a gap remains (ADR-0030 §XV).
 	MsgTypeReplayTruncated = "replay_truncated"
+	// MsgTypeRecoveryComplete marks the end of SSE reconnect-recovery EMISSION (not the stream): the
+	// replayed messages and the no_replay / replay_truncated verdict have been sent, so the client
+	// treats exactly the no_replay channels as possible gaps and every other subscribed channel as
+	// recovered (ADR-0031). Live frames still interleave; the client dedupes by mid (ADR-0008/0026).
+	MsgTypeRecoveryComplete = "recovery_complete"
 )
 
 // Replay response type constants (server→client gap recovery protocol).

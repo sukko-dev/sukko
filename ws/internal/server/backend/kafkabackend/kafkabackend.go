@@ -397,13 +397,17 @@ func (kb *KafkaBackend) Publish(ctx context.Context, clientID int64, _, channel 
 func (kb *KafkaBackend) Replay(ctx context.Context, req backend.ReplayRequest) ([]backend.ReplayMessage, error) {
 	metrics.RecordBackendReplayRequest(backendName)
 
+	// A missing consumer pool / shared consumer is a degraded window, not an empty result: returning
+	// no messages with no error would let an SSE reconnect assert full recovery (ADR-0031) and the WS
+	// live-replay report success, when nothing was actually replayed. Fail so the caller treats the
+	// channels as unrecovered (a possible gap) rather than silently lost.
 	if kb.pool == nil {
-		return nil, nil
+		return nil, errors.New("kafka replay: consumer pool unavailable")
 	}
 
 	sharedConsumer := kb.pool.GetSharedConsumer()
 	if sharedConsumer == nil {
-		return nil, nil
+		return nil, errors.New("kafka replay: shared consumer unavailable")
 	}
 
 	kafkaMessages, err := sharedConsumer.ReplayFromOffsets(ctx, req.Positions, req.MaxMessages, req.Subscriptions)

@@ -10,6 +10,11 @@ import (
 // distinguishable and an old per-connection integer id is rejected as foreign.
 const sseCursorPrefix = "v1:"
 
+// headerRecoveryCapability is the SSE response header advertising precise reconnect recovery
+// (ADR-0031): present ("1") when the deployment emits the recovery_complete sentinel and the full
+// possible-gap set, so an SDK keys precise mode on its presence rather than a timeout (§XV).
+const headerRecoveryCapability = "X-Sukko-Recovery"
+
 // encodeSSECursor serializes a per-channel {channel: pos} cursor into an opaque,
 // versioned Last-Event-ID token (ADR-0030): sseCursorPrefix + base64url(JSON).
 // An empty cursor yields the empty string, so no id: line is emitted.

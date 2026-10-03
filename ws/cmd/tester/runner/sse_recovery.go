@@ -91,6 +91,33 @@ func collectSSEByMsgID(ctx context.Context, c *sse.Client, want []string) (seen 
 	return seen, order, nil
 }
 
+// readUntilRecoveryComplete reads control frames from the reconnected stream until the
+// recovery_complete sentinel (ADR-0031), returning the channels reported in any no_replay frames
+// seen before it. The recovery control frames ride event:message with a data.type discriminator and
+// no msg_id (so collectSSEByMsgID skips them); delivery messages and gaps are ignored here. Returns
+// ok=false if the context deadline elapses before the sentinel.
+func readUntilRecoveryComplete(ctx context.Context, c *sse.Client) (noReplay []string, ok bool) {
+	for {
+		event, err := c.ReadEvent(ctx)
+		if err != nil {
+			return noReplay, false
+		}
+		var env struct {
+			Type     string   `json:"type"`
+			Channels []string `json:"channels"`
+		}
+		if json.Unmarshal([]byte(event.Data), &env) != nil {
+			continue
+		}
+		switch env.Type {
+		case "no_replay":
+			noReplay = append(noReplay, env.Channels...)
+		case "recovery_complete":
+			return noReplay, true
+		}
+	}
+}
+
 func validateSSERecovery(ctx context.Context, run *TestRun, logger zerolog.Logger) ([]metrics.CheckResult, error) {
 	if pre := recoverySetupError(run, SuiteSSERecovery); pre != nil {
 		return pre, nil
@@ -219,6 +246,25 @@ func validateSSERecovery(ctx context.Context, run *TestRun, logger zerolog.Logge
 		return checks, nil
 	}
 	checks = append(checks, metrics.CheckResult{Name: "sse gap replay delivery", Status: metrics.CheckStatusPass})
+
+	// ADR-0031: after the replayed records the server emits the recovery_complete sentinel. The
+	// victim's single channel was fully recovered (M2/M3 replayed), so no_replay must be empty and
+	// recovery_complete must arrive. This proves precise-recovery emission end-to-end.
+	rcCtx, rcCancel := context.WithTimeout(ctx, recoveryFrameTimeout)
+	noReplay, sentinel := readUntilRecoveryComplete(rcCtx, revived)
+	rcCancel()
+	switch {
+	case !sentinel:
+		checks = append(checks, metrics.CheckResult{Name: "sse recovery_complete sentinel", Status: metrics.CheckStatusFail,
+			Error: "no recovery_complete frame after replay (ADR-0031)"})
+		return checks, nil
+	case len(noReplay) != 0:
+		checks = append(checks, metrics.CheckResult{Name: "sse recovery_complete sentinel", Status: metrics.CheckStatusFail,
+			Error: fmt.Sprintf("a fully-recovered channel was reported as no_replay: %v", noReplay)})
+		return checks, nil
+	default:
+		checks = append(checks, metrics.CheckResult{Name: "sse recovery_complete sentinel", Status: metrics.CheckStatusPass})
+	}
 
 	// The anchor record must NOT be re-delivered — Last-Event-ID is an exclusive
 	// cursor. Replay is pos-ascending, so a wrongly-included M1 would already be in

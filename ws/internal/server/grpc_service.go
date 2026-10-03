@@ -206,34 +206,51 @@ func (svc *GRPCService) Subscribe(req *serverv1.SubscribeRequest, stream serverv
 	// with no Kafka topic mapping (direct backend) are skipped, yielding no
 	// replay; the explicit no_replay / replay_truncated client events are added
 	// with the gateway envelope work.
-	if lastPos := req.GetLastPos(); len(lastPos) > 0 {
-		positions, authorized := s.authorizeLastPos(client, lastPos)
+	// The recovery verdict is emitted whenever the client reconnected with a cursor. We key on
+	// cursor_presented (so a foreign token or an all-unsubscribed cursor, which leave lastPos empty,
+	// still get no_replay + recovery_complete and a precise client never waits for a missing sentinel)
+	// OR on a non-empty last_pos — the latter covers an OLD gateway that predates cursor_presented:
+	// it still sends last_pos, and without this the new server would skip the replay entirely and
+	// assert false recovery on the mixed-version path. Emitting the new frames to an old-gateway
+	// client is safe (SDKs drop unknown frame types). A fresh subscription (no cursor) emits nothing.
+	if req.GetCursorPresented() || len(req.GetLastPos()) > 0 {
+		var authorized []string
 		count, truncated := 0, false
 		var replayErr error
-		if len(positions) > 0 {
-			count, truncated, replayErr = s.replayAuthorizedToClient(client, positions, authorized)
+		if lastPos := req.GetLastPos(); len(lastPos) > 0 {
+			var positions map[string]map[int32]int64
+			positions, authorized = s.authorizeLastPos(client, lastPos)
+			if len(positions) > 0 {
+				count, truncated, replayErr = s.replayAuthorizedToClient(client, positions, authorized)
+			}
 		}
-		noReplay, isTruncated := replayOutcome(lastPos, authorized, truncated, replayErr)
+		possibleGap, isTruncated := recoveryOutcome(req.GetChannels(), authorized, truncated, replayErr)
 		switch {
 		case replayErr != nil:
 			svc.logger.Warn().Int64("client_id", client.id).Err(replayErr).
 				Msg("SSE reconnect replay failed; serving live-only")
 		case truncated:
 			svc.logger.Warn().Int64("client_id", client.id).Int("replayed", count).
-				Msg("SSE reconnect replay truncated at MaxReplayMessages; a gap remains")
+				Msg("SSE reconnect replay truncated; a gap remains")
 		default:
-			svc.logger.Info().Int64("client_id", client.id).Int("replayed", count).
-				Msg("SSE reconnect replay completed")
+			// "replayed" is 0 with a non-empty possible_gap on the no-attempt path (a cursor was
+			// presented but emptied by decode/intersect, so nothing was replayed); both counts make
+			// the two cases distinguishable in logs.
+			svc.logger.Info().Int64("client_id", client.id).
+				Int("replayed", count).Int("possible_gap", len(possibleGap)).
+				Msg("SSE reconnect recovery completed")
 		}
-		// Emit the explicit outcome signals AFTER the replayed messages (same c.send FIFO), so the
-		// client sees the recovered records then the verdict. no_replay and replay_truncated are
-		// independent and may co-occur (some channels gapped, the replayed ones cut short).
-		if len(noReplay) > 0 {
-			s.sendReplayControl(ctx, client, replayControlEnvelope{Type: MsgTypeNoReplay, Channels: noReplay})
+		// Emit the recovery verdict AFTER the replayed messages (same c.send FIFO): the possible-gap
+		// set (requested − recovered), the truncation count if any, then the recovery_complete
+		// sentinel so the client knows recovery emission is done and treats every channel NOT in
+		// no_replay as recovered (ADR-0031).
+		if len(possibleGap) > 0 {
+			s.sendReplayControl(ctx, client, replayControlEnvelope{Type: MsgTypeNoReplay, Channels: possibleGap})
 		}
 		if isTruncated {
-			s.sendReplayControl(ctx, client, replayControlEnvelope{Type: MsgTypeReplayTruncated, Replayed: count})
+			s.sendReplayControl(ctx, client, replayControlEnvelope{Type: MsgTypeReplayTruncated, Replayed: &count})
 		}
+		s.sendReplayControl(ctx, client, replayControlEnvelope{Type: MsgTypeRecoveryComplete})
 	}
 
 	// Block until stream closes (client disconnect or server shutdown)

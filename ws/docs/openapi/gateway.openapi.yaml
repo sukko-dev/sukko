@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Sukko Gateway API
-  version: 1.0.3
+  version: 1.1.0
   description: |
     REST API for the Sukko WebSocket Gateway. Provides SSE streaming, REST publish,
     push notification management, and operational endpoints.
@@ -271,23 +271,34 @@ paths:
         (deduplicated) messages.
 
 
-        **Explicit recovery outcome frames.** Every SSE frame is delivered as `event: message`;
-        the client routes on the envelope's `type` in `data:` (the same way live messages and
-        `gap` notifications are carried). After the replayed messages (same stream order), the
-        server emits a typed frame when a cursor channel could not be fully recovered — so a
-        client never has to infer a gap from silence:
+        **Explicit recovery outcome frames (ADR-0031).** Every SSE frame is delivered as
+        `event: message`; the client routes on the envelope's `type` in `data:` (the same way live
+        messages and `gap` notifications are carried). After the replayed messages (same stream
+        order), on a reconnect that presented a cursor the server emits:
 
-        - `data: {"type":"no_replay","channels":[...]}` — one or more cursor channels were not
-          replayed (unauthorized, no Kafka mapping on the direct backend, or the replay failed);
-          treat the named channels as a possible gap. Channels you unsubscribed before reconnecting
-          are NOT reported here — the gateway drops them from the cursor before the server sees it,
-          and their silence is intentional.
+        - `data: {"type":"no_replay","channels":[...]}` — the **possible-gap set**: every subscribed
+          channel that was NOT confirmed fully recovered. This is `requested − recovered`, where a
+          channel is recovered only if it was in the cursor, authorized, and fully replayed. It
+          therefore names cursor channels that could not be replayed (unauthorized / no Kafka
+          mapping), "quiet" channels you subscribed to that had no cursor position (no replay
+          baseline), and — because the replay cap is a cross-channel total, so truncation cannot be
+          attributed per channel — every authorized cursor channel when the replay truncated or
+          failed. Treat the named channels as a possible gap. Channels you unsubscribed before
+          reconnecting are not reported (the gateway drops them from the cursor; their silence is
+          intentional).
 
         - `data: {"type":"replay_truncated","replayed":N}` — replay hit the server's
-          `MaxReplayMessages` cap; `N` messages were delivered (possibly 0) and a gap remains.
+          `MaxReplayMessages` cap; `N` messages were delivered (possibly 0) and a gap remains. Only
+          this frame carries `replayed`.
 
-        A client that does not recognize these `type` values ignores the frame; recovery still
-        works, just without the explicit gap signal.
+        - `data: {"type":"recovery_complete"}` — recovery emission is done. The client treats exactly
+          the `no_replay` channels as possible gaps and every other subscribed channel as recovered.
+          This marks the end of recovery emission, not the stream — live frames still interleave.
+
+        The `X-Sukko-Recovery: 1` response header advertises that this deployment emits
+        `recovery_complete` and the full possible-gap set, so a client can enable precise recovery on
+        its presence. A client that does not recognize these `type` values ignores the frames;
+        recovery still works, just without the explicit signal.
       tags: [SSE]
       security:
         - bearerToken: []
@@ -323,6 +334,12 @@ paths:
       responses:
         "200":
           description: SSE event stream
+          headers:
+            X-Sukko-Recovery:
+              schema:
+                type: string
+                enum: ["1"]
+              description: "Present (`1`) when the deployment emits precise reconnect recovery — the `recovery_complete` sentinel and the full possible-gap `no_replay` set (ADR-0031). A client enables precise recovery on its presence; absence means recover conservatively."
           content:
             text/event-stream:
               schema:

@@ -1673,6 +1673,16 @@ func (c *Consumer) ReplayFromOffsets(
 		})
 	}
 
+	// If the loop exited with partitions still pending but the message cap was NOT reached, an empty
+	// poll broke the loop before the backlog drained — a replay-ctx timeout, or per-partition fetch
+	// errors (broker failover / NOT_LEADER) that PollFetches surfaced as an empty, error-bearing
+	// fetch. That is an INCOMPLETE replay, not a clean one: return an error so the caller reports a
+	// possible gap rather than asserting recovery (ADR-0031). A clean cap-hit (messagesRead ==
+	// maxMessages) is NOT an error — the caller detects it as truncated from the full batch.
+	if pendingCount > 0 && messagesRead < maxMessages {
+		return messages, fmt.Errorf("replay incomplete: %d partition(s) still pending after an empty poll", pendingCount)
+	}
+
 	c.logger.Info().
 		Int("messages_replayed", len(messages)).
 		Int("messages_read", messagesRead).
