@@ -743,7 +743,8 @@ func TestHistoryWriter_LockCallFailureVsCASMiss(t *testing.T) {
 
 	var wg syncWaitGroup
 	wg.Go(func() { w.Run() })
-	time.Sleep(30 * time.Millisecond) // let writer acquire lock and become active
+	// Wait for the writer to acquire the lock and become active (replaces a fixed 30ms sleep).
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	// Steal the lock from under the active writer (simulates another pod acquiring it).
 	lockKey := history.HistoryWriterLockKeyPrefix + opts.env
@@ -755,8 +756,9 @@ func TestHistoryWriter_LockCallFailureVsCASMiss(t *testing.T) {
 		t.Fatalf("steal lock: %v", err)
 	}
 
-	// Wait for one heartbeat to process the CAS miss (n=0 → flip to passive).
-	time.Sleep(50 * time.Millisecond)
+	// Wait for a heartbeat to process the CAS miss and flip the writer passive (replaces a fixed
+	// 50ms sleep that could expire before the heartbeat ran under CI load).
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 0 }, 2*time.Second)
 
 	active := prometheustestutil.ToFloat64(w.Metrics().WriterActive)
 	lockFails := prometheustestutil.ToFloat64(w.Metrics().LockFailuresTotal)
@@ -1038,7 +1040,7 @@ func TestHistoryWriter_KafkaCoordInField(t *testing.T) {
 
 	var wg syncWaitGroup
 	wg.Go(func() { w.Run() })
-	time.Sleep(20 * time.Millisecond)
+	waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 	msgs := []*broadcast.Message{
 		{Subject: "tenantA.BTC.trade", Payload: []byte(`{"p":1}`), TenantID: "tenantA", Channel: "BTC.trade", Pos: history.EncodePos(0, 100)},
@@ -1048,13 +1050,21 @@ func TestHistoryWriter_KafkaCoordInField(t *testing.T) {
 	for _, m := range msgs {
 		bus.fanOut(m)
 	}
-	time.Sleep(120 * time.Millisecond)
+
+	client := newTestValkeyClient(t, mr)
+	streamKey := history.HistoryStreamKeyPrefix + opts.env + ":tenantA:BTC.trade"
+	// Poll until all three messages have been written — replaces a fixed 120ms sleep that could
+	// expire before the async writer drained the batch under CI load, canceling it mid-write.
+	waitFor(func() bool {
+		entries, err := client.Do(context.Background(),
+			client.B().Xrange().Key(streamKey).Start("-").End("+").Build(),
+		).AsXRange()
+		return err == nil && len(entries) >= 3
+	}, 2*time.Second)
 
 	cancel()
 	wg.Wait()
 
-	client := newTestValkeyClient(t, mr)
-	streamKey := history.HistoryStreamKeyPrefix + opts.env + ":tenantA:BTC.trade"
 	entries, err := client.Do(context.Background(),
 		client.B().Xrange().Key(streamKey).Start("-").End("+").Build(),
 	).AsXRange()
@@ -1099,7 +1109,7 @@ func TestHistoryWriter_AutoIDAndCoord(t *testing.T) {
 
 		var wg syncWaitGroup
 		wg.Go(func() { w.Run() })
-		time.Sleep(20 * time.Millisecond)
+		waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 		// Message with no pos → writer should use XADD * with coord=HistoryCoordAuto.
 		bus.fanOut(&broadcast.Message{
@@ -1109,12 +1119,19 @@ func TestHistoryWriter_AutoIDAndCoord(t *testing.T) {
 			Channel:  "ETH.trade",
 			Pos:      "", // no pos
 		})
-		time.Sleep(80 * time.Millisecond)
-		cancel()
-		wg.Wait()
 
 		client := newTestValkeyClient(t, mr)
 		streamKey := history.HistoryStreamKeyPrefix + opts.env + ":tenantA:ETH.trade"
+		// Poll for the write instead of a fixed 80ms sleep.
+		waitFor(func() bool {
+			entries, err := client.Do(context.Background(),
+				client.B().Xrange().Key(streamKey).Start("-").End("+").Build(),
+			).AsXRange()
+			return err == nil && len(entries) >= 1
+		}, 2*time.Second)
+		cancel()
+		wg.Wait()
+
 		entries, err := client.Do(context.Background(),
 			client.B().Xrange().Key(streamKey).Start("-").End("+").Build(),
 		).AsXRange()
@@ -1155,7 +1172,7 @@ func TestHistoryWriter_AutoIDAndCoord(t *testing.T) {
 
 		var wg syncWaitGroup
 		wg.Go(func() { w.Run() })
-		time.Sleep(20 * time.Millisecond)
+		waitFor(func() bool { return prometheustestutil.ToFloat64(w.Metrics().WriterActive) == 1 }, 2*time.Second)
 
 		encodedPos := history.EncodePos(0, 100) // "1-100" — would fail as an explicit ID after "9999999999999-0"
 		bus.fanOut(&broadcast.Message{
@@ -1165,7 +1182,13 @@ func TestHistoryWriter_AutoIDAndCoord(t *testing.T) {
 			Channel:  "SOL.trade",
 			Pos:      encodedPos,
 		})
-		time.Sleep(120 * time.Millisecond)
+		// The pre-inserted entry plus the writer's entry = 2; poll for it instead of a fixed 120ms sleep.
+		waitFor(func() bool {
+			entries, err := client.Do(context.Background(),
+				client.B().Xrange().Key(streamKey).Start("-").End("+").Build(),
+			).AsXRange()
+			return err == nil && len(entries) >= 2
+		}, 2*time.Second)
 		cancel()
 		wg.Wait()
 
