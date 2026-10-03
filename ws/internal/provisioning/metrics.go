@@ -58,6 +58,11 @@ var startupCompleteRenames = promauto.NewGauge(prometheus.GaugeOpts{
 	Help: "Number of tenants with slug_rename_state='complete' found during startup scan (hold period active, re-emitting TenantConfigChanged)",
 })
 
+var auditWriteFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "provisioning_audit_write_failures_total",
+	Help: "Total audit-log write failures, by action — a security-relevant operation whose audit record was NOT persisted (§IX Audit Trail). The operation itself still succeeded, so any non-zero value is alertable: the audit trail is silently incomplete.",
+}, []string{"action"})
+
 // recordReactivateTopicProvisionError increments the reactivation topic provision error counter.
 func recordReactivateTopicProvisionError(topicType string) {
 	reactivateTopicProvisionErrors.WithLabelValues(topicType).Inc()
@@ -68,6 +73,13 @@ func recordReactivateTopicProvisionError(topicType string) {
 // phase MUST be sagaPhaseCreate, sagaPhaseRollback, or sagaPhaseRollbackFailed.
 func recordCreateTenantTopicProvisionError(topicType, phase string) {
 	createTenantTopicProvisionErrors.WithLabelValues(topicType, phase).Inc()
+}
+
+// recordAuditWriteFailure increments the audit-write-failure counter for an action whose audit entry
+// could not be persisted (§IX). action is a fixed provisioning-operation label, so cardinality is
+// bounded (§VI).
+func recordAuditWriteFailure(action string) {
+	auditWriteFailures.WithLabelValues(action).Inc()
 }
 
 // recordTenantRenamed records the outcome and duration of a tenant slug rename.

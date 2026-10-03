@@ -1004,6 +1004,9 @@ func (s *Service) auditLog(ctx context.Context, tenantID, action string, details
 		Details:   details,
 	}
 	if err := s.audit.Log(ctx, entry); err != nil {
+		// The operation already succeeded; the audit record did not persist. Count it so a dropped
+		// §IX-mandatory audit entry is alertable, not just logged (§VI).
+		recordAuditWriteFailure(action)
 		s.logger.Error().Err(err).Str("action", action).Msg("Failed to write audit log")
 	}
 }
