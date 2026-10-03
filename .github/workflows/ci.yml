@@ -233,9 +233,11 @@ jobs:
           else
             # Full grid (nightly schedule + manual dispatch): every edition×backend cell —
             # positive (incl. community-kafka — ADR-0009 boot+gate proof; ingest-path delivery is follow-up), degradation (expired-direct), and the
-            # Valkey Sentinel HA topology cell (community-direct-sentinel). Smoke (push) stays lean:
-            # the sentinel cell adds 4 containers (1 replica + 3 sentinels) + a chaos phase, so it runs nightly/dispatch only.
-            echo 'cells=["community-direct","pro-kafka","enterprise-kafka","pro-direct","enterprise-direct","expired-direct","community-kafka","community-direct-sentinel"]' >> "$GITHUB_OUTPUT"
+            # Valkey Sentinel HA topology cell (community-direct-sentinel), plus the suite-specific
+            # pro-webhooks cell (Pro/kafka + the webhook-worker, running the webhooks delivery suite).
+            # Smoke (push) stays lean: the sentinel cell adds 4 containers (1 replica + 3 sentinels) +
+            # a chaos phase, so it runs nightly/dispatch only.
+            echo 'cells=["community-direct","pro-kafka","enterprise-kafka","pro-direct","enterprise-direct","expired-direct","community-kafka","community-direct-sentinel","pro-webhooks"]' >> "$GITHUB_OUTPUT"
           fi
 
   # ---------------------------------------------------------------------------
