@@ -105,29 +105,58 @@ func TestReplayAuthorizedToClient_TruncatesOnFullBuffer(t *testing.T) {
 	}
 }
 
-func TestUnreplayableCursorChannels(t *testing.T) {
+// TestReplayAuthorizedToClient_TruncatesAtCap verifies that a replay returning a full batch (>= the
+// MaxReplayMessages cap) is reported truncated even with a large send buffer: the Kafka replay caps a
+// cross-channel total, so a full batch means more may remain unrecovered and the client must treat
+// the channels as a possible gap, not assume full recovery (ADR-0031).
+func TestReplayAuthorizedToClient_TruncatesAtCap(t *testing.T) {
+	mb := &mockBackend{
+		channelTopics: map[string]string{"acme.md-1": "t1"},
+		replayMsgs: []backend.ReplayMessage{
+			{Subject: "acme.md-1", Data: []byte(`{"a":1}`), Pos: "2-6", Mid: "m1"},
+			{Subject: "acme.md-1", Data: []byte(`{"a":2}`), Pos: "2-7", Mid: "m2"},
+		},
+	}
+	s := newReplayTestServer(t, mb)
+	s.config.MaxReplayMessages = 2 // the backend returns exactly the cap → a full batch
+	c := newReplayTestClient(1)
+	c.tenantID = "acme"
+	c.send = make(chan OutgoingMsg, 8) // large enough that the send buffer never fills
+
+	positions, authorized := s.authorizeLastPos(c, map[string]string{"acme.md-1": "2-5"})
+	count, truncated, err := s.replayAuthorizedToClient(c, positions, authorized)
+	if err != nil {
+		t.Fatalf("replay err: %v", err)
+	}
+	if !truncated {
+		t.Error("expected truncation when the replay returns a full batch at the cap (not buffer-full)")
+	}
+	if count != 2 {
+		t.Errorf("replayed count = %d, want 2", count)
+	}
+}
+
+func TestRecoveryControlEnvelope_Marshal(t *testing.T) {
 	t.Parallel()
+	replayed := 0
 	tests := []struct {
-		name       string
-		lastPos    map[string]string
-		authorized []string
-		want       []string
+		name string
+		env  replayControlEnvelope
+		want string
 	}{
-		{"all authorized → none", map[string]string{"t.a": "1-5", "t.b": "1-9"}, []string{"t.a", "t.b"}, nil},
-		{"partial → the unauthorized ones", map[string]string{"t.a": "1-5", "t.b": "1-9"}, []string{"t.a"}, []string{"t.b"}},
-		{"none authorized → all", map[string]string{"t.a": "1-5", "t.b": "1-9"}, nil, []string{"t.a", "t.b"}},
+		{"no_replay carries channels, no replayed field", replayControlEnvelope{Type: MsgTypeNoReplay, Channels: []string{"t.a", "t.b"}}, `{"type":"no_replay","channels":["t.a","t.b"]}`},
+		{"recovery_complete is type-only", replayControlEnvelope{Type: MsgTypeRecoveryComplete}, `{"type":"recovery_complete"}`},
+		{"replay_truncated emits replayed even at zero", replayControlEnvelope{Type: MsgTypeReplayTruncated, Replayed: &replayed}, `{"type":"replay_truncated","replayed":0}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := unreplayableCursorChannels(tt.lastPos, tt.authorized)
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %v, want %v", got, tt.want)
+			b, err := json.Marshal(tt.env)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
 			}
-			for i := range tt.want {
-				if got[i] != tt.want[i] {
-					t.Fatalf("got %v, want %v", got, tt.want)
-				}
+			if string(b) != tt.want {
+				t.Errorf("marshal = %s, want %s", b, tt.want)
 			}
 		})
 	}
@@ -168,7 +197,8 @@ func TestSendReplayControl_AbandonsOnContextCancel(t *testing.T) {
 	cancel() // already canceled → the blocking send must abandon, not hang
 	done := make(chan struct{})
 	go func() {
-		s.sendReplayControl(ctx, c, replayControlEnvelope{Type: MsgTypeReplayTruncated, Replayed: 3})
+		replayed := 3
+		s.sendReplayControl(ctx, c, replayControlEnvelope{Type: MsgTypeReplayTruncated, Replayed: &replayed})
 		close(done)
 	}()
 	select {
@@ -178,36 +208,39 @@ func TestSendReplayControl_AbandonsOnContextCancel(t *testing.T) {
 	}
 }
 
-func TestReplayOutcome(t *testing.T) {
+func TestRecoveryOutcome(t *testing.T) {
 	t.Parallel()
-	cur := map[string]string{"t.a": "1-5", "t.b": "1-9"}
 	tests := []struct {
 		name          string
-		authorized    []string
+		requested     []string // the client's subscribed channels
+		authorized    []string // cursor channels that were replay-eligible
 		truncated     bool
 		replayErr     error
-		wantNoReplay  []string
+		wantGap       []string // possible-gap set = requested − recovered
 		wantTruncated bool
 	}{
-		{"all authorized, clean", []string{"t.a", "t.b"}, false, nil, nil, false},
-		{"partial auth → the unauthorized one", []string{"t.a"}, false, nil, []string{"t.b"}, false},
-		{"truncated only", []string{"t.a", "t.b"}, true, nil, nil, true},
-		{"partial auth AND truncated (co-occur)", []string{"t.a"}, true, nil, []string{"t.b"}, true},
-		{"replay error → all channels, never truncated", []string{"t.a"}, true, errors.New("boom"), []string{"t.a", "t.b"}, false},
+		{"all recovered, clean", []string{"t.a", "t.b"}, []string{"t.a", "t.b"}, false, nil, nil, false},
+		{"quiet channel (requested, no cursor baseline)", []string{"t.a", "t.b", "t.c"}, []string{"t.a", "t.b"}, false, nil, []string{"t.c"}, false},
+		{"unreplayable cursor channel", []string{"t.a", "t.b"}, []string{"t.a"}, false, nil, []string{"t.b"}, false},
+		{"quiet AND unreplayable", []string{"t.a", "t.b", "t.c"}, []string{"t.a"}, false, nil, []string{"t.b", "t.c"}, false},
+		{"truncated → every requested channel is a gap", []string{"t.a", "t.b"}, []string{"t.a", "t.b"}, true, nil, []string{"t.a", "t.b"}, true},
+		{"replay error → every requested, never truncated", []string{"t.a", "t.b"}, []string{"t.a", "t.b"}, false, errors.New("boom"), []string{"t.a", "t.b"}, false},
+		{"none authorized (direct degenerate) → all", []string{"t.a", "t.b"}, nil, false, nil, []string{"t.a", "t.b"}, false},
+		{"deduped and sorted", []string{"t.b", "t.a", "t.b"}, nil, false, nil, []string{"t.a", "t.b"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			noReplay, isTrunc := replayOutcome(cur, tt.authorized, tt.truncated, tt.replayErr)
+			gap, isTrunc := recoveryOutcome(tt.requested, tt.authorized, tt.truncated, tt.replayErr)
 			if isTrunc != tt.wantTruncated {
 				t.Errorf("isTruncated = %v, want %v", isTrunc, tt.wantTruncated)
 			}
-			if len(noReplay) != len(tt.wantNoReplay) {
-				t.Fatalf("noReplay = %v, want %v", noReplay, tt.wantNoReplay)
+			if len(gap) != len(tt.wantGap) {
+				t.Fatalf("possibleGap = %v, want %v", gap, tt.wantGap)
 			}
-			for i := range tt.wantNoReplay {
-				if noReplay[i] != tt.wantNoReplay[i] {
-					t.Fatalf("noReplay = %v, want %v", noReplay, tt.wantNoReplay)
+			for i := range tt.wantGap {
+				if gap[i] != tt.wantGap[i] {
+					t.Fatalf("possibleGap = %v, want %v", gap, tt.wantGap)
 				}
 			}
 		})

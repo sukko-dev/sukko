@@ -177,9 +177,15 @@ type SubscribeRequest struct {
 	// first, then replays last_pos..now for each tenant-validated channel, so no
 	// message falls into a seam between the replay snapshot and live delivery
 	// (ADR-0026 ordering, ADR-0030). Empty for a fresh subscription.
-	LastPos       map[string]string `protobuf:"bytes,5,rep,name=last_pos,json=lastPos,proto3" json:"last_pos,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	LastPos map[string]string `protobuf:"bytes,5,rep,name=last_pos,json=lastPos,proto3" json:"last_pos,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// cursor_presented is true when the client reconnected with a Last-Event-ID cursor,
+	// even if last_pos ends up empty (a foreign/undecodable token, or every cursor channel
+	// intersected away). It lets the server emit the recovery verdict (no_replay +
+	// recovery_complete, ADR-0031) on those paths too, so a precise-recovery client is never
+	// left waiting for a sentinel that never comes. False on a fresh subscription.
+	CursorPresented bool `protobuf:"varint,6,opt,name=cursor_presented,json=cursorPresented,proto3" json:"cursor_presented,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SubscribeRequest) Reset() {
@@ -245,6 +251,13 @@ func (x *SubscribeRequest) GetLastPos() map[string]string {
 		return x.LastPos
 	}
 	return nil
+}
+
+func (x *SubscribeRequest) GetCursorPresented() bool {
+	if x != nil {
+		return x.CursorPresented
+	}
+	return false
 }
 
 // SubscribeResponse is a message delivered on the subscription stream.
@@ -320,7 +333,7 @@ const file_sukko_server_v1_server_proto_rawDesc = "" +
 	"\x0fPublishResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x18\n" +
 	"\achannel\x18\x02 \x01(\tR\achannel\x12\x10\n" +
-	"\x03mid\x18\x03 \x01(\tR\x03mid\"\x95\x02\n" +
+	"\x03mid\x18\x03 \x01(\tR\x03mid\"\xc0\x02\n" +
 	"\x10SubscribeRequest\x12\x1f\n" +
 	"\vtenant_slug\x18\x01 \x01(\tR\n" +
 	"tenantSlug\x12\x1c\n" +
@@ -328,7 +341,8 @@ const file_sukko_server_v1_server_proto_rawDesc = "" +
 	"\bchannels\x18\x03 \x03(\tR\bchannels\x12\x1f\n" +
 	"\vremote_addr\x18\x04 \x01(\tR\n" +
 	"remoteAddr\x12I\n" +
-	"\blast_pos\x18\x05 \x03(\v2..sukko.server.v1.SubscribeRequest.LastPosEntryR\alastPos\x1a:\n" +
+	"\blast_pos\x18\x05 \x03(\v2..sukko.server.v1.SubscribeRequest.LastPosEntryR\alastPos\x12)\n" +
+	"\x10cursor_presented\x18\x06 \x01(\bR\x0fcursorPresented\x1a:\n" +
 	"\fLastPosEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"I\n" +

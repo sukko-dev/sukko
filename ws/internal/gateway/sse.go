@@ -111,17 +111,23 @@ func (gw *Gateway) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	// would resurrect the removed channel from the stale cursor. Only replay cursor
 	// entries for channels present in the (permission-filtered) request set (§II: the
 	// gateway validates its own inputs; defense in depth over the server-side check).
+	// cursorPresented records that the client reconnected with a Last-Event-ID, independent of whether
+	// the cursor survives decode + intersect — a foreign token or an all-unsubscribed cursor leaves
+	// lastPos empty but the server must still emit the recovery verdict so a precise-recovery client
+	// is not left waiting for a sentinel (ADR-0031).
+	cursorPresented := r.Header.Get("Last-Event-ID") != ""
 	var lastPos map[string]string
 	if cursor, ok := decodeSSECursor(r.Header.Get("Last-Event-ID")); ok {
 		lastPos = intersectCursorChannels(cursor, channels)
 	}
 
 	stream, err := gw.serverClient.Client().Subscribe(ctx, &serverv1.SubscribeRequest{
-		TenantSlug: authRes.TenantSlug,
-		Principal:  authRes.Principal,
-		Channels:   channels,
-		RemoteAddr: httputil.GetClientIP(r),
-		LastPos:    lastPos,
+		TenantSlug:      authRes.TenantSlug,
+		Principal:       authRes.Principal,
+		Channels:        channels,
+		RemoteAddr:      httputil.GetClientIP(r),
+		LastPos:         lastPos,
+		CursorPresented: cursorPresented,
 	})
 	if err != nil {
 		gw.logger.Error().Err(err).
@@ -164,6 +170,10 @@ func (gw *Gateway) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Advertise precise reconnect recovery (ADR-0031): this deployment emits the recovery_complete
+	// sentinel and the full possible-gap set, so an SDK keys precise mode on the header's presence
+	// and an older SDK (which ignores the new frames) keeps working unchanged.
+	w.Header().Set(headerRecoveryCapability, "1")
 	flusher.Flush()
 
 	gw.logger.Info().

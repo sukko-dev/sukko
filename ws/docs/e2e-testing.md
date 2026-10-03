@@ -1156,6 +1156,7 @@ live subscription first, then replays `anchor..now` for each tenant-validated ch
 |---|---|
 | `sse cursor present` | the gateway emitted an opaque `id:` cursor on the victim's M1 event (fail-fast: blank ⇒ server not on `MESSAGE_BACKEND=kafka`) |
 | `sse gap replay delivery` | M2 **and** M3 are delivered to the revived SSE client |
+| `sse recovery_complete sentinel` | after the replay, a `recovery_complete` frame arrives (ADR-0031) and the fully-recovered channel is **not** reported in any `no_replay` frame — so a precise-recovery client can conclude recovery. Ordered after `sse gap replay delivery`; fails closed (an early return here makes the later `REQUIRE_PASS`-forced checks vanish, which the grid treats as failure) |
 | `sse no duplicate replay` | M1 is **absent** — `Last-Event-ID` is an exclusive cursor; the anchor itself is never re-delivered |
 | `sse replay order` | M2 arrives before M3 (broker order preserved) |
 | `sse replay mid equality` | replayed copies' top-level `mid`s byte-equal the control's live copies — identity is stable across live and SSE replay (ADR-0008) |
