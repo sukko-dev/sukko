@@ -299,3 +299,19 @@ func waitFor(cond func() bool, timeout time.Duration) {
 		time.Sleep(2 * time.Millisecond)
 	}
 }
+
+// mustEventually waits up to timeout for cond and fails the test FATALLY on timeout. Unlike
+// waitFor (best-effort — the caller asserts afterward), this is itself a hard gate: use it where a
+// timeout means the writer is stuck, so that a later negative assertion cannot pass vacuously
+// (ADR-0029 fake-clock tests — a silently-timed-out wait would let ticks coalesce and the
+// absence check false-pass).
+func mustEventually(t *testing.T, cond func() bool, timeout time.Duration, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !cond() && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !cond() {
+		t.Fatalf("condition not met within %s: %s", timeout, msg)
+	}
+}
