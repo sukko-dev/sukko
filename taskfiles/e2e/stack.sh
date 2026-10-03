@@ -269,7 +269,7 @@ e2e_run_battery() {
 # the battery's own exit status).
 e2e_dump_service_logs() {
   echo "=== service logs (failure evidence; tail 200 each) ===" >&2
-  for name in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E 'ws-gateway|ws-server|provisioning' || true); do
+  for name in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E 'ws-gateway|ws-server|provisioning|webhook-worker' || true); do
     echo "--- $name ---" >&2
     docker logs --tail 200 "$name" >&2 2>&1 || true
   done

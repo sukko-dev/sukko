@@ -354,8 +354,9 @@ tasks:
       # Backend selects the compose override (direct.override.yml | kafka.override.yml);
       # kafka additionally needs --profile kafka to start Redpanda. Enterprise cells use
       # the enterprise LICENSE (via e2e_boot_cell), NOT the enterprise profile — the grid
-      # runs no push suite, so push-service is intentionally not started.
-      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/{{.BACKEND}}.override.yml{{if eq .BACKEND "kafka"}} --profile kafka{{end}}'
+      # runs no push suite, so push-service is intentionally not started. EXTRA_PROFILES lets a
+      # cell start further profiled services (e.g. "--profile pro" for the webhook-worker).
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/{{.BACKEND}}.override.yml{{if eq .BACKEND "kafka"}} --profile kafka{{end}}{{if .EXTRA_PROFILES}} {{.EXTRA_PROFILES}}{{end}}'
       ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
       PROVISIONING_URL: http://localhost:18080
       TESTER_TOKEN: sukko-dev-token
@@ -367,6 +368,7 @@ tasks:
       EXPECT_EXPIRED: '{{.EXPECT_EXPIRED | default "false"}}'  # .expired flag the readiness gate asserts (true only on the expired cell)
       ALLOWED_SKIPS: '{{.ALLOWED_SKIPS | default ""}}'        # ;-separated <suite>:<check> skips tolerated by the anti-vacuous verdict
       REQUIRE_PASS: '{{.REQUIRE_PASS | default ""}}'          # ;-separated <suite>:<check> checks required present-and-pass
+      EXTRA_PROFILES: '{{.EXTRA_PROFILES | default ""}}'      # extra compose profiles to start (e.g. "--profile pro" to boot the webhook-worker)
     cmds:
       # Teardown runs even on failure (Taskfile defer, LIFO): stack down, then remove the key.
       - defer: "{{.COMPOSE}} down -v"
@@ -526,6 +528,24 @@ tasks:
           # scoping deny half (net-new): pubsub subscribe/publish denies are fail-closed gateway-authz
           # checks (no api-key/tenant-isolation suite on this cell) → require each present-and-pass.
           REQUIRE_PASS: "rest-publish:rest publish → ws receive;rest-publish:rest publish mid equality;rest-publish:rest publish → sse receive;pubsub:publish auth rejection;pubsub:group subscribe denied;pubsub:user subscribe denied"
+
+  cell:pro-webhooks:
+    desc: "Grid cell — Pro/kafka webhooks: boots the webhook-worker (--profile pro) and runs the webhook delivery suite (happy-path, retry-on-failure, degraded-state)."
+    cmds:
+      - task: cell
+        vars:
+          EDITION: pro
+          BACKEND: kafka
+          # --profile pro starts the webhook-worker. The e2e boot already injects WEBHOOK_INTERNAL_TOKEN
+          # (stack.sh) and the tester compose sets TESTER_WEBHOOK_BASE_URL, so the suite self-provisions
+          # the routing rule + webhook subscription and receives deliveries on the tester's own receiver.
+          EXTRA_PROFILES: "--profile pro"
+          SUITES: "webhooks"
+          # Empty ALLOWED_SKIPS (default) already reds the cell on any skip; REQUIRE_PASS is the
+          # symmetric guard against the suite VANISHING from the report (a vacuous green) — every
+          # webhooks check MUST be present-and-pass. On this Pro/kafka cell with the webhook-worker
+          # booted and TESTER_WEBHOOK_BASE_URL set, none of them skip.
+          REQUIRE_PASS: "webhooks:webhooks/happy-path/delivery-count;webhooks:webhooks/happy-path/signatures;webhooks:webhooks/happy-path/status-codes;webhooks:webhooks/retry-success/delivery-count;webhooks:webhooks/retry-success/signatures;webhooks:webhooks/retry-success/status-codes;webhooks:webhooks/degraded/delivery-count;webhooks:webhooks/degraded/degraded-status"
 
   # ---------------------------------------------------------------------------
   # Spec 2 cells — edition-axis widening (paid-direct, negative, degradation).

@@ -218,6 +218,7 @@ Named anchor cells wrap the runner with their suite sets:
 | `community-kafka` | Community (no license) | kafka | positive | `channels auth edition-limits kafka-ingest history gap-recovery` — the ADR-0009 boot + gate surface AND the license-free ingest→fan-out, history, and gap-recovery delivery proofs on Community+kafka (`sse-recovery` is Pro-gated, so it runs on `pro-kafka` only) |
 | `expired-direct` | Pro, expired (`-1d`) → Community | direct | degradation | gate `edition=community`+`expired=true`; suite `edition-limits` |
 | `community-direct-sentinel` | Community (no license) | direct (Valkey **Sentinel** topology) | positive + chaos (P2) | `channels pubsub ordering reconnect` + sentinel positive controls; P2 kills the master and asserts recovery (§2.20) |
+| `pro-webhooks` | Pro | kafka | positive | `webhooks` — boots the webhook-worker (`--profile pro`) and runs the webhook delivery suite (happy-path, retry-on-failure, degraded-state) |
 
 Every edition×backend combination is covered by a positive cell (the kafka backend is
 Community per ADR-0009 — `community-kafka` proves the free tier boots on it, its gate
@@ -315,8 +316,8 @@ unlimited Enterprise path, so it cannot live in the shared verdict).
 **CI cadence:** a **push to `main`** runs the **smoke cells** — `community-direct` +
 `pro-kafka` (one positive cell per backend) + `community-kafka` (the ADR-0009 boot +
 gate-surface cell) — as the `e2e-grid` matrix; the **nightly schedule** and **manual
-`workflow_dispatch`** run the **full grid** (all eight cells, including
-`community-direct-sentinel`). The cell list is computed by
+`workflow_dispatch`** run the **full grid** (all nine cells, including
+`community-direct-sentinel` and `pro-webhooks`). The cell list is computed by
 the `e2e-grid-setup` job — later specs add cells by editing that list plus a named cell
 task. The `e2e-guard-fixtures` job runs the anti-vacuous guard fixture tests (no Docker,
 ~2s) first, so a regressed guard fails fast before any stack boots. The `kafka-ingest` job
@@ -342,8 +343,7 @@ failed suite and exits non-zero at the end. The generic guard is `e2e_battery_ve
 **Not yet in the grid (tracked for triage):**
 (`ratelimit` is now gated into `community-direct` — §2.8; `token-revocation` into the Pro cells — §2.13.)
 `kafka-ingest` runs in its own kafka-mode job and `push` in
-the `e2e-push-validate` job (Enterprise + `MESSAGE_BACKEND=kafka`, §1.3); `webhooks` is
-deferred (webhook-worker boot bugs);
+the `e2e-push-validate` job (Enterprise + `MESSAGE_BACKEND=kafka`, §1.3);
 `license-reload` stays in the manual `task e2e:license` family (mutates edition mid-run);
 load/soak/stress are scale tests.
 
@@ -368,7 +368,7 @@ load/soak/stress are scale tests.
 | 15 | `license-reload` | Community | no | License hot-reload propagation |
 | 16 | `api-key` | Community | **yes** | API key auth in isolation (no JWT provisioning); seven checks incl. group/user subscribe + WS publish deny; self-provisions tenant + key. Gated into `community-direct` (§2.17) |
 | 17 | `upgrade` | Community | **yes** | Auth upgrade flow (API key → JWT); self-provisions tenant + keypair + key. Gated into `community-direct` (§2.18) |
-| 18 | `webhooks` | Pro | no | Webhook delivery: happy-path, retry-success, degraded transition |
+| 18 | `webhooks` | Pro | no | Webhook delivery: happy-path, retry-success, degraded transition. Gated into `pro-webhooks` (§2.19) |
 | 19 | `kafka-ingest` | Community | no | Direct-to-Kafka ingestion: publishes straight to the broker (SASL/TLS) and verifies a gateway-subscribed client receives it. Skips when `KAFKA_BROKERS` unset; delivery requires the server under test to run `MESSAGE_BACKEND=kafka` (Community, ADR-0009). Run continuously by `task e2e:kafka-ingest` / the CI workflow's `e2e-kafka-ingest` job (see §1.3). |
 | 20 | `history` | Community | no | Message-history delivery over ingested records: a late-joining client fetches history and every historical copy's `mid` byte-equals the live copy's (§2.21). Skips when `KAFKA_BROKERS` unset; requires `WS_HISTORY_ENABLED=true` on the server under test. Gated into `community-kafka`/`pro-kafka` |
 | 21 | `gap-recovery` | Community | no | Gap recovery under client kill: a killed subscriber reconnects with `last_pos` and receives exactly the missed messages (exclusive cursor, ordered, mid-stable), plus a live `replay` leg (§2.22). Skips when `KAFKA_BROKERS` unset. Gated into `community-kafka`/`pro-kafka` |
@@ -973,6 +973,8 @@ Validates the full webhook delivery pipeline in three scenarios:
 Each scenario provisions a throw-away routing rule and webhook for the test tenant, publishes a message via REST, and polls the built-in `/webhook-receive/{runID}` endpoint to assert delivery count, HMAC signature validity, and response status codes.
 
 **Requirements:** Pro+ edition, Kafka backend, `TESTER_WEBHOOK_BASE_URL` set to the externally-reachable address of this tester pod. When either the base URL is unset or the current edition is Community, all checks return `skip` and the suite still passes.
+
+**Grid cell:** gated into `pro-webhooks` (Pro/kafka), which boots the webhook-worker (`--profile pro`) and sets `TESTER_WEBHOOK_BASE_URL`, so the delivery checks run present-and-`pass` rather than skipping. The cell runs nightly and on manual dispatch (§2.0).
 
 **Example output:**
 ```

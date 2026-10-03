@@ -46,6 +46,11 @@ services:
       WEBHOOK_INTERNAL_TOKEN: "${WEBHOOK_INTERNAL_TOKEN:-}"
       # Pro/Enterprise: internal gRPC address of the webhook-worker service.
       WEBHOOK_WORKER_GRPC_ADDR: "${WEBHOOK_WORKER_GRPC_ADDR:-webhook-worker:9095}"
+      # Allow http:// webhook URLs: provisioning validates the webhook URL scheme at CreateWebhook
+      # time and rejects plain http unless this is set. The e2e webhooks suite registers an in-cluster
+      # http:// receiver, and the webhook-worker (which dials it) already sets the same flag. Local/dev
+      # only — production uses https.
+      WEBHOOK_ALLOW_HTTP: "true"
       # Connections registry Valkey client — required (no Go default for PROVISIONING_VALKEY_ADDRS).
       PROVISIONING_VALKEY_ADDRS: "valkey:6379"
       # Observability (disabled by default, enable with OTEL_TRACING_ENABLED=true)

@@ -368,6 +368,9 @@ func TestProvisioningClient_CreateWebhook(t *testing.T) {
 			t.Errorf("channel_pattern = %v, want orders.*", body["channel_pattern"])
 		}
 
+		if got := r.Header.Get("Authorization"); got != "Bearer tenant-jwt-token" {
+			t.Errorf("Authorization = %q, want Bearer tenant-jwt-token", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = strings.NewReader(`{"id":"wh-abc123"}`).WriteTo(w)
@@ -375,7 +378,7 @@ func TestProvisioningClient_CreateWebhook(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := testProvClient(t, srv.URL)
-	id, err := client.CreateWebhook(context.Background(), "test-t1",
+	id, err := client.CreateWebhook(context.Background(), "test-t1", "tenant-jwt-token",
 		"https://receiver.example.com/hook", "orders.*", "secret-hex", 3)
 	if err != nil {
 		t.Fatalf("CreateWebhook: %v", err)
@@ -395,13 +398,16 @@ func TestProvisioningClient_GetWebhookByID(t *testing.T) {
 		if r.URL.Path != "/api/v1/tenants/test-t1/webhooks/wh-abc123" {
 			t.Errorf("path = %q, want /api/v1/tenants/test-t1/webhooks/wh-abc123", r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tenant-jwt-token" {
+			t.Errorf("Authorization = %q, want Bearer tenant-jwt-token", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = strings.NewReader(`{"id":"wh-abc123","status":"degraded"}`).WriteTo(w)
 	}))
 	t.Cleanup(srv.Close)
 
 	client := testProvClient(t, srv.URL)
-	status, err := client.GetWebhookByID(context.Background(), "test-t1", "wh-abc123")
+	status, err := client.GetWebhookByID(context.Background(), "test-t1", "tenant-jwt-token", "wh-abc123")
 	if err != nil {
 		t.Fatalf("GetWebhookByID: %v", err)
 	}
@@ -420,12 +426,15 @@ func TestProvisioningClient_DeleteWebhook(t *testing.T) {
 		if r.URL.Path != "/api/v1/tenants/test-t1/webhooks/wh-abc123" {
 			t.Errorf("path = %q, want /api/v1/tenants/test-t1/webhooks/wh-abc123", r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tenant-jwt-token" {
+			t.Errorf("Authorization = %q, want Bearer tenant-jwt-token", got)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
 
 	client := testProvClient(t, srv.URL)
-	if err := client.DeleteWebhook(context.Background(), "test-t1", "wh-abc123"); err != nil {
+	if err := client.DeleteWebhook(context.Background(), "test-t1", "tenant-jwt-token", "wh-abc123"); err != nil {
 		t.Fatalf("DeleteWebhook: %v", err)
 	}
 }
@@ -441,7 +450,7 @@ func TestProvisioningClient_CreateWebhook_ErrorResponse(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := testProvClient(t, srv.URL)
-	_, err := client.CreateWebhook(context.Background(), "test-t1",
+	_, err := client.CreateWebhook(context.Background(), "test-t1", "tenant-jwt-token",
 		"not-a-url", "orders.*", "secret", 0)
 	if err == nil {
 		t.Fatal("expected error, got nil")

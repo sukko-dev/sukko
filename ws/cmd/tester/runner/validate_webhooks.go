@@ -29,7 +29,6 @@ const (
 	// "webhook.test.*" would fail on the first segment. "**" catches all channels, routing
 	// any publish to the test topic where the webhook-worker picks it up.
 	webhookTestRoutingPatt = "**"
-	webhookTestTopic       = "webhook-test"
 	webhookTestSecretLen   = 32
 	webhookPollInterval    = 500 * time.Millisecond
 )
@@ -50,7 +49,10 @@ func validateWebhooks(
 	}
 
 	// Gate 2: skip when the current edition does not include webhook delivery.
-	edition, err := fetchEditionFn(ctx, run.Config.GatewayURL)
+	// fetchEditionFn does an HTTP GET; rewrite the ws:// gateway URL to http:// (sibling
+	// pattern — edition_limits.go passes httpURL(gwURL)). A raw ws:// URL fails with
+	// "unsupported protocol scheme".
+	edition, err := fetchEditionFn(ctx, httpURL(run.Config.GatewayURL))
 	if err != nil {
 		return []metrics.CheckResult{{
 			Name:   "webhooks/edition-check",
@@ -92,6 +94,17 @@ func validateWebhooks(
 	return checks, nil
 }
 
+// webhookRoutingRules returns the routing rule the suite installs: a catch-all pattern routed to
+// the tenant's always-provisioned default topic. The webhook-worker consumes the broadcast bus
+// (SubscribeAll), so the target only needs to be a topic ws-server already consumes — the default
+// topic. A custom ingress topic would trip the ADR-0006 topic-universe gate (TOPIC_NOT_PROVISIONED)
+// for no benefit; this mirrors the working kafka_ingest suite (routing.DefaultTopicSuffix).
+func webhookRoutingRules() []map[string]any {
+	return []map[string]any{
+		{"pattern": webhookTestRoutingPatt, "ingress_topic": routing.DefaultTopicSuffix, "priority": routing.DefaultCatchAllPriority},
+	}
+}
+
 // runWebhookScenario provisions a webhook, publishes a message, and asserts delivery behavior.
 //
 //   - failFirstN: 0=always 200; N>0=first N fail; -1=always 500
@@ -123,9 +136,7 @@ func runWebhookScenario(
 	defer run.webhookStore.delete(runID)
 
 	// Step 3: provision routing rule so the webhook-worker receives broadcasts.
-	if err := provClient.SetRoutingRules(ctx, tenantID, []map[string]any{
-		{"pattern": webhookTestRoutingPatt, "ingress_topic": webhookTestTopic, "priority": routing.DefaultCatchAllPriority},
-	}); err != nil {
+	if err := provClient.SetRoutingRules(ctx, tenantID, webhookRoutingRules()); err != nil {
 		return fail(pfx+"routing-rule", fmt.Sprintf("set routing rules: %v", err)), nil
 	}
 	defer func() { _ = provClient.DeleteRoutingRules(context.Background(), tenantID) }() //nolint:contextcheck // context.Background(): request ctx may be canceled at defer time; error: best-effort cleanup, test already reported its result
@@ -133,13 +144,13 @@ func runWebhookScenario(
 	// Step 4: register webhook with the provisioning service.
 	webhookURL := run.webhookBaseURL + "/webhook-receive/" + runID
 	webhookID, err := provClient.CreateWebhook(
-		ctx, tenantID, webhookURL, webhookTestChannelPatt,
+		ctx, tenantID, token, webhookURL, webhookTestChannelPatt,
 		hex.EncodeToString(secret), maxRetries,
 	)
 	if err != nil {
 		return fail(pfx+"create-webhook", fmt.Sprintf("create webhook: %v", err)), nil
 	}
-	defer func() { _ = provClient.DeleteWebhook(context.Background(), tenantID, webhookID) }() //nolint:contextcheck // context.Background(): request ctx may be canceled at defer time; error: best-effort cleanup, test already reported its result
+	defer func() { _ = provClient.DeleteWebhook(context.Background(), tenantID, token, webhookID) }() //nolint:contextcheck // context.Background(): request ctx may be canceled at defer time; error: best-effort cleanup, test already reported its result
 
 	// Step 5: publish to the test channel to trigger delivery.
 	restClient := restpublish.NewClient(httpURL(run.Config.GatewayURL))
@@ -160,7 +171,7 @@ func runWebhookScenario(
 	// Step 6: poll for delivery or degraded status.
 	var checks []metrics.CheckResult
 	if wantDegraded {
-		checks = append(checks, pollDegradedStatus(ctx, run, logger, name, pfx, provClient, tenantID, webhookID)...)
+		checks = append(checks, pollDegradedStatus(ctx, run, logger, name, pfx, provClient, tenantID, token, webhookID)...)
 	} else {
 		checks = append(checks, pollDeliveries(ctx, run, pfx, runID, publish, failFirstN, wantCount)...)
 	}
@@ -178,9 +189,9 @@ func pollDegradedStatus(
 	name string,
 	pfx string,
 	provClient interface {
-		GetWebhookByID(context.Context, string, string) (string, error)
+		GetWebhookByID(context.Context, string, string, string) (string, error)
 	},
-	tenantID, webhookID string,
+	tenantID, token, webhookID string,
 ) []metrics.CheckResult {
 	timeout := run.webhookRetryTimeout
 	deadline := time.NewTimer(timeout)
@@ -197,7 +208,7 @@ func pollDegradedStatus(
 			return fail(pfx+"degraded-status",
 				fmt.Sprintf("webhook did not reach degraded status within %s (last: %q)", timeout, finalStatus))
 		case <-ticker.C:
-			status, err := provClient.GetWebhookByID(ctx, tenantID, webhookID)
+			status, err := provClient.GetWebhookByID(ctx, tenantID, token, webhookID)
 			if err != nil {
 				logger.Debug().Err(err).Str("scenario", name).Msg("GetWebhookByID error during poll")
 				continue
