@@ -257,3 +257,61 @@ func TestWebhookReceiveHandler_ConcurrentDeliveries(t *testing.T) {
 		t.Errorf("got %d deliveries, want %d", n, concurrency)
 	}
 }
+
+// TestWebhookReceiveHandler_HexKeyForm pins the HMAC key-form contract the webhooks suite relies
+// on: the webhook secret travels (and is stored, and is HMAC-signed by the worker) as the HEX
+// STRING that CreateWebhook was given — provisioning encrypts it as-is and the worker signs with
+// the decrypted bytes, i.e. the hex-string bytes. The receiver must therefore validate with the
+// hex-string bytes, not the raw random secret. Registering the raw bytes (the original suite bug)
+// makes every real delivery's signature fail at the receiver (403).
+func TestWebhookReceiveHandler_HexKeyForm(t *testing.T) {
+	t.Parallel()
+
+	rawSecret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes, as the suite generates
+	secretHex := hex.EncodeToString(rawSecret)              // what CreateWebhook receives
+	body := []byte(`{"event":"test"}`)
+	// The worker decrypts the stored secret (the hex string) and signs with its bytes.
+	workerSig := signedHeader([]byte(secretHex), body)
+
+	t.Run("receiver registered with the hex-string key accepts the worker signature", func(t *testing.T) {
+		t.Parallel()
+		store := newWebhookStore()
+		store.register("ok", []byte(secretHex), 0)
+		h := webhookReceiveHandler(store)
+
+		r := httptest.NewRequest(http.MethodPost, "/webhook-receive/ok", strings.NewReader(string(body)))
+		r.SetPathValue("runID", "ok")
+		r.Header.Set(webhookconst.WebhookSignatureHeader, workerSig)
+		w := httptest.NewRecorder()
+		h(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200", w.Code)
+		}
+		entry := store.get("ok")
+		if entry == nil || len(entry.deliveries) != 1 || !entry.deliveries[0].SignatureOK {
+			t.Errorf("want 1 delivery with SignatureOK=true, got %+v", entry)
+		}
+	})
+
+	t.Run("receiver registered with the raw bytes rejects the worker signature (the suite bug)", func(t *testing.T) {
+		t.Parallel()
+		store := newWebhookStore()
+		store.register("bug", rawSecret, 0) // the pre-fix registration — wrong key form
+		h := webhookReceiveHandler(store)
+
+		r := httptest.NewRequest(http.MethodPost, "/webhook-receive/bug", strings.NewReader(string(body)))
+		r.SetPathValue("runID", "bug")
+		r.Header.Set(webhookconst.WebhookSignatureHeader, workerSig)
+		w := httptest.NewRecorder()
+		h(w, r)
+
+		if w.Code == http.StatusOK {
+			t.Error("status = 200, want rejection: raw-byte key must not validate a hex-key signature")
+		}
+		entry := store.get("bug")
+		if entry == nil || len(entry.deliveries) != 1 || entry.deliveries[0].SignatureOK {
+			t.Errorf("want 1 delivery with SignatureOK=false, got %+v", entry)
+		}
+	})
+}
