@@ -1154,6 +1154,9 @@ func (m *MockWebhookStore) Update(_ context.Context, req provisioning.UpdateWebh
 			w.RetryCount = 0
 		}
 	}
+	if req.SecretEnc != nil {
+		w.SecretEnc = *req.SecretEnc
+	}
 	cp := *w
 	return &cp, nil
 }
