@@ -204,7 +204,7 @@ The Sukko platform spans sibling repositories that MUST stay in sync whenever th
   - User-facing error messages, WebSocket protocol message types, HTTP error codes/error schemas, connection close codes, env var names/defaults/types, CLI command/flag behavior, feature gate additions, or user-visible CLI output format → docs update required. When a change is user-visible but doesn't match any listed category, assess cross-repo impact explicitly — default is to assess, not skip.
   - New or changed REST API endpoints → API reference MUST be updated
   - Feature gate additions to `features.go` → the editions comparison page auto-generates from it, but guide content may still need updating
-  - Any docs page added, removed, renamed, or significantly repurposed → `static/llms.txt` MUST also be updated — it is the primary LLM discovery index for the documentation site; a stale index means AI assistants cannot discover or reference new content
+  - Any docs page added, removed, renamed, or significantly repurposed → it MUST be registered in the docs site's `sidebars.ts`, the source of truth for page discovery. `static/llms.txt` (the LLM discovery index) is generated from `sidebars.ts` plus page frontmatter at build time and CI-guarded — it is NOT hand-maintained and MUST NOT be hand-edited
 
 - **`cmd/tester`** (this repo) — Integration test service. Changes here that affect the tester API surface or configuration also affect the CLI (`sukko test run`) and the docs (Tester configuration reference).
 
