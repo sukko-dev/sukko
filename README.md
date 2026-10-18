@@ -1,6 +1,6 @@
 # Sukko
 
-Multi-tenant WebSocket infrastructure platform for real-time data distribution. Built for trading and market data — delivers messages from Kafka/Redpanda through WebSocket, SSE, and push notification channels with JWT authentication, per-tenant isolation, and edition-based feature gating.
+Realtime infrastructure for the part that breaks: staying lossless when a node fails or a consumer group rebalances — proven in a public fault-matrix benchmark. Sukko delivers data from Kafka/Redpanda through WebSocket, SSE, and push channels with JWT auth, per-tenant scoping, and edition-based feature gating, and it runs in your own cloud.
 
 ## Architecture
 
