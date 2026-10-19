@@ -1205,8 +1205,8 @@ func (c *ServerConfig) Validate() error {
 	}
 
 	// Edition gates — checked after all other validation passes.
-	// Uses startup-resolved Edition()/Limits(), NOT expiry-aware CurrentEdition()/CurrentLimits().
-	// Config validation runs once at startup; runtime gates use CurrentLimits() for mid-flight expiry.
+	// Uses Edition()/Limits() — the booted values, fixed at construction and never
+	// downgraded mid-flight.
 	if c.editionManager != nil {
 		edition := c.editionManager.Edition()
 		limits := c.editionManager.Limits()

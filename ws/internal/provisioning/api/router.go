@@ -64,7 +64,7 @@ type RouterConfig struct {
 	// ConfigHandler serves the /config endpoint (set via platform.ConfigHandler)
 	ConfigHandler http.HandlerFunc
 
-	// EditionManager for the /edition endpoint (expiry-aware).
+	// EditionManager for the /edition endpoint (reports the booted edition).
 	EditionManager *license.Manager
 
 	// PprofEnabled registers /debug/pprof/ handlers when true.

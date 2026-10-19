@@ -30,7 +30,7 @@ func (m *Manager) Reload(key string) error {
 	}
 
 	// 3. Capture old state for transition logging
-	oldEdition := m.CurrentEdition()
+	oldEdition := m.Edition()
 	oldClaims := current
 
 	// 4. Resolve new state

@@ -441,13 +441,13 @@ func newHTTPMux(watcher licenseStateGetter, mgr *license.Manager) *http.ServeMux
 		if !mgr.HasFeature(license.WebPush) {
 			_ = httputil.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{ // write error non-actionable for readiness endpoint
 				"ready":   false,
-				"edition": mgr.CurrentEdition().String(),
+				"edition": mgr.Edition().String(),
 			})
 			return
 		}
 		_ = httputil.WriteJSON(w, http.StatusOK, map[string]any{ // write error non-actionable for readiness endpoint
 			"ready":   true,
-			"edition": mgr.CurrentEdition().String(),
+			"edition": mgr.Edition().String(),
 		})
 	})
 	mux.Handle("/metrics", promhttp.Handler())

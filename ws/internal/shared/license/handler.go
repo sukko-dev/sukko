@@ -41,7 +41,10 @@ type EditionUsage struct {
 type UsageFunc func(ctx context.Context) *EditionUsage
 
 // EditionHandler returns an http.HandlerFunc for the GET /edition endpoint.
-// Uses CurrentEdition()/CurrentLimits() for expiry-aware response.
+// Reports the booted Edition()/Limits() — what the server reports and gates on,
+// which the Manager does not downgrade mid-flight (ADR-0038). The response still
+// carries expired=true (from Claims().IsExpired()) so the operator knows to
+// re-key; it does not downgrade the reported edition to Community.
 // usageFn may be nil if the service has no usage data to report.
 func EditionHandler(mgr *Manager, usageFn UsageFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -53,8 +56,8 @@ func EditionHandler(mgr *Manager, usageFn UsageFunc) http.HandlerFunc {
 			return
 		}
 
-		edition := mgr.CurrentEdition()
-		limits := mgr.CurrentLimits()
+		edition := mgr.Edition()
+		limits := mgr.Limits()
 
 		resp := EditionResponse{
 			Edition: edition.String(),

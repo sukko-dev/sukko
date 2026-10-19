@@ -236,7 +236,7 @@ func (c *GatewayConfig) Validate() error {
 		return errors.New("GATEWAY_CORS_ORIGINS must have at least one entry")
 	}
 
-	// Edition gates — uses startup-resolved Edition(), not expiry-aware CurrentEdition().
+	// Edition gates — use Edition() (the booted edition; never downgraded mid-flight).
 	if c.editionManager != nil {
 		edition := c.editionManager.Edition()
 

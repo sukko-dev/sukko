@@ -148,6 +148,52 @@ func TestEditionHandler_ExpiredLicense(t *testing.T) {
 	}
 }
 
+// TestEditionHandler_MidFlightExpiry_ReportsBootedEdition (ADR-0038): a server
+// that booted with a valid Pro license and whose key expires WHILE RUNNING keeps
+// serving Pro until restart (no mid-flight downgrade), so /edition must report the
+// booted edition/limits — with expired=true so the operator knows to re-key — not
+// a Community downgrade that lies about what the server is actually enforcing.
+//
+//nolint:paralleltest // shares package-level publicKey via SetPublicKeyForTesting; also sleeps across a second boundary
+func TestEditionHandler_MidFlightExpiry_ReportsBootedEdition(t *testing.T) {
+	priv, pub := GenerateTestKeyPair()
+	SetPublicKeyForTesting(pub)
+
+	// Valid at construction (exp = current second), expired one second later.
+	claims := Claims{Edition: Pro, Org: "MidFlight", Exp: time.Now().Unix()}
+	key := SignTestLicense(claims, priv)
+	mgr, err := NewManager(key, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	// Wait past the expiry second so the license is expired mid-flight.
+	time.Sleep(1100 * time.Millisecond)
+	if c := mgr.Claims(); c == nil || !c.IsExpired() {
+		t.Fatal("precondition: license should be expired mid-flight")
+	}
+
+	handler := EditionHandler(mgr, nil)
+	req := httptest.NewRequest(http.MethodGet, "/edition", http.NoBody)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	var resp EditionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Booted edition + limits, NOT a Community downgrade.
+	if resp.Edition != "pro" {
+		t.Errorf("Edition = %q, want pro (booted edition held mid-flight, no downgrade)", resp.Edition)
+	}
+	if resp.Limits.MaxTenants != 50 {
+		t.Errorf("MaxTenants = %d, want 50 (booted Pro limits)", resp.Limits.MaxTenants)
+	}
+	// ...but the response still tells the operator the license has lapsed.
+	if !resp.Expired {
+		t.Error("Expired should be true (honest expiry flag)")
+	}
+}
+
 func TestEditionHandler_NilUsageFunc(t *testing.T) {
 	t.Parallel()
 	handler := EditionHandler(nil, nil)

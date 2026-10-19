@@ -139,15 +139,34 @@ paths:
                 properties:
                   edition:
                     type: string
+                    description: The booted edition the server enforces. It is NOT downgraded mid-flight when the license expires; see `expired`.
                     enum: [community, pro, enterprise]
                   org:
                     type: string
                   expires_at:
                     type: string
                     format: date-time
+                  expired:
+                    type: boolean
+                    description: True once the license has passed its expiry. The reported edition is unchanged — the operator must re-key before the next restart.
+                  limits:
+                    type: object
+                    properties:
+                      max_tenants:
+                        type: integer
+                      max_total_connections:
+                        type: integer
+                      max_shards:
+                        type: integer
+                      max_topics_per_tenant:
+                        type: integer
+                      max_routing_rules_per_tenant:
+                        type: integer
                   usage:
                     type: object
                     properties:
+                      tenants:
+                        type: integer
                       connections:
                         type: integer
                       shards:
