@@ -232,18 +232,20 @@ jobs:
             echo 'cells=["community-direct","pro-kafka","community-kafka"]' >> "$GITHUB_OUTPUT"
           else
             # Full grid (nightly schedule + manual dispatch): every edition×backend cell —
-            # positive (incl. community-kafka — ADR-0009 boot+gate proof; ingest-path delivery is follow-up), degradation (expired-direct), and the
+            # positive (incl. community-kafka — ADR-0009 boot+gate proof; ingest-path delivery is follow-up), the
             # Valkey Sentinel HA topology cell (community-direct-sentinel), plus the suite-specific
             # pro-webhooks cell (Pro/kafka + the webhook-worker, running the webhooks delivery suite).
+            # (No expired-direct cell: under ADR-0038 an expired key refuses to boot rather than
+            # degrading to Community, so there is no running stack to assert — covered by Go unit tests.)
             # Smoke (push) stays lean: the sentinel cell adds 4 containers (1 replica + 3 sentinels) +
             # a chaos phase, so it runs nightly/dispatch only.
-            echo 'cells=["community-direct","pro-kafka","enterprise-kafka","pro-direct","enterprise-direct","expired-direct","community-kafka","community-direct-sentinel","pro-webhooks"]' >> "$GITHUB_OUTPUT"
+            echo 'cells=["community-direct","pro-kafka","enterprise-kafka","pro-direct","enterprise-direct","community-kafka","community-direct-sentinel","pro-webhooks"]' >> "$GITHUB_OUTPUT"
           fi
 
   # ---------------------------------------------------------------------------
   # E2E editions×backends grid — the anchor cells
   # ---------------------------------------------------------------------------
-  # One job per cell (positive edition×backend cells and the expired-direct degradation cell),
+  # One job per cell (positive edition×backend cells),
   # each booting a build-from-source stack via the single cell runner (task e2e:cell:<cell>) and
   # running the validate battery hermetically with the anti-vacuous guard. fail-fast: false so
   # one red cell does not cancel the others. This subsumes the former direct-mode validate battery

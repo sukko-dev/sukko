@@ -248,7 +248,9 @@ func main() {
 		structuredLogger.Fatal().Err(revErr).Msg("Failed to create revocation registry")
 	}
 
-	// License watcher — subscribe to WatchLicense gRPC stream for runtime edition updates
+	// License watcher — subscribe to WatchLicense gRPC stream for runtime edition updates.
+	// Upgrades/renewals apply live; a downgrade is retained until the next restart
+	// (ADR-0038) — the watcher never shuts the service down.
 	licenseWatcher, licErr := provapi.NewStreamLicenseWatcher(provapi.StreamLicenseWatcherConfig{
 		GRPCAddr:          cfg.ProvisioningGRPCAddr,
 		ReconnectDelay:    cfg.GRPCReconnectDelay,
@@ -256,7 +258,6 @@ func main() {
 		MetricPrefix:      serviceName,
 		Manager:           cfg.EditionManager(),
 		Logger:            structuredLogger,
-		OnDowngrade:       provapi.LicenseDowngradeShutdown(structuredLogger, cancel),
 	})
 	if licErr != nil {
 		structuredLogger.Fatal().Err(licErr).Msg("Failed to create license watcher")

@@ -761,7 +761,8 @@ func (s *Server) WatchLicense(_ *provisioningv1.WatchLicenseRequest, stream grpc
 	ctx := stream.Context()
 	logger := s.logger.With().Str("rpc", "WatchLicense").Logger()
 
-	// Snapshot: always send current key (empty = Community / no license)
+	// Snapshot: always send current key (empty = no key persisted yet; clients keep
+	// their booted edition until a non-empty key arrives — ADR-0038)
 	currentKey := s.currentLicenseKey()
 	if err := stream.Send(&provisioningv1.WatchLicenseResponse{LicenseKey: currentKey}); err != nil {
 		return status.Errorf(codes.Unavailable, "send license snapshot: %v", err)

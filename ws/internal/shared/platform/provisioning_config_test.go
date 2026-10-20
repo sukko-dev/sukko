@@ -1027,3 +1027,80 @@ func TestProvisioningConfig_Validate_WebhookDowngradePollInterval(t *testing.T) 
 		})
 	}
 }
+
+// TestProvisioningConfig_ValidateEdition is the ADR-0038 regression guard for the
+// re-validation main runs after resolving the DB-persisted key: a Pro/Enterprise
+// edition resolved only from the DB (manager nil at config load) must still have its
+// webhook-worker fields validated before that server starts, rather than started
+// unvalidated. It must stay a no-op for a nil manager and for Community.
+//
+//nolint:paralleltest // shares license.SetPublicKeyForTesting via setProvisioningEditionManager
+func TestProvisioningConfig_ValidateEdition(t *testing.T) {
+	// nil manager (the load-time state before the DB key is resolved) → no-op.
+	cfg := newValidProvisioningConfig()
+	if err := cfg.ValidateEdition(); err != nil {
+		t.Errorf("ValidateEdition() with nil manager = %v, want nil", err)
+	}
+
+	// Community → no-op (no webhook-worker).
+	cfg = newValidProvisioningConfig()
+	setProvisioningEditionManager(t, cfg, license.Community)
+	if err := cfg.ValidateEdition(); err != nil {
+		t.Errorf("ValidateEdition() Community = %v, want nil", err)
+	}
+
+	// Pro with webhook-worker fields MISSING → error (the regression this guards).
+	cfg = newValidProvisioningConfig() // WebhookInternalToken + WebhookWorkerGRPCAddr empty
+	setProvisioningEditionManager(t, cfg, license.Pro)
+	if err := cfg.ValidateEdition(); err == nil {
+		t.Error("ValidateEdition() Pro with missing webhook fields = nil, want error")
+	}
+
+	// Pro with webhook-worker fields set → nil.
+	cfg = newValidProvisioningConfig()
+	cfg.WebhookInternalToken = "token-that-meets-the-32-char-minimum-requirement"
+	cfg.WebhookWorkerGRPCAddr = "webhook-worker:9095"
+	setProvisioningEditionManager(t, cfg, license.Pro)
+	if err := cfg.ValidateEdition(); err != nil {
+		t.Errorf("ValidateEdition() Pro with valid webhook fields = %v, want nil", err)
+	}
+}
+
+// TestResolveEnvLicenseManager pins the §XVIII provisioning tolerance (ADR-0038): a
+// missing or expired env key yields (nil, nil) — provisioning resolves the DB key in
+// main — while a forged/invalid key is fatal, and a valid key builds the manager.
+//
+//nolint:paralleltest // calls license.SetPublicKeyForTesting (package-level state)
+func TestResolveEnvLicenseManager(t *testing.T) {
+	priv, pub := license.GenerateTestKeyPair()
+	license.SetPublicKeyForTesting(pub)
+	log := zerolog.Nop()
+	mint := func(exp time.Time) string {
+		return license.SignTestLicense(license.Claims{Edition: license.Pro, Org: "T", Exp: exp.Unix(), Iat: 1}, priv)
+	}
+	valid := mint(time.Now().Add(time.Hour))
+	expired := mint(time.Now().Add(-time.Hour))
+
+	tests := []struct {
+		name    string
+		key     string
+		wantMgr bool
+		wantErr bool
+	}{
+		{"empty → tolerated (nil, nil)", "", false, false},
+		{"expired → tolerated (nil, nil)", expired, false, false},
+		{"forged → fatal (nil, err)", "not-a-valid-key", false, true},
+		{"valid → manager", valid, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, err := resolveEnvLicenseManager(tc.key, log)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if (mgr != nil) != tc.wantMgr {
+				t.Fatalf("mgr != nil = %v, want %v", mgr != nil, tc.wantMgr)
+			}
+		})
+	}
+}

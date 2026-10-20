@@ -1,7 +1,6 @@
 package license
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -12,12 +11,13 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// sukko_license_expiry_timestamp is the Unix timestamp of the license expiry.
-// Set once at startup. 0 = no license / Community edition.
-// Enables the LicenseExpiringSoon alert rule: (sukko_license_expiry_timestamp - time()) < 7*86400.
+// sukko_license_expiry_timestamp is the Unix timestamp of the current license's expiry.
+// Set at startup and updated on each live reload. Every edition runs on a signed key
+// with an expiry (ADR-0038), so this is normally non-zero. A Grafana panel / alert rule
+// surfaces "time until expiry" as (sukko_license_expiry_timestamp - time()).
 var licenseExpiryTimestamp = promauto.NewGauge(prometheus.GaugeOpts{
 	Name: "sukko_license_expiry_timestamp",
-	Help: "Unix timestamp of license expiry (0 = no license / Community edition).",
+	Help: "Unix timestamp of the current license's expiry.",
 })
 
 // editionHolder wraps an Edition for atomic.Pointer storage.
@@ -28,24 +28,28 @@ type limitsHolder struct{ v Limits }
 
 // Manager resolves and provides the current edition, limits, and feature gates.
 //
-// It is created once at startup with NewManager. Its resolved Edition()/Limits()
-// are fixed at construction and are NOT downgraded mid-flight when the license
-// expires — a running server reports and gates on the edition it booted with.
-// Expiry is surfaced through Claims().IsExpired() (e.g. the /edition `expired`
-// flag), not by changing Edition()/Limits(). Accessors:
-//   - Edition() / Limits() — the booted edition and limits
-//   - HasFeature()         — uses Edition(), so gates track the booted edition
+// It is created once at startup with NewManager, which validates the signed key. Its
+// Edition()/Limits() are set at boot and thereafter only RAISED or renewed by a live
+// reload (ReloadNoDowngrade, used by the WatchLicense stream and the admin reload
+// API) — they are never lowered mid-flight: a downgrade takes effect at the next
+// restart (ADR-0038 Model C). License EXPIRY never changes Edition()/Limits() and
+// never shuts the service down; it is surfaced through Claims().IsExpired() (e.g. the
+// /edition `expired` flag) and the expiry gauge, not by changing the edition.
+// Accessors:
+//   - Edition() / Limits() — the current edition and limits
+//   - HasFeature()         — uses Edition(), so gates track the current edition
 //
-// (Note: a separate StreamLicenseWatcher path still triggers a graceful shutdown
-// some time after a key expires; ADR-0038 increment B removes that so expiry only
-// forces a re-key at the operator's next restart. This Manager never downgrades.)
+// The unconditional Reload (boot-time path used by provisioning's DB-precedence
+// resolve) may apply a lower edition — boot is the restart at which a downgrade
+// legitimately takes effect; ReloadNoDowngrade is the runtime path that refuses to lower.
 type Manager struct {
-	// Startup-resolved values (never change after construction).
+	// Current edition/limits — set at boot, only raised or renewed at runtime.
 	edition atomic.Pointer[editionHolder]
 	limits  atomic.Pointer[limitsHolder]
 
-	// Claims from the license key (nil for Community with no key).
-	// Stored even when expired — useful for debugging and Org() access.
+	// Claims from the license key. A Manager built via NewManager/Reload always has
+	// non-nil claims (ParseAndVerify succeeded); only NewTestManager leaves them nil.
+	// Stored even when expired — useful for debugging, Org() access, and expiry checks.
 	claims atomic.Pointer[Claims]
 
 	// reloadMu serializes concurrent Reload() calls on this Manager instance.
@@ -57,46 +61,30 @@ type Manager struct {
 
 // NewManager creates a Manager from a license key string.
 //
-// Behavior:
-//   - Empty key → Community edition with default Community limits
+// Behavior (ADR-0038 — Community requires an account-issued license):
+//   - Empty key → ErrNoLicense (fail fast; Community is no longer keyless)
+//   - Expired key → error wrapping ErrLicenseExpired (refused at boot; re-key required)
+//   - Invalid signature/format → error (corrupt or forged key)
 //   - Valid key → edition and limits from claims (with precedence overlay)
-//   - Expired key → Community degradation (never brick production)
-//   - Invalid signature/format → error (fatal: corrupt or forged key)
+//
+// Enforcement is at boot (here) and reload only — an expired key is refused exactly
+// like a missing one, so there is no mid-flight degrade-to-Community.
 func NewManager(licenseKey string, logger zerolog.Logger) (*Manager, error) {
+	// No license key → refuse. Services fail fast at startup rather than silently
+	// running as Community (ADR-0038). Provisioning resolves its DB-or-env key
+	// before calling NewManager, so it never reaches here with an empty key when
+	// the DB holds one.
+	if licenseKey == "" {
+		return nil, ErrNoLicense
+	}
+
 	m := &Manager{
 		logger: logger.With().Str("component", "license").Logger(),
 	}
 
-	// No license key → Community
-	if licenseKey == "" {
-		m.edition.Store(&editionHolder{Community})
-		m.limits.Store(&limitsHolder{DefaultLimits(Community)})
-		licenseExpiryTimestamp.Set(0)
-		m.logger.Info().Str("edition", Community.String()).Msg("No license key, running as Community edition")
-		return m, nil
-	}
-
-	// Parse and verify the license key
+	// Parse and verify the license key (signature + expiry). Expired and invalid
+	// both refuse: enforcement is at boot/reload, so a lapsed key forces a re-key.
 	claims, err := ParseAndVerify(licenseKey)
-
-	// Handle expired license: degrade to Community
-	if errors.Is(err, ErrLicenseExpired) {
-		m.edition.Store(&editionHolder{Community})
-		m.limits.Store(&limitsHolder{DefaultLimits(Community)})
-		m.claims.Store(claims) // store expired claims for debugging/Org()
-
-		licenseExpiryTimestamp.Set(float64(claims.Exp))
-		m.logger.Warn().
-			Str("edition", Community.String()).
-			Str("original_edition", claims.Edition.String()).
-			Str("org", claims.Org).
-			Time("expired_at", time.Unix(claims.Exp, 0)).
-			Str("upgrade_url", UpgradeURL).
-			Msg("License expired, running as Community edition")
-		return m, nil
-	}
-
-	// Handle invalid signature/format: fatal error
 	if err != nil {
 		return nil, fmt.Errorf("license validation: %w", err)
 	}

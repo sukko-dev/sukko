@@ -1276,7 +1276,13 @@ paths:
         authentication (defense in depth with license signature verification).
 
         Rate-limited per IP (~10 req/min with burst of 3). Replay-protected via `iat` claim.
-        On success, the key is persisted (encrypted) and broadcast to all services via gRPC stream.
+        On success the key is persisted (encrypted) and broadcast to all services via the
+        gRPC stream.
+
+        A key that RAISES or renews the edition takes effect immediately (`status: active`).
+        A valid key that LOWERS the edition is still accepted, persisted, and broadcast, but
+        does NOT change the running edition — it takes effect at the next restart
+        (`status: pending_restart`), and the running edition is unchanged until then.
       tags: [License]
       security:
         - bearerAuth: []
@@ -1295,15 +1301,22 @@ paths:
               key: "eyJlZGl0aW9uIjoicHJvIiwib3JnIjoiQWNtZSJ9.signature..."
       responses:
         "200":
-          description: License reloaded successfully
+          description: |
+            License accepted. `status` is `active` when it took effect live (an upgrade
+            or same-edition renewal) or `pending_restart` when it is a valid downgrade
+            that was stored and broadcast but takes effect only at the next restart — in
+            which case the running edition is unchanged. `edition`/`org`/`expires_at`
+            describe the accepted key.
           content:
             application/json:
               schema:
                 type: object
+                required: [edition, org, expires_at, status]
                 properties:
                   edition:
                     type: string
                     enum: [community, pro, enterprise]
+                    description: The edition of the accepted key.
                   org:
                     type: string
                   expires_at:
@@ -1311,12 +1324,24 @@ paths:
                     format: date-time
                   status:
                     type: string
-                    const: reloaded
-              example:
-                edition: pro
-                org: "Acme Corp"
-                expires_at: "2027-04-08T00:00:00Z"
-                status: reloaded
+                    enum: [active, pending_restart]
+                    description: |
+                      `active` — took effect live (upgrade or renewal).
+                      `pending_restart` — valid downgrade; stored and broadcast, applies
+                      at the next restart; the running edition is unchanged.
+              examples:
+                active:
+                  value:
+                    edition: pro
+                    org: "Acme Corp"
+                    expires_at: "2027-04-08T00:00:00Z"
+                    status: active
+                pendingRestart:
+                  value:
+                    edition: community
+                    org: "Acme Corp"
+                    expires_at: "2027-04-08T00:00:00Z"
+                    status: pending_restart
         "400":
           description: Invalid key (bad format, invalid signature, or expired)
           content:
@@ -1356,38 +1381,16 @@ paths:
                 message: "Required role: admin or system"
         "409":
           description: |
-            Conflict — one of two cases:
-            - `REPLAY_DETECTED`: the key iat is not newer than the current key (replay rejected).
-            - `EDITION_CHANGE_REQUIRES_RESTART`: the license changes the edition, which requires
-              a service restart to take effect. This response carries two extra fields,
-              `current_edition` and `requested_edition`.
+            Conflict — `REPLAY_DETECTED`: the key `iat` is not newer than the current key
+            (replay rejected). Note: an edition change is NO LONGER a conflict — an upgrade
+            applies live and a downgrade is accepted as `pending_restart` (see the 200 response).
           content:
             application/json:
               schema:
-                type: object
-                required: [code, message]
-                properties:
-                  code:
-                    type: string
-                  message:
-                    type: string
-                  current_edition:
-                    type: string
-                    description: Present only for EDITION_CHANGE_REQUIRES_RESTART — the edition currently in effect.
-                  requested_edition:
-                    type: string
-                    description: Present only for EDITION_CHANGE_REQUIRES_RESTART — the edition the submitted license requests.
-              examples:
-                replay_detected:
-                  value:
-                    code: "REPLAY_DETECTED"
-                    message: "key iat is not newer than current — replay rejected"
-                edition_change_requires_restart:
-                  value:
-                    code: "EDITION_CHANGE_REQUIRES_RESTART"
-                    message: "edition change requires a service restart"
-                    current_edition: "community"
-                    requested_edition: "pro"
+                $ref: "#/components/schemas/Error"
+              example:
+                code: "REPLAY_DETECTED"
+                message: "key iat is not newer than current — replay rejected"
         "429":
           description: Rate limited
           headers:

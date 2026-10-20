@@ -116,12 +116,13 @@ func main() {
 		structuredLogger.Fatal().Err(err).Msg("Edition limits validation failed")
 	}
 
-	// Context for goroutine lifecycle — cancel() signals server error or license downgrade to main.
-	// Must be declared before licenseWatcher so OnDowngrade can capture cancel.
+	// Context for goroutine lifecycle — cancel() signals a server error to main.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// License watcher — subscribe to WatchLicense gRPC stream for runtime updates.
+	// Upgrades/renewals apply live; a downgrade is retained until the next restart
+	// (ADR-0038) — the watcher never shuts the service down.
 	licenseWatcher, licErr := provapi.NewStreamLicenseWatcher(provapi.StreamLicenseWatcherConfig{
 		GRPCAddr:          cfg.ProvisioningGRPCAddr,
 		ReconnectDelay:    cfg.GRPCReconnectDelay,
@@ -129,7 +130,6 @@ func main() {
 		MetricPrefix:      "ws",
 		Manager:           cfg.EditionManager(),
 		Logger:            structuredLogger,
-		OnDowngrade:       provapi.LicenseDowngradeShutdown(structuredLogger, cancel),
 	})
 	if licErr != nil {
 		structuredLogger.Fatal().Err(licErr).Msg("Failed to create license watcher")

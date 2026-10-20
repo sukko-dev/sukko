@@ -1,10 +1,13 @@
 // Package license provides edition detection, feature gating, and hard limit
 // enforcement for the Sukko platform's Community/Pro/Enterprise editions.
 //
-// The edition is determined by the SUKKO_LICENSE_KEY environment variable:
-//   - No key → Community (free, with hard limits)
-//   - Valid key → Pro or Enterprise (based on encoded claims)
-//   - Expired key → Community (graceful degradation)
+// The edition is determined by the SUKKO_LICENSE_KEY environment variable, which is
+// required — every edition, Community included, runs on an account-issued signed key
+// (ADR-0038). The key is validated once at startup (and on each live reload); the booted
+// edition is fixed for the process lifetime and is never downgraded mid-flight.
+//   - Valid key → the edition encoded in its claims (Community, Pro, or Enterprise)
+//   - No key → startup failure (Community is no longer the keyless default)
+//   - Expired key → startup failure (an operator must re-key before the service will boot)
 //   - Invalid key → startup failure (corrupt or forged)
 package license
 

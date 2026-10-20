@@ -177,12 +177,13 @@ func main() {
 		logger.Info().Str("addr", config.PushGRPCAddr).Msg("Push service client connected")
 	}
 
-	// Context for goroutine lifecycle — cancel() signals server error or license downgrade to main.
-	// Must be declared before licenseWatcher so OnDowngrade can capture cancel.
+	// Context for goroutine lifecycle — cancel() signals a server error to main.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Closed via gw.Close() deferred above — fatal only if Manager is nil or addr is empty.
+	// Upgrades/renewals apply live; a downgrade is retained until the next restart
+	// (ADR-0038) — the watcher never shuts the service down.
 	licenseWatcher, err := provapi.NewStreamLicenseWatcher(provapi.StreamLicenseWatcherConfig{
 		GRPCAddr:          config.ProvisioningGRPCAddr,
 		ReconnectDelay:    config.GRPCReconnectDelay,
@@ -190,7 +191,6 @@ func main() {
 		MetricPrefix:      gateway.MetricPrefix,
 		Manager:           config.EditionManager(),
 		Logger:            logger,
-		OnDowngrade:       provapi.LicenseDowngradeShutdown(logger, cancel),
 	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create license watcher")

@@ -1748,10 +1748,7 @@ func TestRouter_LicenseEndpoint_AdminAuth(t *testing.T) {
 
 	// Create a real LicenseManager via NewManager (empty key = Community, but Reload
 	// uses the package-level publicKey overridden above).
-	licenseManager, err := license.NewManager("", zerolog.Nop())
-	if err != nil {
-		t.Fatalf("create license manager: %v", err)
-	}
+	licenseManager := license.NewTestManager(license.Community)
 
 	licenseHandler := api.NewLicenseHandler(
 		licenseManager,

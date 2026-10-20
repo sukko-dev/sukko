@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +17,7 @@ import (
 	"github.com/sukko-dev/sukko/internal/shared/license"
 )
 
-// testLicensePriv and testLicensePub are Ed25519 keypair for test license signing.
+// testLicensePriv and testLicensePub are an ECDSA P-256 keypair for test license signing.
 // Tests in this file MUST NOT use t.Parallel() since they call SetPublicKeyForTesting.
 var testLicensePriv, testLicensePub = license.GenerateTestKeyPair()
 
@@ -25,10 +26,7 @@ func setupLicenseHandlerTest(t *testing.T) *LicenseHandler {
 	license.SetPublicKeyForTesting(testLicensePub)
 
 	logger := zerolog.Nop()
-	mgr, err := license.NewManager("", logger)
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	mgr := license.NewTestManager(license.Community)
 
 	bus := eventbus.New(logger)
 	repo := provtestutil.NewMockLicenseStateStore()
@@ -68,8 +66,9 @@ func TestHandleReload_Success(t *testing.T) {
 	if resp.Org != "TestOrg" {
 		t.Errorf("org = %q, want %q", resp.Org, "TestOrg")
 	}
-	if resp.Status != "reloaded" {
-		t.Errorf("status = %q, want %q", resp.Status, "reloaded")
+	// Same-edition renewal applies live → status "active" (ADR-0038).
+	if resp.Status != reloadStatusActive {
+		t.Errorf("status = %q, want %q", resp.Status, reloadStatusActive)
 	}
 }
 
@@ -229,8 +228,11 @@ func TestHandleReload_SameEditionRenewal(t *testing.T) {
 	}
 }
 
+// TestHandleReload_UpgradeAppliedLive: a reload that RAISES the edition is applied
+// live (ADR-0038 Model C) — 200 active, manager upgrades, key persisted + broadcast.
+//
 //nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
-func TestHandleReload_UpgradeRejected(t *testing.T) {
+func TestHandleReload_UpgradeAppliedLive(t *testing.T) {
 	h := setupLicenseHandlerTest(t) // Community manager
 
 	proKey := license.SignTestLicense(license.Claims{
@@ -245,35 +247,39 @@ func TestHandleReload_UpgradeRejected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.HandleReload(rec, req)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusConflict, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	var resp editionChangeRejectedResponse
+	var resp licenseReloadResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Code != editionChangeCode {
-		t.Errorf("code = %q, want %q", resp.Code, editionChangeCode)
+	if resp.Status != reloadStatusActive {
+		t.Errorf("status = %q, want %q", resp.Status, reloadStatusActive)
 	}
-	if resp.CurrentEdition != license.Community.String() {
-		t.Errorf("current_edition = %q, want %q", resp.CurrentEdition, license.Community.String())
-	}
-	if resp.RequestedEdition != license.Pro.String() {
-		t.Errorf("requested_edition = %q, want %q", resp.RequestedEdition, license.Pro.String())
+	if resp.Edition != license.Pro.String() {
+		t.Errorf("edition = %q, want %q", resp.Edition, license.Pro.String())
 	}
 
-	// Manager state must be unchanged.
-	if h.manager.Edition() != license.Community {
-		t.Errorf("manager Edition() = %q after rejected upgrade, want Community", h.manager.Edition())
+	// Upgrade takes effect live, and the key is persisted + broadcast.
+	if h.manager.Edition() != license.Pro {
+		t.Errorf("manager Edition() = %q after upgrade, want Pro", h.manager.Edition())
+	}
+	if h.CurrentKey() != proKey {
+		t.Error("CurrentKey not updated — upgrade must persist + broadcast the new key")
 	}
 }
 
+// TestHandleReload_DowngradeDeferred: a reload that LOWERS the edition is accepted
+// (200 pending_restart), persisted + broadcast, but does NOT change the running
+// edition — it takes effect at the next restart (ADR-0038 Model C).
+//
 //nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
-func TestHandleReload_DowngradeRejected(t *testing.T) {
+func TestHandleReload_DowngradeDeferred(t *testing.T) {
 	h := setupLicenseHandlerTest(t)
 
-	// Pre-seed manager with Enterprise so we can test downgrade to Community.
+	// Pre-seed manager with Enterprise so we can push a Community downgrade.
 	enterpriseKey := license.SignTestLicense(license.Claims{
 		Edition: license.Enterprise,
 		Org:     "DowngradeOrg",
@@ -296,71 +302,113 @@ func TestHandleReload_DowngradeRejected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.HandleReload(rec, req)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusConflict, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	var resp editionChangeRejectedResponse
+	var resp licenseReloadResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Code != editionChangeCode {
-		t.Errorf("code = %q, want %q", resp.Code, editionChangeCode)
+	if resp.Status != reloadStatusPendingRestart {
+		t.Errorf("status = %q, want %q", resp.Status, reloadStatusPendingRestart)
 	}
-	if resp.CurrentEdition != license.Enterprise.String() {
-		t.Errorf("current_edition = %q, want %q", resp.CurrentEdition, license.Enterprise.String())
-	}
-	if resp.RequestedEdition != license.Community.String() {
-		t.Errorf("requested_edition = %q, want %q", resp.RequestedEdition, license.Community.String())
+	if resp.Edition != license.Community.String() {
+		t.Errorf("edition = %q, want %q (the accepted/pending key)", resp.Edition, license.Community.String())
 	}
 
-	// Manager state must be unchanged.
+	// The running edition is unchanged — downgrade deferred to restart...
 	if h.manager.Edition() != license.Enterprise {
-		t.Errorf("manager Edition() = %q after rejected downgrade, want Enterprise", h.manager.Edition())
+		t.Errorf("manager Edition() = %q after downgrade, want Enterprise (deferred to restart)", h.manager.Edition())
+	}
+	// ...but the key is still persisted + broadcast so the next restart boots it.
+	if h.CurrentKey() != communityKey {
+		t.Error("CurrentKey not updated — a deferred downgrade must still persist + broadcast the key")
+	}
+}
+
+// TestHandleReload_DeferredDowngrade_ThenOlderKeyRejected is the replay regression guard
+// for ADR-0038's deferral: once a downgrade is accepted+deferred (advancing the persisted
+// key without advancing the live manager), a subsequently pushed key whose iat is older
+// than the deferred one — but newer than the live manager's — must still be rejected as
+// replay, or it would overwrite the newer persisted key. Anchoring replay on the live
+// manager alone would wrongly accept it.
+//
+//nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
+func TestHandleReload_DeferredDowngrade_ThenOlderKeyRejected(t *testing.T) {
+	license.SetPublicKeyForTesting(testLicensePub)
+	mgr := license.NewTestManager(license.Community)
+	repo := provtestutil.NewMockLicenseStateStore()
+	h := NewLicenseHandler(mgr, repo, eventbus.New(zerolog.Nop()), zerolog.Nop())
+
+	future := time.Now().Add(365 * 24 * time.Hour).Unix()
+	// Boot the live manager to Enterprise@10.
+	ent := license.SignTestLicense(license.Claims{Edition: license.Enterprise, Org: "Org", Exp: future, Iat: 10}, testLicensePriv)
+	if err := h.manager.Reload(ent); err != nil {
+		t.Fatalf("seed Reload: %v", err)
+	}
+
+	post := func(key string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(licenseReloadRequest{Key: key})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/license", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.HandleReload(rec, req)
+		return rec
+	}
+
+	// Push Pro@20 — a downgrade vs live Enterprise → accepted + deferred (200), persisted.
+	proDown := license.SignTestLicense(license.Claims{Edition: license.Pro, Org: "Org", Exp: future, Iat: 20}, testLicensePriv)
+	if rec := post(proDown); rec.Code != http.StatusOK {
+		t.Fatalf("deferred downgrade status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Push Community@15 — OLDER than the deferred Pro@20, newer than live Enterprise@10.
+	// Must be rejected as replay (409).
+	commOld := license.SignTestLicense(license.Claims{Edition: license.Community, Org: "Org", Exp: future, Iat: 15}, testLicensePriv)
+	if rec := post(commOld); rec.Code != http.StatusConflict {
+		t.Fatalf("older key after deferral status = %d, want 409 (replay); body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The persisted key must still be the newer Pro@20, not overwritten by the older key.
+	got, _ := repo.Load(context.Background())
+	if got != proDown {
+		t.Error("persisted key was overwritten by an older key after a deferred downgrade")
 	}
 }
 
 //nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
-func TestHandleReload_CommunityNoKeyRejected(t *testing.T) {
-	h := setupLicenseHandlerTest(t) // Community manager with no startup license key
-
-	enterpriseKey := license.SignTestLicense(license.Claims{
-		Edition: license.Enterprise,
-		Org:     "EnterpriseOrg",
-		Exp:     time.Now().Add(365 * 24 * time.Hour).Unix(),
-		Iat:     time.Now().Unix(),
-	}, testLicensePriv)
-
-	body, _ := json.Marshal(licenseReloadRequest{Key: enterpriseKey})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/license", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	h.HandleReload(rec, req)
-
-	if rec.Code != http.StatusConflict {
-		t.Errorf("status = %d, want %d; body = %s", rec.Code, http.StatusConflict, rec.Body.String())
-	}
-}
-
-//nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
-func TestHandleReload_EditionCheckAfterSignatureCheck(t *testing.T) {
+func TestHandleReload_InvalidSignatureBeforeApply(t *testing.T) {
 	h := setupLicenseHandlerTest(t)
 
-	// Bad signature — must return 400, not 409 (confirming ordering: sig check before edition check).
+	// Bad signature — must return 400: signature verification precedes any apply.
 	body, _ := json.Marshal(licenseReloadRequest{Key: "not-a-valid-license"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/license", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.HandleReload(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d (sig check must precede edition check)", rec.Code, http.StatusBadRequest)
+		t.Errorf("status = %d, want %d (sig check must precede apply)", rec.Code, http.StatusBadRequest)
 	}
 }
 
+// TestHandleReload_DowngradeDeferredMetricIncrement: a deferred downgrade increments
+// the reloadDowngradeDeferred result counter (not reloadSuccess), at 200 OK.
+//
 //nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
-func TestHandleReload_EditionChangeMetricIncrement(t *testing.T) {
-	h := setupLicenseHandlerTest(t) // Community manager
+func TestHandleReload_DowngradeDeferredMetricIncrement(t *testing.T) {
+	h := setupLicenseHandlerTest(t)
 
-	before := testutil.ToFloat64(licenseReloadTotal.WithLabelValues(reloadEditionChange))
+	entKey := license.SignTestLicense(license.Claims{
+		Edition: license.Enterprise,
+		Org:     "MetricOrg",
+		Exp:     time.Now().Add(365 * 24 * time.Hour).Unix(),
+		Iat:     time.Now().Unix() - 2,
+	}, testLicensePriv)
+	if err := h.manager.Reload(entKey); err != nil {
+		t.Fatalf("pre-seed Reload() error = %v", err)
+	}
+
+	before := testutil.ToFloat64(licenseReloadTotal.WithLabelValues(reloadDowngradeDeferred))
 
 	proKey := license.SignTestLicense(license.Claims{
 		Edition: license.Pro,
@@ -374,27 +422,27 @@ func TestHandleReload_EditionChangeMetricIncrement(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.HandleReload(rec, req)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	after := testutil.ToFloat64(licenseReloadTotal.WithLabelValues(reloadEditionChange))
+	after := testutil.ToFloat64(licenseReloadTotal.WithLabelValues(reloadDowngradeDeferred))
 	if after != before+1 {
-		t.Errorf("licenseReloadTotal{result=%q} = %v, want %v", reloadEditionChange, after, before+1)
+		t.Errorf("licenseReloadTotal{result=%q} = %v, want %v", reloadDowngradeDeferred, after, before+1)
 	}
 }
 
+// TestHandleReload_AcceptedAuditLog: an accepted reload emits an audit log carrying
+// the admin actor and the accepted/live edition + status fields.
+//
 //nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
-func TestHandleReload_EditionChangeAuditLog(t *testing.T) {
+func TestHandleReload_AcceptedAuditLog(t *testing.T) {
 	license.SetPublicKeyForTesting(testLicensePub)
 
 	var logBuf bytes.Buffer
 	auditLogger := zerolog.New(&logBuf)
 
-	mgr, err := license.NewManager("", auditLogger)
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	mgr := license.NewTestManager(license.Community)
 	bus := eventbus.New(auditLogger)
 	repo := provtestutil.NewMockLicenseStateStore()
 	h := NewLicenseHandler(mgr, repo, bus, auditLogger)
@@ -411,12 +459,12 @@ func TestHandleReload_EditionChangeAuditLog(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.HandleReload(rec, req)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
 	logOutput := logBuf.String()
-	for _, want := range []string{`"audit":true`, `"current_edition"`, `"requested_edition"`} {
+	for _, want := range []string{`"audit":true`, `"accepted_edition"`, `"live_edition"`, `"status"`} {
 		if !bytes.Contains(logBuf.Bytes(), []byte(want)) {
 			t.Errorf("audit log missing field %q; log = %s", want, logOutput)
 		}

@@ -56,7 +56,7 @@ func main() {
 	}
 
 	if exp.Before(time.Now()) {
-		fmt.Fprintf(os.Stderr, "Warning: token expires in the past (%s). Sukko will degrade to Community edition.\n", exp.Format("2006-01-02"))
+		fmt.Fprintf(os.Stderr, "Warning: token expires in the past (%s). Sukko will refuse to boot with it — an expired key is rejected like a missing one (ADR-0038).\n", exp.Format("2006-01-02"))
 	}
 
 	iatValue := *iat

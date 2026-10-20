@@ -100,22 +100,19 @@ e2e_readiness_gate() {
 e2e_boot_cell() {
   local edition="$1" backend="$2" admin_key_path="$3" expiry="$4"
   shift 4
-  local token="" admin_key
+  local token admin_key
   # The source build below compiles with -tags sukko_e2e, which embeds sukko.dev.pub —
-  # so the dev keypair must exist for EVERY cell, including Community cells that mint no
-  # license (without this, their build fails at the //go:embed). Minting cells regenerate
-  # it too via e2e_mint_license; the guard is idempotent.
+  # so the dev keypair must exist for EVERY cell. e2e_mint_license regenerates it too;
+  # the guard is idempotent.
   e2e_ensure_dev_keypair
-  if [ "$edition" != "community" ]; then
-    echo "=== Mint $edition token, expiry=$expiry (before boot) ===" >&2
-    token=$(e2e_mint_license "$edition" "E2E ${edition}" "$expiry")
-  else
-    echo "=== Community cell — no license key (dev key still embedded for the sukko_e2e build) ===" >&2
-  fi
+  # EVERY edition now boots on a signed key, Community included (ADR-0038: Community is
+  # no longer the keyless default — an empty SUKKO_LICENSE_KEY is refused at startup).
+  echo "=== Mint $edition token, expiry=$expiry (before boot) ===" >&2
+  token=$(e2e_mint_license "$edition" "E2E ${edition}" "$expiry")
   admin_key=$(e2e_gen_admin_key "$admin_key_path")
   echo "=== Boot $backend-mode stack (build from source, edition=$edition) ===" >&2
-  # SUKKO_LICENSE_KEY empty ⇒ Community. MESSAGE_BACKEND=direct equals the Go
-  # default (a valid, non-empty value — safe through the compose bare-key passthrough).
+  # SUKKO_LICENSE_KEY carries the minted dev key for this edition. MESSAGE_BACKEND=direct
+  # equals the Go default (a valid, non-empty value — safe through the compose passthrough).
   MESSAGE_BACKEND="$backend" \
   SUKKO_LICENSE_KEY="$token" \
   ADMIN_BOOTSTRAP_KEY="$admin_key" \

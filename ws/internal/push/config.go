@@ -169,7 +169,7 @@ func LoadConfig(logger zerolog.Logger) (*Config, error) {
 
 	logger.Info().
 		Str("edition", mgr.Edition().String()).
-		Msg("Configuration loaded — edition resolved from license key (Community if no key set)")
+		Msg("Configuration loaded — edition resolved from license key")
 
 	return cfg, nil
 }
