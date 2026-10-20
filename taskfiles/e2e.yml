@@ -5,21 +5,33 @@
 # using sukko-cli against a local docker-compose deployment.
 #
 # Usage:
-#   task e2e:license              Run full matrix
-#   task e2e:license:setup        Start services
-#   task e2e:license:community    Test Community limits (no key)
-#   task e2e:license:pro          Test Pro limits + claims
-#   task e2e:license:enterprise   Test Enterprise (unlimited) + claims
-#   task e2e:license:expired      Test expired Pro → Community degradation
+#   task e2e:license              Run the published-image Community smoke
+#   task e2e:license:setup        Init the project
+#   task e2e:license:community    Boot the published images on the committed Community key + assert
 #   task e2e:license:teardown     Cleanup
+#
+# Community-ONLY by design (ADR-0038/0039). This matrix boots the real PUBLISHED images,
+# which trust only the production signing key. A Community key is not a secret, so the
+# prod-signed bench/CI Community key is committed below and this matrix proves the shipped
+# image boots and validates it. Pro/Enterprise are NOT here: a prod-signed paid key must
+# never be committed (it would unlock the paid tiers for anyone), and dev-signed keys do
+# not verify against the published images — the paid editions (and their suites) are
+# validated by the source-build `cell:*` grid (which builds with the dev key). The former
+# `expired` case is gone too: an expired key now refuses to boot (ADR-0038), covered by the
+# license-package unit tests.
 
 version: "3"
 
 vars:
   DEV_KEY_PATH: ws/internal/shared/license/keys/sukko.dev.key
   DEV_PUB_PATH: ws/internal/shared/license/keys/sukko.dev.pub
-  GENTOKEN_CMD: cd ws && go run ./internal/shared/license/gentoken
   PROVISIONING_URL: http://localhost:8080
+  # Committed prod-signed Community key for the published-image smoke (ADR-0038).
+  # NOT a secret: a Community key unlocks only the free tier, which is why it is
+  # committed. Minted via the license service admin API under the bench/CI org
+  # (org claim "Klurvio"), ~10-year expiry, and verifies against the production
+  # public key embedded in the published images. NEVER commit a Pro/Enterprise key.
+  COMMUNITY_LICENSE_KEY: "eyJlZGl0aW9uIjoiY29tbXVuaXR5Iiwib3JnIjoiS2x1cnZpbyIsImV4cCI6MjEwODExMjcyNSwiaWF0IjoxNzkyNDkzNTI2LCJsaW1pdHMiOnsiZWRpdGlvbiI6ImNvbW11bml0eSIsIm1heF90ZW5hbnRzIjozLCJtYXhfdG90YWxfY29ubmVjdGlvbnMiOjUwMCwibWF4X3NoYXJkcyI6MSwibWF4X3RvcGljc19wZXJfdGVuYW50IjoxMCwibWF4X3JvdXRpbmdfcnVsZXNfcGVyX3RlbmFudCI6MTB9fQ.e0nWF3QBfUHubE8_KvGmIfAV0jGT_ZR0hyt0qDKiMcDvNfeucuD9kuGTSey2d1wIR3o_5XP5BZWKwpenHwTQfA"
 
 env:
   # Build the license-embedding images with the dev public key embedded,
@@ -28,43 +40,28 @@ env:
   GO_BUILD_TAGS: sukko_e2e
 
 tasks:
-  # NOTE: this matrix boots via `sukko up`, which uses the sukko-cli's image-only compose
-  # (ghcr:latest, no build step) — so GO_BUILD_TAGS=sukko_e2e does NOT reach it and it
-  # validates whatever key the PUBLISHED images embed. It therefore cannot validate a
-  # pre-publish local branch's signing change; for local dev-key validation of license
-  # editions, use the SOURCE-build grid cells (task e2e:cell:pro-direct /
-  # enterprise-direct), which embed keys/sukko.dev.pub via the sukko_e2e build.
+  # NOTE: this matrix boots via `sukko up` (image-only compose, ghcr:latest, no build),
+  # so the top-level GO_BUILD_TAGS=sukko_e2e — which is for the source-build `cell:*`
+  # grid — does NOT reach it; it runs the real PUBLISHED images (production key). That is
+  # the point: it proves the shipped image boots and validates a real prod-signed key.
+  # Community-only by design — see the header block for why.
   license:
-    desc: Run full E2E license matrix (Community → Pro → Enterprise → Expired)
+    desc: Published-image Community smoke — boots the shipped images on the committed Community key
     cmds:
       - task: license:setup
       - task: license:community
-      - task: license:pro
-      - task: license:enterprise
-      - task: license:expired
       - task: license:teardown
 
   license:setup:
-    desc: Auto-generate dev keypair if missing, init and start services
+    desc: Init the project (no dev keypair needed — the smoke uses the committed prod Community key)
     cmds:
-      - |
-        # Regenerate when EITHER the private key OR the public key is missing: the
-        # sukko_e2e build embeds sukko.dev.pub, and a developer may have a stale
-        # sukko.dev.key without the matching .pub.
-        if [ ! -f "{{.DEV_KEY_PATH}}" ] || [ ! -f "{{.DEV_PUB_PATH}}" ]; then
-          echo "Dev keypair incomplete — generating..."
-          cd ws && go run ./internal/shared/license/genkeys
-        else
-          echo "Dev keypair exists"
-        fi
       - sukko init --defaults 2>/dev/null || true
-      - sukko up
 
   license:community:
-    desc: Test Community edition (no license key)
+    desc: Boot the published images on the committed Community key and assert edition=community
     cmds:
-      - echo "=== Testing Community edition (no key) ==="
-      - sukko license remove 2>/dev/null || true
+      - echo "=== Testing Community edition (committed prod Community key) ==="
+      - sukko license set "{{.COMMUNITY_LICENSE_KEY}}"
       - sukko down 2>/dev/null || true
       - sukko up
       - sleep 5
@@ -80,113 +77,6 @@ tasks:
       # Boundary tests
       - sukko test validate --suite edition-limits
       - echo "=== Community edition PASSED ==="
-
-  license:pro:
-    desc: Test Pro edition + claims assertion
-    vars:
-      TOKEN:
-        sh: "{{.GENTOKEN_CMD}} --key internal/shared/license/keys/sukko.dev.key --edition pro --org 'E2E Test' --expires +1y"
-    cmds:
-      - echo "=== Testing Pro edition ==="
-      - sukko license set "{{.TOKEN}}"
-      - sukko down 2>/dev/null || true
-      - sukko up
-      - sleep 5
-      # Claims assertion
-      - |
-        echo "Checking /edition claims..."
-        RESPONSE=$(curl -sf {{.PROVISIONING_URL}}/edition)
-        EDITION=$(echo "$RESPONSE" | jq -r '.edition')
-        ORG=$(echo "$RESPONSE" | jq -r '.org')
-        EXPIRED=$(echo "$RESPONSE" | jq -r '.expired')
-        MAX_TENANTS=$(echo "$RESPONSE" | jq -r '.limits.max_tenants')
-        if [ "$EDITION" != "pro" ]; then echo "FAIL: expected edition=pro, got $EDITION"; exit 1; fi
-        if [ "$ORG" != "E2E Test" ]; then echo "FAIL: expected org='E2E Test', got $ORG"; exit 1; fi
-        if [ "$EXPIRED" != "false" ]; then echo "FAIL: expected expired=false, got $EXPIRED"; exit 1; fi
-        if [ "$MAX_TENANTS" != "50" ]; then echo "FAIL: expected max_tenants=50, got $MAX_TENANTS"; exit 1; fi
-        echo "  edition: $EDITION ✓"
-        echo "  org: $ORG ✓"
-        echo "  expired: $EXPIRED ✓"
-        echo "  max_tenants: $MAX_TENANTS ✓"
-      # Boundary tests
-      - sukko test validate --suite edition-limits
-      - echo "=== Pro edition PASSED ==="
-
-  license:enterprise:
-    desc: Test Enterprise edition (unlimited) + claims assertion
-    vars:
-      TOKEN:
-        sh: "{{.GENTOKEN_CMD}} --key internal/shared/license/keys/sukko.dev.key --edition enterprise --org 'E2E Enterprise' --expires +1y"
-    cmds:
-      - echo "=== Testing Enterprise edition ==="
-      - sukko license set "{{.TOKEN}}"
-      - sukko down 2>/dev/null || true
-      - sukko up
-      - sleep 5
-      # Claims assertion — verify edition, org, and unlimited limits (0)
-      - |
-        echo "Checking /edition claims..."
-        RESPONSE=$(curl -sf {{.PROVISIONING_URL}}/edition)
-        EDITION=$(echo "$RESPONSE" | jq -r '.edition')
-        ORG=$(echo "$RESPONSE" | jq -r '.org')
-        EXPIRED=$(echo "$RESPONSE" | jq -r '.expired')
-        MAX_TENANTS=$(echo "$RESPONSE" | jq -r '.limits.max_tenants')
-        MAX_CONNECTIONS=$(echo "$RESPONSE" | jq -r '.limits.max_total_connections')
-        if [ "$EDITION" != "enterprise" ]; then echo "FAIL: expected edition=enterprise, got $EDITION"; exit 1; fi
-        if [ "$ORG" != "E2E Enterprise" ]; then echo "FAIL: expected org='E2E Enterprise', got $ORG"; exit 1; fi
-        if [ "$EXPIRED" != "false" ]; then echo "FAIL: expected expired=false, got $EXPIRED"; exit 1; fi
-        if [ "$MAX_TENANTS" != "0" ]; then echo "FAIL: expected max_tenants=0 (unlimited), got $MAX_TENANTS"; exit 1; fi
-        if [ "$MAX_CONNECTIONS" != "0" ]; then echo "FAIL: expected max_total_connections=0 (unlimited), got $MAX_CONNECTIONS"; exit 1; fi
-        echo "  edition: $EDITION ✓"
-        echo "  org: $ORG ✓"
-        echo "  expired: $EXPIRED ✓"
-        echo "  max_tenants: $MAX_TENANTS (unlimited) ✓"
-        echo "  max_total_connections: $MAX_CONNECTIONS (unlimited) ✓"
-      # Smoke test — create a few tenants, verify no rejection
-      - |
-        echo "Smoke test: creating tenants (should not be rejected)..."
-        for i in 1 2 3 4 5; do
-          if ! sukko tenant create "_e2e_enterprise_$i" "E2E Enterprise Test $i" 2>&1; then
-            echo "FAIL: tenant creation rejected — Enterprise should be unlimited"
-            exit 1
-          fi
-        done
-        echo "  5 tenants created without rejection ✓"
-      # Cleanup test tenants
-      - |
-        for i in 1 2 3 4 5; do
-          sukko tenant delete "_e2e_enterprise_$i" --force 2>/dev/null || true
-        done
-        echo "  test tenants cleaned up ✓"
-      - echo "=== Enterprise edition PASSED ==="
-
-  license:expired:
-    desc: Test expired Pro → Community degradation + claims assertion
-    vars:
-      TOKEN:
-        sh: "{{.GENTOKEN_CMD}} --key internal/shared/license/keys/sukko.dev.key --edition pro --org 'E2E Expired' --expires -1d 2>/dev/null"
-    cmds:
-      - echo "=== Testing expired Pro (Community degradation) ==="
-      - sukko license set "{{.TOKEN}}"
-      - sukko down 2>/dev/null || true
-      - sukko up
-      - sleep 5
-      # Claims assertion — should degrade to community with expired=true
-      - |
-        echo "Checking /edition claims..."
-        RESPONSE=$(curl -sf {{.PROVISIONING_URL}}/edition)
-        EDITION=$(echo "$RESPONSE" | jq -r '.edition')
-        EXPIRED=$(echo "$RESPONSE" | jq -r '.expired')
-        MAX_TENANTS=$(echo "$RESPONSE" | jq -r '.limits.max_tenants')
-        if [ "$EDITION" != "community" ]; then echo "FAIL: expected edition=community (degraded), got $EDITION"; exit 1; fi
-        if [ "$EXPIRED" != "true" ]; then echo "FAIL: expected expired=true, got $EXPIRED"; exit 1; fi
-        if [ "$MAX_TENANTS" != "3" ]; then echo "FAIL: expected max_tenants=3 (Community), got $MAX_TENANTS"; exit 1; fi
-        echo "  edition: $EDITION (degraded) ✓"
-        echo "  expired: $EXPIRED ✓"
-        echo "  max_tenants: $MAX_TENANTS (Community limit) ✓"
-      # Boundary tests — should enforce Community limits
-      - sukko test validate --suite edition-limits
-      - echo "=== Expired Pro degradation PASSED ==="
 
   license:teardown:
     desc: Cleanup after E2E tests
