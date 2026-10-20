@@ -135,6 +135,11 @@ func main() {
 		structuredLogger.Fatal().Err(licErr).Msg("Failed to create license watcher")
 	}
 
+	// Detect-to-warn expiry ticker — surfaces an expiring/expired license in the logs
+	// (it never downgrades or stops the service; ADR-0039).
+	expiryWatcher := license.NewExpiryWatcher(cfg.EditionManager(), structuredLogger)
+	defer expiryWatcher.Close()
+
 	rp, err := provapi.NewStreamChannelRulesProvider(provapi.StreamChannelRulesProviderConfig{
 		GRPCAddr:          cfg.ProvisioningGRPCAddr,
 		ReconnectDelay:    cfg.GRPCReconnectDelay,
