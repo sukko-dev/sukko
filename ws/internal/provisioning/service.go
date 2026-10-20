@@ -135,7 +135,7 @@ type ServiceConfig struct {
 	DeadLetterTopicRetentionMs  int64
 	InfraTopicReplicationFactor int // int (not int16) — cast to int16 at CreateTopic call sites
 
-	// EditionManager provides expiry-aware edition limits for runtime gates.
+	// EditionManager provides the booted edition limits.
 	// May be nil in tests — edition gates are skipped when nil.
 	EditionManager *license.Manager
 

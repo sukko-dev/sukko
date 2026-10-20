@@ -37,7 +37,7 @@ func TestReload_ValidEditionChange(t *testing.T) {
 		t.Fatalf("Reload: %v", err)
 	}
 
-	if got := m.CurrentEdition(); got != Pro {
+	if got := m.Edition(); got != Pro {
 		t.Errorf("edition = %s, want Pro", got)
 	}
 	if got := m.Org(); got != "Acme" {
@@ -63,7 +63,7 @@ func TestReload_ReplayRejected_SameIat(t *testing.T) {
 		t.Errorf("second Reload error = %v, want ErrReplayDetected", err)
 	}
 
-	if got := m.CurrentEdition(); got != Pro {
+	if got := m.Edition(); got != Pro {
 		t.Errorf("edition = %s, want Pro (unchanged)", got)
 	}
 }
@@ -97,7 +97,7 @@ func TestReload_FirstReload_NoCurrentIat(t *testing.T) {
 		t.Fatalf("Reload: %v (should accept any iat when current has none)", err)
 	}
 
-	if got := m.CurrentEdition(); got != Pro {
+	if got := m.Edition(); got != Pro {
 		t.Errorf("edition = %s, want Pro", got)
 	}
 }
@@ -117,7 +117,7 @@ func TestReload_InvalidKeyRejected_CurrentPreserved(t *testing.T) {
 		t.Fatal("expected error for invalid key")
 	}
 
-	if got := m.CurrentEdition(); got != Pro {
+	if got := m.Edition(); got != Pro {
 		t.Errorf("edition = %s, want Pro (unchanged after invalid reload)", got)
 	}
 }
@@ -145,7 +145,7 @@ func TestReload_DowngradeAccepted(t *testing.T) {
 	if err := m.Reload(key1); err != nil {
 		t.Fatalf("first Reload: %v", err)
 	}
-	if got := m.CurrentEdition(); got != Enterprise {
+	if got := m.Edition(); got != Enterprise {
 		t.Fatalf("edition = %s, want Enterprise", got)
 	}
 
@@ -153,7 +153,7 @@ func TestReload_DowngradeAccepted(t *testing.T) {
 	if err := m.Reload(key2); err != nil {
 		t.Fatalf("downgrade Reload: %v", err)
 	}
-	if got := m.CurrentEdition(); got != Pro {
+	if got := m.Edition(); got != Pro {
 		t.Errorf("edition = %s, want Pro (downgrade)", got)
 	}
 }

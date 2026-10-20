@@ -79,7 +79,7 @@ type LoadBalancerConfig struct {
 	// MetricsAggregationInterval controls how often shard metrics are aggregated.
 	MetricsAggregationInterval time.Duration
 
-	// EditionManager provides expiry-aware edition limits for /health capacity reporting.
+	// EditionManager provides the booted edition limits for /health capacity reporting.
 	// May be nil — edition-aware capacity is skipped when nil.
 	EditionManager *license.Manager
 
@@ -222,7 +222,7 @@ func (lb *LoadBalancer) aggregateMetrics() {
 	// Cap reported capacity to edition limit (monitoring/reporting only).
 	// Actual connection enforcement uses per-shard connectionsSem (sized at startup).
 	if lb.editionManager != nil {
-		editionMax := lb.editionManager.CurrentLimits().MaxTotalConnections
+		editionMax := lb.editionManager.Limits().MaxTotalConnections
 		if editionMax > 0 && totalMaxConnections > int64(editionMax) {
 			totalMaxConnections = int64(editionMax)
 		}
@@ -379,7 +379,7 @@ func (lb *LoadBalancer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	// Cap reported capacity to edition limit (monitoring/reporting only).
 	if lb.editionManager != nil {
-		editionMax := lb.editionManager.CurrentLimits().MaxTotalConnections
+		editionMax := lb.editionManager.Limits().MaxTotalConnections
 		if editionMax > 0 && totalMaxConnections > int64(editionMax) {
 			totalMaxConnections = int64(editionMax)
 		}

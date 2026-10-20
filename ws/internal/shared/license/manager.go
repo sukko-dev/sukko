@@ -28,20 +28,17 @@ type limitsHolder struct{ v Limits }
 
 // Manager resolves and provides the current edition, limits, and feature gates.
 //
-// It is created once at startup with NewManager and provides two sets of accessors:
+// It is created once at startup with NewManager. Its resolved Edition()/Limits()
+// are fixed at construction and are NOT downgraded mid-flight when the license
+// expires — a running server reports and gates on the edition it booted with.
+// Expiry is surfaced through Claims().IsExpired() (e.g. the /edition `expired`
+// flag), not by changing Edition()/Limits(). Accessors:
+//   - Edition() / Limits() — the booted edition and limits
+//   - HasFeature()         — uses Edition(), so gates track the booted edition
 //
-// Startup-resolved (never change after construction, even if license expires mid-flight):
-//   - Edition()
-//   - Limits()
-//   - HasFeature()  (uses Edition() — features remain active during grace period)
-//
-// Expiry-aware (for runtime gates — returns Community if license expired mid-flight):
-//   - CurrentEdition()
-//   - CurrentLimits()
-//
-// The expiry-aware methods check time.Now().Unix() > claims.Exp on every call.
-// This is an int comparison with zero overhead, and ensures Docker Compose
-// deployments detect license expiry without needing a restart.
+// (Note: a separate StreamLicenseWatcher path still triggers a graceful shutdown
+// some time after a key expires; ADR-0038 increment B removes that so expiry only
+// forces a re-key at the operator's next restart. This Manager never downgrades.)
 type Manager struct {
 	// Startup-resolved values (never change after construction).
 	edition atomic.Pointer[editionHolder]
@@ -123,43 +120,21 @@ func NewManager(licenseKey string, logger zerolog.Logger) (*Manager, error) {
 	return m, nil
 }
 
-// Edition returns the startup-resolved edition. Used by Config.Validate().
-// This value never changes after construction — even if the license expires mid-flight.
+// Edition returns the booted edition. Fixed at construction; never downgraded
+// mid-flight, even after the license expires.
 func (m *Manager) Edition() Edition {
 	return m.edition.Load().v
 }
 
-// Limits returns the startup-resolved limits. Used by Config.Validate().
-// This value never changes after construction.
+// Limits returns the booted limits. Fixed at construction; never downgraded
+// mid-flight.
 func (m *Manager) Limits() Limits {
 	return m.limits.Load().v
 }
 
-// CurrentEdition returns the expiry-aware edition.
-// Returns Community if the license has expired since startup.
-// Used by all runtime gates (provisioning API, LB health).
-func (m *Manager) CurrentEdition() Edition {
-	claims := m.loadClaims()
-	if claims != nil && claims.IsExpired() {
-		return Community
-	}
-	return m.edition.Load().v
-}
-
-// CurrentLimits returns the expiry-aware limits.
-// Returns Community defaults if the license has expired since startup.
-// Used by all runtime gates (provisioning API, LB health).
-func (m *Manager) CurrentLimits() Limits {
-	claims := m.loadClaims()
-	if claims != nil && claims.IsExpired() {
-		return DefaultLimits(Community)
-	}
-	return m.limits.Load().v
-}
-
-// HasFeature returns true if the startup-resolved edition includes the feature.
-// Uses Edition() (not CurrentEdition()) — feature gates remain active during the
-// expiry grace period. Shutdown is the enforcement mechanism, not feature revocation.
+// HasFeature returns true if the booted edition includes the feature. It uses
+// Edition(), so feature gates track the booted edition and are not revoked when
+// the license expires mid-flight — this Manager never downgrades.
 func (m *Manager) HasFeature(feature Feature) bool {
 	return EditionHasFeature(m.Edition(), feature)
 }

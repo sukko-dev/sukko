@@ -21,9 +21,6 @@ func TestNewManager_NoKey(t *testing.T) {
 	if m.Edition() != Community {
 		t.Errorf("Edition() = %q, want Community", m.Edition())
 	}
-	if m.CurrentEdition() != Community {
-		t.Errorf("CurrentEdition() = %q, want Community", m.CurrentEdition())
-	}
 	if m.Claims() != nil {
 		t.Error("Claims() should be nil for no-key Community")
 	}
@@ -55,9 +52,6 @@ func TestNewManager_ValidPro(t *testing.T) {
 	}
 	if m.Edition() != Pro {
 		t.Errorf("Edition() = %q, want Pro", m.Edition())
-	}
-	if m.CurrentEdition() != Pro {
-		t.Errorf("CurrentEdition() = %q, want Pro", m.CurrentEdition())
 	}
 	if m.Org() != "Acme" {
 		t.Errorf("Org() = %q, want Acme", m.Org())
@@ -110,9 +104,6 @@ func TestNewManager_ExpiredAtStartup(t *testing.T) {
 	if m.Edition() != Community {
 		t.Errorf("Edition() = %q, want Community (degraded)", m.Edition())
 	}
-	if m.CurrentEdition() != Community {
-		t.Errorf("CurrentEdition() = %q, want Community", m.CurrentEdition())
-	}
 
 	// Claims still available for debugging
 	if m.Claims() == nil {
@@ -153,29 +144,21 @@ func TestNewManager_MidFlightExpiry(t *testing.T) {
 	// Wait for the next second so time.Now().Unix() > claims.Exp
 	time.Sleep(1100 * time.Millisecond)
 
-	// After expiry: startup-resolved stays Pro, current-aware switches to Community
+	// After expiry: the booted values are HELD until restart — no mid-flight
+	// downgrade (ADR-0038). Edition, Limits, and features stay Pro; the only
+	// signal of lapse is Claims().IsExpired(), which reporting surfaces (the
+	// /edition `expired` flag) without lying about the enforced edition.
 	if m.Edition() != Pro {
-		t.Errorf("Edition() = %q, want Pro (startup-resolved, never changes)", m.Edition())
+		t.Errorf("Edition() = %q, want Pro (booted value held after expiry)", m.Edition())
 	}
-	if m.CurrentEdition() != Community {
-		t.Errorf("CurrentEdition() = %q, want Community (expired mid-flight)", m.CurrentEdition())
+	if m.Limits().MaxTenants != 50 {
+		t.Errorf("Limits().MaxTenants = %d, want 50 (booted Pro limits held)", m.Limits().MaxTenants)
 	}
-	// HasFeature uses Edition() (startup-resolved), so it returns true even after expiry —
-	// features remain active during the grace period; shutdown is the enforcement mechanism.
 	if !m.HasFeature(SSETransport) {
-		t.Error("HasFeature(SSETransport) should be true after expiry: Edition()=Pro (startup-resolved), grace period keeps features active")
+		t.Error("HasFeature(SSETransport) should stay true after expiry — features held until restart")
 	}
-
-	// CurrentLimits should be Community defaults
-	currentLimits := m.CurrentLimits()
-	if currentLimits.MaxTenants != 3 {
-		t.Errorf("CurrentLimits().MaxTenants = %d, want 3 (Community)", currentLimits.MaxTenants)
-	}
-
-	// Startup Limits should still be Pro
-	startupLimits := m.Limits()
-	if startupLimits.MaxTenants != 50 {
-		t.Errorf("Limits().MaxTenants = %d, want 50 (Pro, startup-resolved)", startupLimits.MaxTenants)
+	if c := m.Claims(); c == nil || !c.IsExpired() {
+		t.Error("Claims().IsExpired() should be true — the honest expiry signal")
 	}
 }
 
@@ -280,12 +263,13 @@ func TestManager_HasFeature(t *testing.T) {
 }
 
 //nolint:paralleltest // shares package-level publicKey via SetPublicKeyForTesting
-func TestHasFeature_UsesEditionNotCurrentEdition(t *testing.T) {
+func TestHasFeature_HeldAfterMidFlightExpiry(t *testing.T) {
 	priv, pub := GenerateTestKeyPair()
 	SetPublicKeyForTesting(pub)
 
 	// License valid at construction (current Unix second), expires after a short sleep.
-	// Edition() == Enterprise (startup-resolved), CurrentEdition() == Community (expiry-degraded).
+	// The booted Enterprise edition is held until restart (ADR-0038) — no mid-flight
+	// downgrade — so features stay active even once the key has lapsed.
 	claims := Claims{
 		Edition: Enterprise,
 		Org:     "MidFlightEnterprise",
@@ -299,18 +283,20 @@ func TestHasFeature_UsesEditionNotCurrentEdition(t *testing.T) {
 	}
 
 	if m.Edition() != Enterprise {
-		t.Fatalf("Edition() = %q, want Enterprise (startup-resolved) — license not yet expired at construction", m.Edition())
+		t.Fatalf("Edition() = %q, want Enterprise — license not yet expired at construction", m.Edition())
 	}
 
-	// Wait for the next second so time.Now().Unix() > claims.Exp
+	// Wait for the next second so time.Now().Unix() > claims.Exp.
 	time.Sleep(1100 * time.Millisecond)
 
-	if m.CurrentEdition() != Community {
-		t.Fatalf("CurrentEdition() = %q, want Community (expiry-degraded after sleep)", m.CurrentEdition())
+	// Expired mid-flight, but the booted edition and its features are held.
+	if c := m.Claims(); c == nil || !c.IsExpired() {
+		t.Fatal("precondition: license should be expired mid-flight")
 	}
-
-	// HasFeature uses Edition() — Enterprise features must remain active during grace period.
+	if m.Edition() != Enterprise {
+		t.Errorf("Edition() = %q, want Enterprise (booted edition held after expiry)", m.Edition())
+	}
 	if !m.HasFeature(MobilePush) {
-		t.Error("HasFeature(MobilePush) = false for mid-flight expired Enterprise license, want true: grace period keeps features active until shutdown")
+		t.Error("HasFeature(MobilePush) = false after mid-flight expiry, want true: features held until restart, not revoked")
 	}
 }
