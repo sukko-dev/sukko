@@ -100,6 +100,33 @@ func IsUnlimited(val int) bool {
 	return val == 0
 }
 
+// CoversAtLeast reports whether l grants at least as much capacity as other in
+// EVERY dimension — i.e. applying l in place of other would not reduce any limit.
+// A value of 0 means unlimited (the highest grant): unlimited covers any finite
+// value, and no finite value covers unlimited. Manager.ReloadNoDowngrade uses this
+// so a live reload that would lower capacity (a smaller Pro band, say Pro-30k →
+// Pro-Starter) is deferred to the next restart exactly like an edition downgrade
+// (ADR-0038 — a running server keeps the edition AND limits it booted with).
+func (l Limits) CoversAtLeast(other Limits) bool {
+	return dimensionCovers(l.MaxTenants, other.MaxTenants) &&
+		dimensionCovers(l.MaxTotalConnections, other.MaxTotalConnections) &&
+		dimensionCovers(l.MaxShards, other.MaxShards) &&
+		dimensionCovers(l.MaxTopicsPerTenant, other.MaxTopicsPerTenant) &&
+		dimensionCovers(l.MaxRoutingRulesPerTenant, other.MaxRoutingRulesPerTenant)
+}
+
+// dimensionCovers reports whether a "have" limit grants at least a "want" limit,
+// treating 0 as unlimited (the maximum).
+func dimensionCovers(have, want int) bool {
+	if IsUnlimited(have) {
+		return true
+	}
+	if IsUnlimited(want) {
+		return false
+	}
+	return have >= want
+}
+
 // checkCount checks "existing count before adding one more".
 // Used for tenants, topics — where current is the count and you're about to create another.
 // Fails if current >= max (at the limit = can't add).

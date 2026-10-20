@@ -210,21 +210,25 @@ Named anchor cells wrap the runner with their suite sets:
 
 | Cell (`task e2e:cell:<name>`) | Edition | Backend | Type | Suites / assertion |
 |---|---|---|---|---|
-| `community-direct` | Community (no license) | direct | positive | `channels pubsub ordering reconnect auth edition-limits rest-publish tenant-isolation provisioning api-key upgrade ratelimit` |
+| `community-direct` | Community | direct | positive | `channels pubsub ordering reconnect auth edition-limits rest-publish tenant-isolation provisioning api-key upgrade ratelimit` |
 | `pro-direct` | Pro | direct | positive | `channels pubsub ordering reconnect sse auth edition-limits rest-publish tenant-isolation provisioning token-revocation` |
 | `enterprise-direct` | Enterprise | direct | positive | `channels pubsub ordering reconnect sse auth edition-limits rest-publish` |
 | `pro-kafka` | Pro | kafka | positive | `channels pubsub ordering reconnect sse auth rest-publish tenant-isolation provisioning token-revocation history gap-recovery sse-recovery` |
 | `enterprise-kafka` | Enterprise | kafka | positive | `channels pubsub ordering reconnect sse auth rest-publish` |
-| `community-kafka` | Community (no license) | kafka | positive | `channels auth edition-limits kafka-ingest history gap-recovery` — the ADR-0009 boot + gate surface AND the license-free ingest→fan-out, history, and gap-recovery delivery proofs on Community+kafka (`sse-recovery` is Pro-gated, so it runs on `pro-kafka` only) |
-| `expired-direct` | Pro, expired (`-1d`) → Community | direct | degradation | gate `edition=community`+`expired=true`; suite `edition-limits` |
-| `community-direct-sentinel` | Community (no license) | direct (Valkey **Sentinel** topology) | positive + chaos (P2) | `channels pubsub ordering reconnect` + sentinel positive controls; P2 kills the master and asserts recovery (§2.20) |
+| `community-kafka` | Community | kafka | positive | `channels auth edition-limits kafka-ingest history gap-recovery` — the ADR-0009 boot + gate surface AND the license-free ingest→fan-out, history, and gap-recovery delivery proofs on Community+kafka (`sse-recovery` is Pro-gated, so it runs on `pro-kafka` only) |
+| `community-direct-sentinel` | Community | direct (Valkey **Sentinel** topology) | positive + chaos (P2) | `channels pubsub ordering reconnect` + sentinel positive controls; P2 kills the master and asserts recovery (§2.20) |
 | `pro-webhooks` | Pro | kafka | positive | `webhooks` — boots the webhook-worker (`--profile pro`) and runs the webhook delivery suite (happy-path, retry-on-failure, degraded-state) |
 
 Every edition×backend combination is covered by a positive cell (the kafka backend is
 Community per ADR-0009 — `community-kafka` proves the free tier boots on it, its gate
-surface holds, and the ingest path delivers) or degradation-tested (`expired-direct` — an expired Pro license degrades to
-Community and its limits are enforced). Expired×kafka is not a cell: a degraded-Community
-stack on kafka is mechanically identical to `community-kafka`. **`sse` is Pro-gated**, so
+surface holds, and the ingest path delivers). Every cell — Community included — boots on
+a dev-signed license key minted before boot (ADR-0038: Community is no longer the keyless
+default, so an empty `SUKKO_LICENSE_KEY` is refused at startup). There is **no expired
+cell**: an expired key is now refused at startup rather than degrading to Community, so a
+stack cannot boot on one — the "expired refuses to boot" behavior is covered by Go unit
+tests (`license.TestNewManager_ExpiredAtStartup`, the provisioning resolve/config tests),
+and Community limit enforcement is proven by `community-direct`'s `edition-limits` checks.
+**`sse` is Pro-gated**, so
 it is omitted from the Community cells (where the feature gate rejects the SSE connect) and
 covered on every paid cell — including `pro-direct`/`enterprise-direct`, which restore
 `sse`-on-direct coverage. `rest-publish` is **Community** (`/api/v1/publish` is ungated,
@@ -249,7 +253,7 @@ delivery suite uses), replacing a fixed sleep.
 
 **`provisioning` gating.** The suite (CRUD + e2e-unique routing-rules coverage, §2.11) is gated into
 `community-direct`, `pro-kafka`, and `pro-direct` — never the `enterprise-*` cells (Enterprise exercises the
-identical routing code path, no new coverage) or `expired-direct`/`community-kafka`. The topic registry is
+identical routing code path, no new coverage) or `community-kafka`. The topic registry is
 noop-backed on both backends (`provisioning/main.go`), so `pro-direct` gates identically to `pro-kafka`;
 both cells `REQUIRE_PASS` every routing check and
 `ALLOWED_SKIPS` the Enterprise-gated `get audit log`. On `community-direct` only the Pro/Enterprise-gated CRUD checks (`get/update quota`,
@@ -306,17 +310,17 @@ because the SSE transport is Pro-gated (§2.9); the recovery itself adds no furt
 shared 100-connection test cap). The kafka compose override sets `WS_HISTORY_ENABLED=true`
 (default is off) so the history writer runs on every kafka cell.
 
-**Degradation cell (`expired-direct`).** Mints a Pro token already expired by `-1d`; the
-readiness gate asserts `/edition` reports `edition=community` AND `expired=true` before any
-suite runs. Its `edition-limits` run then proves the downgraded Community limits are
-actually enforced — a `REQUIRE_PASS` input forces the Community-only `tenant limit
-rejection` check to be present-and-`pass` (that check is legitimately absent on the
-unlimited Enterprise path, so it cannot live in the shared verdict).
+**No expired/degradation cell.** Under ADR-0038 an expired key is refused at startup
+rather than degrading to Community, so a stack cannot boot on an expired license — there
+is no running stack for a cell to assert against. The "expired key refuses to boot"
+behavior is covered by Go unit tests (`license.TestNewManager_ExpiredAtStartup` and the
+provisioning resolve/config tests), and the Community limits that the old degradation cell
+exercised are proven by `community-direct`'s `edition-limits` `REQUIRE_PASS` checks.
 
 **CI cadence:** a **push to `main`** runs the **smoke cells** — `community-direct` +
 `pro-kafka` (one positive cell per backend) + `community-kafka` (the ADR-0009 boot +
 gate-surface cell) — as the `e2e-grid` matrix; the **nightly schedule** and **manual
-`workflow_dispatch`** run the **full grid** (all nine cells, including
+`workflow_dispatch`** run the **full grid** (all eight cells, including
 `community-direct-sentinel` and `pro-webhooks`). The cell list is computed by
 the `e2e-grid-setup` job — later specs add cells by editing that list plus a named cell
 task. The `e2e-guard-fixtures` job runs the anti-vacuous guard fixture tests (no Docker,

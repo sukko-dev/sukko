@@ -105,11 +105,9 @@ func main() {
 
 	structuredLogger.Info().Int("gomaxprocs", runtime.GOMAXPROCS(0)).Msg("GOMAXPROCS set by Go runtime (container-aware)")
 
-	// Log edition
-	structuredLogger.Info().
-		Str("edition", cfg.EditionManager().Edition().String()).
-		Str("org", cfg.EditionManager().Org()).
-		Msg("Sukko edition resolved")
+	// The edition is logged after the license is resolved below — under ADR-0038
+	// tolerance the env-derived manager may be nil here (empty/expired env key), and
+	// the effective edition is only known once the DB key is folded in.
 	if cfg.WebhookAllowHTTP {
 		structuredLogger.Warn().Msg("WEBHOOK_ALLOW_HTTP=true: plain-HTTP delivery enabled — webhook payloads and signatures transmitted without TLS")
 	}
@@ -193,25 +191,35 @@ func main() {
 	}
 	licenseStateRepo := repository.NewLicenseStateRepository(pool, encryptionKey)
 
-	// Load license from DB (takes precedence over env var).
-	// The Manager was already created from SUKKO_LICENSE_KEY during config loading.
-	// If a newer key exists in DB (from a previous webhook reload), reload the Manager.
-	var currentLicenseKey string
-	if dbKey, err := licenseStateRepo.Load(ctx); err != nil {
-		structuredLogger.Warn().Err(err).Msg("failed to load license from DB, using env var")
-	} else if dbKey != "" {
-		if err := cfg.EditionManager().Reload(dbKey); err != nil {
-			structuredLogger.Warn().Err(err).Msg("DB license key failed reload, using env var")
-		} else {
-			currentLicenseKey = dbKey
-			structuredLogger.Info().
-				Str("edition", cfg.EditionManager().Edition().String()).
-				Msg("license loaded from DB (takes precedence over SUKKO_LICENSE_KEY)")
-		}
+	// Resolve the effective license: the DB-persisted key (from a prior webhook
+	// reload) takes precedence over SUKKO_LICENSE_KEY. A missing/expired env key is
+	// NOT fatal here — provisioning is the license source and may boot from the DB
+	// key alone (e.g. the env key rotated out and expired). Only "no valid license
+	// from either source" is fatal (ADR-0038) — this is provisioning's fail-fast gate.
+	dbKey, dbErr := licenseStateRepo.Load(ctx)
+	if dbErr != nil {
+		structuredLogger.Warn().Err(dbErr).Msg("failed to load license from DB, using env var")
+		dbKey = ""
 	}
-	if currentLicenseKey == "" {
-		currentLicenseKey = cfg.LicenseKey // fall back to env var
+	mgr, currentLicenseKey, err := resolveProvisioningLicense(cfg.EditionManager(), cfg.LicenseKey, dbKey, structuredLogger)
+	if err != nil {
+		structuredLogger.Fatal().Err(err).Msg("provisioning requires a valid license: set SUKKO_LICENSE_KEY to an account-issued key")
 	}
+	cfg.SetEditionManager(mgr)
+
+	// Re-validate edition-gated fields now that the effective edition is known — the
+	// DB-persisted key may be a higher edition than the env key (or the only license),
+	// so Pro/Enterprise webhook-worker fields must be validated before that server
+	// starts, rather than silently started unvalidated (ADR-0038).
+	if err := cfg.ValidateEdition(); err != nil {
+		structuredLogger.Fatal().Err(err).Msg("edition-gated config validation failed")
+	}
+
+	// Log the effective edition now that the license is resolved (env + DB folded in).
+	structuredLogger.Info().
+		Str("edition", mgr.Edition().String()).
+		Str("org", mgr.Org()).
+		Msg("Sukko edition resolved")
 
 	// Kafka admin disabled — topic creation is handled by ws-server's KafkaBackend
 	kafkaAdmin := provisioning.NewNoopKafkaAdmin()

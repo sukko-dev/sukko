@@ -1,6 +1,7 @@
 package push
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -163,9 +164,11 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_CommunityStart asserts that LoadConfig with no license key
-// fails with the edition gate error — push-service requires Pro or higher (WebPush, ADR-0009).
-func TestLoadConfig_CommunityStart(t *testing.T) {
+// TestLoadConfig_EmptyKey_Refused: an empty SUKKO_LICENSE_KEY is refused at
+// startup (ADR-0038 — Community is no longer keyless), before the Pro-gate even
+// runs. The Pro-gate rejection of a real Community key is covered separately by
+// TestLoadConfig_EnterpriseGate_CommunityKey.
+func TestLoadConfig_EmptyKey_Refused(t *testing.T) {
 	// Set required env vars so env.Parse succeeds.
 	t.Setenv("PROVISIONING_GRPC_ADDR", "localhost:9090")
 	t.Setenv("MESSAGE_BACKEND", "kafka")
@@ -175,11 +178,8 @@ func TestLoadConfig_CommunityStart(t *testing.T) {
 	t.Setenv("SUKKO_LICENSE_KEY", "") // explicitly empty — no key
 
 	_, err := LoadConfig(zerolog.Nop())
-	if err == nil {
-		t.Fatal("LoadConfig with empty license key must return an error — push-service requires Pro or higher (WebPush)")
-	}
-	if !strings.Contains(err.Error(), "push-service requires a Pro license or higher") {
-		t.Errorf("expected edition gate error, got: %v", err)
+	if !errors.Is(err, license.ErrNoLicense) {
+		t.Fatalf("LoadConfig with empty key = %v, want ErrNoLicense (Community is no longer keyless)", err)
 	}
 }
 
@@ -191,21 +191,6 @@ func enterpriseGateEnvVars(t *testing.T) {
 	t.Setenv("KAFKA_BROKERS", "localhost:19092")
 	t.Setenv("KAFKA_TOPIC_NAMESPACE", "local")
 	t.Setenv("DATABASE_URL", "postgres://localhost:5432/push")
-}
-
-// TestLoadConfig_EnterpriseGate_EmptyKey verifies that LoadConfig returns an error
-// when no license key is set — push-service requires Pro or higher (WebPush, ADR-0009).
-func TestLoadConfig_EnterpriseGate_EmptyKey(t *testing.T) {
-	enterpriseGateEnvVars(t)
-	t.Setenv("SUKKO_LICENSE_KEY", "")
-
-	_, err := LoadConfig(zerolog.Nop())
-	if err == nil {
-		t.Fatal("LoadConfig with empty key must return the edition gate error")
-	}
-	if !strings.Contains(err.Error(), "push-service requires a Pro license or higher") {
-		t.Errorf("expected edition gate error, got: %v", err)
-	}
 }
 
 // TestLoadConfig_EnterpriseGate_CommunityKey verifies that a Community key is rejected (Pro+ passes).

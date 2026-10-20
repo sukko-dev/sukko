@@ -177,6 +177,28 @@ func (c *ProvisioningConfig) EditionManager() *license.Manager {
 	return c.editionManager
 }
 
+// SetEditionManager sets the resolved license manager. main calls this after it
+// resolves the effective license (DB-persisted key takes precedence over the env
+// key) — in particular when the env key alone did not yield a usable manager.
+func (c *ProvisioningConfig) SetEditionManager(m *license.Manager) {
+	c.editionManager = m
+}
+
+// resolveEnvLicenseManager builds the license manager from the env key, tolerating a
+// missing or expired key (returns nil, nil) — provisioning resolves the DB-persisted
+// key in main (ADR-0038) — while treating any other validation failure (notably an
+// invalid signature) as fatal: a corrupt or forged key is never tolerated.
+func resolveEnvLicenseManager(key string, logger zerolog.Logger) (*license.Manager, error) {
+	mgr, err := license.NewManager(key, logger)
+	if err != nil {
+		if errors.Is(err, license.ErrNoLicense) || errors.Is(err, license.ErrLicenseExpired) {
+			return nil, nil //nolint:nilnil // intentional: tolerated absence, resolved from DB in main
+		}
+		return nil, fmt.Errorf("license: %w", err)
+	}
+	return mgr, nil
+}
+
 // LoadProvisioningConfig reads provisioning service configuration from .env file
 // and environment variables.
 // Priority: ENV vars > .env file > defaults
@@ -196,11 +218,17 @@ func LoadProvisioningConfig(logger zerolog.Logger) (*ProvisioningConfig, error) 
 	}
 
 	// Create license manager before validation — Validate() uses edition gates.
-	mgr, err := license.NewManager(cfg.LicenseKey, logger)
+	// §XVIII deviation (documented): unlike server/gateway/push, provisioning does
+	// NOT fail fast here on a missing/expired env key. It is the license source and
+	// resolves the DB-persisted key (which takes precedence) in main; a nil manager
+	// here means "the env key alone yielded no usable license", and main builds from
+	// the DB key or fails if neither source is valid (ADR-0038). An invalid
+	// *signature* is still fatal — a corrupt/forged key is never tolerated.
+	mgr, err := resolveEnvLicenseManager(cfg.LicenseKey, logger)
 	if err != nil {
-		return nil, fmt.Errorf("license: %w", err)
+		return nil, err
 	}
-	cfg.editionManager = mgr
+	cfg.editionManager = mgr // nil when the env key is absent/expired; resolved from DB in main
 
 	// Canonicalize the topic namespace (trim + lowercase) before Validate() so the allowlist
 	// check and BuildTopicName reads agree.
@@ -423,20 +451,8 @@ func (c *ProvisioningConfig) Validate() error {
 	if c.MaxWebhooksPerTenant < 1 || c.MaxWebhooksPerTenant > 100 {
 		return fmt.Errorf("MAX_WEBHOOKS_PER_TENANT must be between 1 and 100, got %d", c.MaxWebhooksPerTenant)
 	}
-	// WebhookInternalToken, WebhookWorkerGRPCAddr, and WebhookDowngradePollInterval are only
-	// required for Pro/Enterprise. Community deployments have no webhook-worker.
-	// Inverted from the Valkey pattern (nil||hasFeature): gate keeps Community/test configs
-	// from being forced to set webhook fields they never use.
-	if c.editionManager != nil && license.EditionHasFeature(c.editionManager.Edition(), license.Webhooks) {
-		if err := c.WebhookInternalTokenConfig.Validate(); err != nil {
-			return fmt.Errorf("Pro/Enterprise edition: %w", err)
-		}
-		if c.WebhookWorkerGRPCAddr == "" {
-			return errors.New("WEBHOOK_WORKER_GRPC_ADDR is required for Pro/Enterprise editions")
-		}
-		if c.WebhookDowngradePollInterval < time.Minute || c.WebhookDowngradePollInterval > time.Hour {
-			return fmt.Errorf("WEBHOOK_DOWNGRADE_POLL_INTERVAL must be between 1m and 1h, got %s", c.WebhookDowngradePollInterval)
-		}
+	if err := c.validateEditionGated(); err != nil {
+		return err
 	}
 
 	// Admin UI — validated even when disabled=false; all constraints are opt-in.
@@ -456,6 +472,40 @@ func (c *ProvisioningConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// validateEditionGated validates config fields that are only required for the
+// resolved edition's feature set — currently the webhook-worker fields, which are
+// Pro/Enterprise only (Community has no webhook-worker). It is a no-op when
+// editionManager is nil or the edition lacks the feature.
+//
+// Inverted from the Valkey pattern (nil||hasFeature): this gate keeps Community/test
+// configs from being forced to set webhook fields they never use. Validate() runs it
+// for the env-resolved manager; main re-runs it via ValidateEdition after folding in
+// the DB-persisted key, so a Pro/Enterprise edition resolved only from the DB still
+// has its webhook fields validated rather than silently started unvalidated (ADR-0038).
+func (c *ProvisioningConfig) validateEditionGated() error {
+	if c.editionManager != nil && license.EditionHasFeature(c.editionManager.Edition(), license.Webhooks) {
+		if err := c.WebhookInternalTokenConfig.Validate(); err != nil {
+			return fmt.Errorf("Pro/Enterprise edition: %w", err)
+		}
+		if c.WebhookWorkerGRPCAddr == "" {
+			return errors.New("WEBHOOK_WORKER_GRPC_ADDR is required for Pro/Enterprise editions")
+		}
+		if c.WebhookDowngradePollInterval < time.Minute || c.WebhookDowngradePollInterval > time.Hour {
+			return fmt.Errorf("WEBHOOK_DOWNGRADE_POLL_INTERVAL must be between 1m and 1h, got %s", c.WebhookDowngradePollInterval)
+		}
+	}
+	return nil
+}
+
+// ValidateEdition re-runs the edition-gated validation after the effective license
+// manager has been set. main MUST call it after SetEditionManager, because the
+// DB-persisted key resolved there may be a higher edition than the env key (or the
+// only license at all), and its edition-specific fields must be validated before the
+// corresponding subsystems (e.g. the webhook-worker gRPC server) start.
+func (c *ProvisioningConfig) ValidateEdition() error {
+	return c.validateEditionGated()
 }
 
 // Print logs provisioning configuration for debugging (human-readable format).

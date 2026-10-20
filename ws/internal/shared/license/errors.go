@@ -11,6 +11,11 @@ const UpgradeURL = "https://docs.sukko.dev/editions/upgrade"
 
 // Sentinel errors for license validation failures.
 var (
+	// ErrNoLicense indicates no license key was provided. Community is no longer
+	// keyless-by-default (ADR-0038): every service requires an account-issued key,
+	// so an empty key fails construction and the service fails fast at startup.
+	ErrNoLicense = errors.New("no license key: Community requires a free account-issued license — set SUKKO_LICENSE_KEY (get one at " + UpgradeURL + ")")
+
 	// ErrLicenseExpired indicates the license key has passed its expiration date.
 	ErrLicenseExpired = errors.New("license expired")
 

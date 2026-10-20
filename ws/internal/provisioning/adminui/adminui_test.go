@@ -42,10 +42,7 @@ func buildHandler(t *testing.T, token string, edMgr *license.Manager) *adminui.H
 // (Pro/Enterprise testing requires a signed license key — not available in unit tests.)
 func buildProEditionManager(t *testing.T) *license.Manager {
 	t.Helper()
-	mgr, err := license.NewManager("", zerolog.Nop())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	mgr := license.NewTestManager(license.Community)
 	return mgr
 }
 

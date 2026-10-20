@@ -48,9 +48,11 @@ global:
   # service (GATEWAY_PUSH_ENABLED). False = routes absent (404).
   pushEnabled: false
 
-  # License key for Pro/Enterprise editions.
+  # License key — REQUIRED for every edition, Community included (ADR-0038). Each
+  # service refuses to start without a valid key, so this secret must be set before
+  # deploy; an empty value crash-loops the pods. Community keys are issued free per
+  # account at https://docs.sukko.dev/editions/upgrade.
   # Create the secret: kubectl create secret generic sukko-license --from-literal=license-key=eyJ...
-  # Leave empty for Community Edition (no license required).
   license:
     existingSecret: ""
     existingSecretKey: "license-key"

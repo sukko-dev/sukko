@@ -32,8 +32,8 @@ tasks:
   # (ghcr:latest, no build step) — so GO_BUILD_TAGS=sukko_e2e does NOT reach it and it
   # validates whatever key the PUBLISHED images embed. It therefore cannot validate a
   # pre-publish local branch's signing change; for local dev-key validation of license
-  # editions, use the SOURCE-build grid cells (task e2e:cell:pro-direct / enterprise-direct
-  # / expired-direct), which embed keys/sukko.dev.pub via the sukko_e2e build.
+  # editions, use the SOURCE-build grid cells (task e2e:cell:pro-direct /
+  # enterprise-direct), which embed keys/sukko.dev.pub via the sukko_e2e build.
   license:
     desc: Run full E2E license matrix (Community → Pro → Enterprise → Expired)
     cmds:
@@ -363,9 +363,9 @@ tasks:
       # Optional per-cell inputs (all explicit, single-source defaults — §I/§XV). No mode is
       # inferred: EXPECT_EXPIRED is never derived from the sign of EXPIRY, EXPECT_EDITION is
       # never re-derived from EDITION at the call site.
-      EXPIRY: '{{.EXPIRY | default "+1y"}}'                 # license expiry passed to gentoken --expires (-1d degrades the expired cell)
-      EXPECT_EDITION: '{{.EXPECT_EDITION | default .EDITION}}' # edition the readiness gate asserts (expired cell mints pro, expects community)
-      EXPECT_EXPIRED: '{{.EXPECT_EXPIRED | default "false"}}'  # .expired flag the readiness gate asserts (true only on the expired cell)
+      EXPIRY: '{{.EXPIRY | default "+1y"}}'                 # license expiry passed to gentoken --expires (every cell mints a +1y key)
+      EXPECT_EDITION: '{{.EXPECT_EDITION | default .EDITION}}' # edition the readiness gate asserts (defaults to EDITION)
+      EXPECT_EXPIRED: '{{.EXPECT_EXPIRED | default "false"}}'  # .expired flag the readiness gate asserts (always false — an expired key can no longer boot, ADR-0038)
       ALLOWED_SKIPS: '{{.ALLOWED_SKIPS | default ""}}'        # ;-separated <suite>:<check> skips tolerated by the anti-vacuous verdict
       REQUIRE_PASS: '{{.REQUIRE_PASS | default ""}}'          # ;-separated <suite>:<check> checks required present-and-pass
       EXTRA_PROFILES: '{{.EXTRA_PROFILES | default ""}}'      # extra compose profiles to start (e.g. "--profile pro" to boot the webhook-worker)
@@ -590,23 +590,13 @@ tasks:
           # checks (no api-key/tenant-isolation suite on this cell) → require each present-and-pass.
           REQUIRE_PASS: "rest-publish:rest publish → ws receive;rest-publish:rest publish mid equality;rest-publish:rest publish → sse receive;pubsub:publish auth rejection;pubsub:group subscribe denied;pubsub:user subscribe denied"
 
-  cell:expired-direct:
-    desc: "Grid cell — expired Pro → Community degradation (direct); proves Community limits bite."
-    cmds:
-      - task: cell
-        # Mint a Pro token that is already expired (-1d): the stack degrades to Community, so the
-        # gate expects edition=community + expired=true. REQUIRE_PASS forces the Community-only
-        # `tenant limit rejection` check to be present-and-pass (it is absent on the unlimited path,
-        # so it cannot live in the shared verdict) — proving the downgraded limit is actually enforced.
-        vars:
-          EDITION: pro
-          BACKEND: direct
-          SUITES: "edition-limits"
-          EXPIRY: "-1d"
-          EXPECT_EDITION: community
-          EXPECT_EXPIRED: "true"
-          ALLOWED_SKIPS: "edition-limits:connection limit rejection"
-          REQUIRE_PASS: "edition-limits:tenant limit rejection"
+  # NOTE: there is no `expired-direct` grid cell. Under ADR-0038 an expired key is
+  # refused at startup (it no longer degrades to Community), so a stack cannot BOOT on
+  # an expired license — there is nothing for a source-build cell to assert at runtime.
+  # The "expired key refuses to boot" behavior is covered by Go unit tests
+  # (license.TestNewManager_ExpiredAtStartup, the provisioning resolve/config tests),
+  # and Community limit enforcement is proven by cell:community-direct's edition-limits
+  # REQUIRE_PASS checks.
 
   cell:community-kafka:
     desc: >-

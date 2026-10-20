@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,26 +36,25 @@ var (
 
 // License reload result labels (Prometheus metric label values).
 const (
-	reloadSuccess          = "success"
-	reloadInvalidSignature = "invalid_signature"
-	reloadExpired          = "expired"
-	reloadReplay           = "replay_detected"
-	reloadInvalidFormat    = "invalid_format"
-	reloadInternalError    = "internal_error"
-	reloadEditionChange    = "edition_change_rejected"
-	reloadRateLimited      = "rate_limited"
+	reloadSuccess           = "success"            // upgrade/renewal applied live
+	reloadDowngradeDeferred = "downgrade_deferred" // valid downgrade stored + broadcast, applies at next restart
+	reloadInvalidSignature  = "invalid_signature"
+	reloadExpired           = "expired"
+	reloadReplay            = "replay_detected"
+	reloadInvalidFormat     = "invalid_format"
+	reloadInternalError     = "internal_error"
+	reloadRateLimited       = "rate_limited"
 )
 
-// editionChangeCode is the API error code returned when a reload is rejected due to an edition change.
-const editionChangeCode = "EDITION_CHANGE_REQUIRES_RESTART"
-
-// editionChangeRejectedResponse is the JSON body for HTTP 409 edition-change rejections.
-type editionChangeRejectedResponse struct {
-	Code             string `json:"code"`
-	Message          string `json:"message"`
-	CurrentEdition   string `json:"current_edition"`
-	RequestedEdition string `json:"requested_edition"`
-}
+// Reload response status values (the `status` field of licenseReloadResponse).
+const (
+	// reloadStatusActive means the key took effect immediately (upgrade or renewal).
+	reloadStatusActive = "active"
+	// reloadStatusPendingRestart means the key is valid, stored, and broadcast but
+	// lowers the edition, so it does not change this running process — it takes effect
+	// at the next restart (ADR-0038 Model C). The running edition is unchanged.
+	reloadStatusPendingRestart = "pending_restart"
+)
 
 const (
 	licenseReloadTokenInterval = 6 * time.Second
@@ -71,6 +71,12 @@ type LicenseHandler struct {
 	currentKeyMu sync.Mutex // guards currentKey read/write
 	currentKey   string     // raw key string for WatchLicense snapshot
 	rateLimiter  *ipRateLimiter
+
+	// acceptedIat is the iat of the most recently ACCEPTED (persisted) key. A deferred
+	// downgrade advances the persisted key without advancing the live manager, so replay
+	// protection anchors on max(this, live manager iat) — otherwise an older key could
+	// overwrite the newer persisted one (ADR-0038). 0 until the first API reload.
+	acceptedIat atomic.Int64
 }
 
 // ipRateLimiterMaxEntries caps the per-IP rate limiter map to prevent unbounded growth.
@@ -146,7 +152,11 @@ type licenseReloadRequest struct {
 	Key string `json:"key"`
 }
 
-// licenseReloadResponse is the JSON response on successful reload.
+// licenseReloadResponse is the JSON response on an accepted reload (HTTP 200).
+// Edition/Org/ExpiresAt describe the key that was accepted and stored. Status is
+// "active" when it took effect live (upgrade/renewal) or "pending_restart" when it
+// is a valid downgrade that was stored and broadcast but takes effect only at the
+// next restart — in which case the running edition is unchanged (ADR-0038).
 type licenseReloadResponse struct {
 	Edition   string `json:"edition"`
 	Org       string `json:"org"`
@@ -197,85 +207,87 @@ func (h *LicenseHandler) HandleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Explicit replay pre-check: ensures ordering sig → replay → edition → Reload().
-	if current := h.manager.Claims(); current != nil && current.Iat > 0 && incomingClaims.Iat <= current.Iat {
+	// Explicit replay pre-check (ordering sig → replay → apply): reject a key whose iat
+	// is not newer than the most recently ACCEPTED key. The anchor is the max of the
+	// last accepted/persisted iat and the live manager's iat — a deferred downgrade
+	// advances the persisted key (acceptedIat) without advancing the live manager, so
+	// anchoring on the live manager alone would let an older key overwrite the newer
+	// persisted one (ADR-0038).
+	replayAnchor := h.acceptedIat.Load()
+	if current := h.manager.Claims(); current != nil && current.Iat > replayAnchor {
+		replayAnchor = current.Iat
+	}
+	if replayAnchor > 0 && incomingClaims.Iat <= replayAnchor {
 		h.handleReloadError(w, fmt.Errorf("reload: %w", license.ErrReplayDetected), clientIP, adminSub, adminKID)
 		return
 	}
 
-	// Edition check: reject if incoming edition differs from startup-resolved edition.
-	currentEdition := h.manager.Edition()
-	requestedEdition := incomingClaims.Edition
-	if requestedEdition != currentEdition {
-		licenseReloadTotal.WithLabelValues(reloadEditionChange).Inc()
-		h.logger.Warn().
-			Bool("audit", true).
-			Str("admin_sub", adminSub).
-			Str("admin_kid", adminKID).
-			Str("client_ip", clientIP).
-			Str("current_edition", currentEdition.String()).
-			Str("requested_edition", requestedEdition.String()).
-			Msg("edition change rejected — restart or rollout required to change editions")
-		_ = httputil.WriteJSON(w, http.StatusConflict, editionChangeRejectedResponse{
-			Code:             editionChangeCode,
-			Message:          fmt.Sprintf("edition change from %s to %s requires a service restart or rollout", currentEdition, requestedEdition),
-			CurrentEdition:   currentEdition.String(),
-			RequestedEdition: requestedEdition.String(),
-		})
-		return
-	}
-
-	// Reload Manager (validates ECDSA P-256 signature, checks iat replay, atomic swap)
-	if err := h.manager.Reload(req.Key); err != nil {
+	// Apply live only if it does not lower the running edition (ADR-0038 Model C):
+	// an upgrade or same-edition renewal takes effect immediately; a valid downgrade
+	// is retained until the next restart. Either way the key is the operator's latest
+	// intent, so it is ALWAYS persisted and broadcast — a downgrade boots at the next
+	// restart and reaches stream clients (which defer it the same way). This mirrors
+	// the WatchLicense stream's rule; both runtime surfaces defer downgrades to restart.
+	applied, err := h.manager.ReloadNoDowngrade(req.Key)
+	if err != nil {
 		h.handleReloadError(w, err, clientIP, adminSub, adminKID)
 		return
 	}
 
-	// After successful Reload(), claims are guaranteed non-nil and non-expired
-	// (ParseAndVerify validated signature + expiry).
-	claims := h.manager.Claims()
-	expiresAt := time.Unix(claims.Exp, 0)
-	edition := claims.Edition.String()
-	org := claims.Org
+	// Advance the persisted-key replay anchor — whether applied live or deferred, this
+	// is now the newest accepted key, so an older key pushed next must be rejected.
+	h.acceptedIat.Store(incomingClaims.Iat)
 
-	// Persist to DB (encrypted)
+	// incomingClaims was validated above (signature + expiry) — it describes the
+	// accepted key, whether or not it took effect live.
+	expiresAt := time.Unix(incomingClaims.Exp, 0)
+	edition := incomingClaims.Edition.String()
+	org := incomingClaims.Org
+
+	// Persist to DB (encrypted) regardless of whether it took effect live — a deferred
+	// downgrade MUST survive to the next restart to take effect.
 	if err := h.licenseRepo.Upsert(r.Context(), req.Key, edition, org, &expiresAt); err != nil {
-		// Reload succeeded but persistence failed — log error, still return success
-		// The key is active in memory; persistence will be retried on next reload
 		h.logger.Error().Err(err).
 			Bool("audit", true).
 			Str("admin_sub", adminSub).
 			Str("admin_kid", adminKID).
-			Msg("license reload succeeded but DB persistence failed")
+			Msg("license reload accepted but DB persistence failed")
 	}
 
-	// Update current key for WatchLicense snapshot
+	// Update current key for WatchLicense snapshot + notify stream subscribers.
 	h.SetCurrentKey(req.Key)
-
-	// Publish event for WatchLicense stream
 	h.eventBus.Publish(eventbus.Event{Type: eventbus.LicenseChanged})
 
-	// Update Prometheus gauge
+	// Prometheus gauge reflects the LIVE edition — unchanged on a deferred downgrade.
+	liveEdition := h.manager.Edition().String()
 	licenseEditionGauge.Reset()
-	licenseEditionGauge.WithLabelValues(edition).Set(1)
+	licenseEditionGauge.WithLabelValues(liveEdition).Set(1)
 
-	licenseReloadTotal.WithLabelValues(reloadSuccess).Inc()
+	status := reloadStatusActive
+	resultLabel := reloadSuccess
+	if !applied {
+		status = reloadStatusPendingRestart
+		resultLabel = reloadDowngradeDeferred
+	}
+	licenseReloadTotal.WithLabelValues(resultLabel).Inc()
 
 	h.logger.Info().
 		Bool("audit", true).
 		Str("admin_sub", adminSub).
 		Str("admin_kid", adminKID).
-		Str("edition", edition).
+		Str("accepted_edition", edition).
+		Str("live_edition", liveEdition).
 		Str("org", org).
 		Str("client_ip", clientIP).
+		Str("status", status).
 		Str("expires_at", expiresAt.Format(time.RFC3339)).
-		Msg("license reloaded via API")
+		Msg("license reload accepted via API")
 
 	_ = httputil.WriteJSON(w, http.StatusOK, licenseReloadResponse{
 		Edition:   edition,
 		Org:       org,
 		ExpiresAt: expiresAt.Format(time.RFC3339),
-		Status:    "reloaded",
+		Status:    status,
 	})
 }
 

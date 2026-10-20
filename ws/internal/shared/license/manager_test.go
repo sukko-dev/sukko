@@ -12,29 +12,17 @@ import (
 
 var testLogger = zerolog.Nop()
 
-//nolint:paralleltest // shares package-level publicKey via SetPublicKeyForTesting
+// TestNewManager_NoKey (ADR-0038): no license key → refuse to serve. Community is
+// no longer keyless-by-default; an empty key fails construction so the service
+// fails fast at startup rather than silently running as Community.
 func TestNewManager_NoKey(t *testing.T) {
+	t.Parallel()
 	m, err := NewManager("", testLogger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNoLicense) {
+		t.Fatalf("NewManager(\"\") err = %v, want ErrNoLicense", err)
 	}
-	if m.Edition() != Community {
-		t.Errorf("Edition() = %q, want Community", m.Edition())
-	}
-	if m.Claims() != nil {
-		t.Error("Claims() should be nil for no-key Community")
-	}
-	if m.Org() != "" {
-		t.Errorf("Org() = %q, want empty", m.Org())
-	}
-
-	// Limits should be Community defaults
-	limits := m.Limits()
-	if limits.MaxTenants != 3 {
-		t.Errorf("MaxTenants = %d, want 3", limits.MaxTenants)
-	}
-	if limits.MaxShards != 1 {
-		t.Errorf("MaxShards = %d, want 1", limits.MaxShards)
+	if m != nil {
+		t.Error("manager should be nil when no license key is provided")
 	}
 }
 
@@ -96,26 +84,15 @@ func TestNewManager_ExpiredAtStartup(t *testing.T) {
 	claims := Claims{Edition: Pro, Org: "ExpiredCo", Exp: time.Now().Add(-time.Hour).Unix()}
 	key := SignTestLicense(claims, priv)
 
-	// Expired → degrades to Community (NOT error)
+	// Expired at boot → refuse (fail-fast), no degrade-to-Community (ADR-0038
+	// increment B). Enforcement happens at boot/reload: an expired key is rejected
+	// exactly like a missing one, forcing the operator to re-key.
 	m, err := NewManager(key, testLogger)
-	if err != nil {
-		t.Fatalf("expected no error for expired license (should degrade), got: %v", err)
+	if !errors.Is(err, ErrLicenseExpired) {
+		t.Fatalf("NewManager(expired) err = %v, want ErrLicenseExpired", err)
 	}
-	if m.Edition() != Community {
-		t.Errorf("Edition() = %q, want Community (degraded)", m.Edition())
-	}
-
-	// Claims still available for debugging
-	if m.Claims() == nil {
-		t.Fatal("Claims() should be non-nil for degraded license")
-	}
-	if m.Claims().Org != "ExpiredCo" {
-		t.Errorf("Claims().Org = %q, want ExpiredCo", m.Claims().Org)
-	}
-
-	// Limits are Community
-	if m.Limits().MaxTenants != 3 {
-		t.Errorf("MaxTenants = %d, want 3 (Community)", m.Limits().MaxTenants)
+	if m != nil {
+		t.Error("manager should be nil for an expired-at-boot license")
 	}
 }
 
@@ -250,10 +227,7 @@ func TestManager_HasFeature(t *testing.T) {
 	}
 
 	// Community manager
-	cm, err := NewManager("", testLogger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	cm := NewTestManager(Community)
 	if !cm.HasFeature(KafkaBackend) {
 		t.Error("Community should have KafkaBackend (data path is Community per ADR-0009)")
 	}

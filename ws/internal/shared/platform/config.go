@@ -18,11 +18,13 @@ type BaseConfig struct {
 	// Sukko uses: local | dev | stg | prod by convention.
 	Environment string `env:"ENVIRONMENT" envDefault:"local"` // Deployment environment name (e.g. local, dev, stag, prod). Used for Kafka topic namespace resolution.
 
-	// LicenseKey is the signed Ed25519 license token that determines the edition
-	// (Community/Pro/Enterprise). Empty = Community. Parsed by license.Manager at startup.
-	// The editionManager field lives on each service config (ServerConfig, GatewayConfig,
-	// ProvisioningConfig) — not here — to avoid BaseConfig depending on the license package.
-	LicenseKey string `env:"SUKKO_LICENSE_KEY" redact:"true"` // Sukko license token (JWT). Community edition has no key; Pro/Enterprise obtain via Sukko account. Leave empty for Community.
+	// LicenseKey is the signed ECDSA P-256 license token that determines the edition
+	// (Community/Pro/Enterprise). Required — an empty key is refused at startup (ADR-0038:
+	// Community runs on a free account-issued key, not on the absence of one). Parsed by
+	// license.Manager at startup. The editionManager field lives on each service config
+	// (ServerConfig, GatewayConfig, ProvisioningConfig) — not here — to avoid BaseConfig
+	// depending on the license package.
+	LicenseKey string `env:"SUKKO_LICENSE_KEY" redact:"true"` // Signed Sukko license token (JWT). Required: issued per account (free for Community) — an empty key is refused at startup. Get one at https://docs.sukko.dev/editions/upgrade.
 
 	// Tracing (OpenTelemetry) — cold-path only, disabled by default.
 	OTELTracingEnabled   bool   `env:"OTEL_TRACING_ENABLED" envDefault:"false"`            // Enable distributed tracing via OpenTelemetry. Disabled by default; configure OTEL_EXPORTER_TYPE and OTEL_EXPORTER_ENDPOINT when enabled.
