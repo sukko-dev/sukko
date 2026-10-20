@@ -198,6 +198,11 @@ func main() {
 	gw.SetLicenseWatcher(licenseWatcher)
 	logger.Info().Str("addr", config.ProvisioningGRPCAddr).Msg("License watcher started")
 
+	// Detect-to-warn expiry ticker — surfaces an expiring/expired license in the logs
+	// (it never downgrades or stops the service; ADR-0039).
+	expiryWatcher := license.NewExpiryWatcher(config.EditionManager(), logger)
+	defer expiryWatcher.Close()
+
 	// Wire token revocation stream — guards on ProvisioningGRPCAddr same as licenseWatcher above.
 	// When addr is empty (local dev without provisioning), revocations are silently skipped.
 	if config.ProvisioningGRPCAddr != "" {

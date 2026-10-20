@@ -221,6 +221,11 @@ func main() {
 		Str("org", mgr.Org()).
 		Msg("Sukko edition resolved")
 
+	// Detect-to-warn expiry ticker — surfaces an expiring/expired license in the logs
+	// (it never downgrades or stops the service; ADR-0039).
+	expiryWatcher := license.NewExpiryWatcher(mgr, structuredLogger)
+	defer expiryWatcher.Close()
+
 	// Kafka admin disabled — topic creation is handled by ws-server's KafkaBackend
 	kafkaAdmin := provisioning.NewNoopKafkaAdmin()
 	structuredLogger.Info().Msg("Kafka admin disabled (topic creation moved to ws-server)")
