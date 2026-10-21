@@ -83,7 +83,7 @@ spec:
               value: {{ .Values.environment | quote }}
             {{- end }}
 
-            # License key (Pro/Enterprise editions)
+            # License key (required for every edition — ADR-0038)
             {{- with ((.Values.global).license) }}
             {{- if .existingSecret }}
             - name: SUKKO_LICENSE_KEY
