@@ -47,6 +47,7 @@ func TestResolveProvisioningLicense(t *testing.T) {
 		{"env valid, no DB → env", proEnv, "", proEnv, license.Pro, nil},
 		{"env valid, DB newer → DB precedence", proEnv, entDBNewer, entDBNewer, license.Enterprise, nil},
 		{"env valid, DB older (replay) → keep env", proEnv, proDBOlder, proEnv, license.Pro, nil},
+		{"env valid, DB identical (no-op) → DB key effective", proEnv, proEnv, proEnv, license.Pro, nil},
 		{"env nil, DB valid → DB (rotation fix)", "", entDBNewer, entDBNewer, license.Enterprise, nil},
 		{"env expired, DB valid → boots from DB (restart-after-expiry)", expiredEnv, entDBNewer, entDBNewer, license.Enterprise, nil},
 		{"env valid, DB expired → keep env", proEnv, expiredEnv, proEnv, license.Pro, nil},

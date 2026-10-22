@@ -1021,10 +1021,11 @@ func (m *MockChannelRulesStore) List(_ context.Context) ([]*types.TenantChannelR
 
 // MockLicenseStateStore is an in-memory mock implementation of LicenseStateStore.
 type MockLicenseStateStore struct {
-	mu        sync.Mutex
-	key       string
-	UpsertErr error // injected error for Upsert
-	LoadErr   error // injected error for Load
+	mu          sync.Mutex
+	key         string
+	UpsertCalls int   // number of Upsert invocations (asserts no-op reloads don't persist)
+	UpsertErr   error // injected error for Upsert
+	LoadErr     error // injected error for Load
 }
 
 // NewMockLicenseStateStore creates a new MockLicenseStateStore.
@@ -1039,8 +1040,16 @@ func (m *MockLicenseStateStore) Upsert(_ context.Context, licenseKey, _, _ strin
 	}
 	m.mu.Lock()
 	m.key = licenseKey
+	m.UpsertCalls++
 	m.mu.Unlock()
 	return nil
+}
+
+// UpsertCallCount returns how many times Upsert was invoked.
+func (m *MockLicenseStateStore) UpsertCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.UpsertCalls
 }
 
 // Load returns the stored license key.

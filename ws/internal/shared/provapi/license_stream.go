@@ -190,12 +190,16 @@ func (w *StreamLicenseWatcher) streamLoop(ctx context.Context) {
 			if !firstKeyApplied {
 				firstKeyApplied = true
 				if err := w.manager.Reload(key); err != nil {
-					// Expected + benign when the snapshot equals this process's own boot
-					// key — the iat replay check rejects it as a no-op. Anything else is a
-					// genuine failure; keep the booted edition either way.
-					if errors.Is(err, license.ErrReplayDetected) {
+					// Keep the booted edition on any of these; distinguish them in the log.
+					switch {
+					case errors.Is(err, license.ErrLicenseUnchanged):
+						// Snapshot equals this process's own boot key — the common case.
 						w.logger.Debug().Msg("initial license snapshot matches booted key — no change")
-					} else {
+					case errors.Is(err, license.ErrReplayDetected):
+						// Snapshot is strictly OLDER than the booted key (env/DB drift) —
+						// worth surfacing, not a silent "no change".
+						w.logger.Warn().Msg("initial license snapshot is older than the booted key — keeping booted edition")
+					default:
 						w.logger.Warn().Err(err).Msg("initial license resolution from stream failed; keeping booted edition")
 					}
 					continue
@@ -210,11 +214,13 @@ func (w *StreamLicenseWatcher) streamLoop(ctx context.Context) {
 			// downgrade is retained until the next restart (logged inside
 			// ReloadNoDowngrade); provisioning has persisted it, so a restart boots it.
 			applied, err := w.manager.ReloadNoDowngrade(key)
-			if err != nil {
+			switch {
+			case errors.Is(err, license.ErrLicenseUnchanged):
+				// The stream re-sent the current key — common on reconnect; a no-op.
+				w.logger.Debug().Msg("license stream re-sent the current key — no change")
+			case err != nil:
 				w.logger.Warn().Err(err).Msg("license reload from stream failed")
-				continue
-			}
-			if applied {
+			case applied:
 				w.logger.Info().
 					Str("edition", w.manager.Edition().String()).
 					Msg("license reloaded from stream")

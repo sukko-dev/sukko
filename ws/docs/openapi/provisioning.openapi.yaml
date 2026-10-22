@@ -1303,10 +1303,12 @@ paths:
         "200":
           description: |
             License accepted. `status` is `active` when it took effect live (an upgrade
-            or same-edition renewal) or `pending_restart` when it is a valid downgrade
-            that was stored and broadcast but takes effect only at the next restart — in
-            which case the running edition is unchanged. `edition`/`org`/`expires_at`
-            describe the accepted key.
+            or same-edition renewal), `pending_restart` when it is a valid downgrade that
+            was stored and broadcast but takes effect only at the next restart (the
+            running edition is unchanged), or `unchanged` when the pushed key is the one
+            already active — an idempotent re-push (e.g. `sukko up`'s push-service
+            reconcile) that changed nothing and broadcast no event. `edition`/`org`/
+            `expires_at` describe the accepted key.
           content:
             application/json:
               schema:
@@ -1324,11 +1326,13 @@ paths:
                     format: date-time
                   status:
                     type: string
-                    enum: [active, pending_restart]
+                    enum: [active, pending_restart, unchanged]
                     description: |
                       `active` — took effect live (upgrade or renewal).
                       `pending_restart` — valid downgrade; stored and broadcast, applies
                       at the next restart; the running edition is unchanged.
+                      `unchanged` — the pushed key is the one already active; an
+                      idempotent re-push that changed nothing and broadcast no event.
               examples:
                 active:
                   value:
@@ -1342,6 +1346,12 @@ paths:
                     org: "Acme Corp"
                     expires_at: "2027-04-08T00:00:00Z"
                     status: pending_restart
+                unchanged:
+                  value:
+                    edition: pro
+                    org: "Acme Corp"
+                    expires_at: "2027-04-08T00:00:00Z"
+                    status: unchanged
         "400":
           description: Invalid key (bad format, invalid signature, or expired)
           content:
