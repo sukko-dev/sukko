@@ -27,10 +27,18 @@ var (
 	// base64url(claims).base64url(signature) format.
 	ErrLicenseInvalidFormat = errors.New("license format invalid")
 
-	// ErrReplayDetected indicates the pushed key has an iat (issued-at)
-	// older than or equal to the current key's iat. Prevents downgrade
-	// attacks with leaked older keys.
+	// ErrReplayDetected indicates the pushed key is a replay: its iat (issued-at)
+	// is older than the current key's, or equal with different claims. Prevents
+	// downgrade attacks with leaked older (or forged same-iat) keys.
 	ErrReplayDetected = errors.New("license replay detected: iat not newer than current")
+
+	// ErrLicenseUnchanged signals that a reload re-pushed the byte-equivalent current
+	// key (same iat AND same claims) — an idempotent no-op, NOT a failure. It is
+	// returned instead of applying a redundant swap, so callers that re-push the
+	// current key on a schedule (`sukko up`'s push-service reconcile) or on every
+	// stream reconnect can treat it as "already current" rather than a replay. Like
+	// io.EOF, it is a signal carried as an error; callers check it with errors.Is.
+	ErrLicenseUnchanged = errors.New("license unchanged: re-push of the current key")
 )
 
 // EditionLimitError is returned when a runtime operation exceeds an edition's

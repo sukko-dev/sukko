@@ -14,9 +14,11 @@ import (
 //
 // If validation fails, the current state is preserved — no partial updates.
 //
-// Replay protection: if the current key has an iat > 0, the new key's iat must
-// be strictly greater. If the current key has no iat (pre-dates the field),
-// any valid key is accepted.
+// Replay protection (classifyReplay): a strictly-newer key (by iat) is applied; a
+// re-push of the current key (same iat AND same claims) returns ErrLicenseUnchanged,
+// an idempotent no-op; a strictly-older key, or a same-iat key with different claims,
+// is rejected with ErrReplayDetected. A key with no iat (pre-dates the field) is
+// accepted. Callers treat ErrLicenseUnchanged as success-no-op (errors.Is).
 //
 // Thread-safe: concurrent calls are serialized via the instance's reloadMu mutex.
 func (m *Manager) Reload(key string) error {
@@ -84,19 +86,65 @@ func (m *Manager) ReloadNoDowngrade(key string) (applied bool, err error) {
 }
 
 // parseAndCheckReplayLocked parses and verifies key (ECDSA P-256 signature + expiry)
-// and enforces iat replay protection. The caller MUST hold reloadMu. It returns the
-// validated claims or an error and does not mutate Manager state.
+// and classifies it against the current key for replay/idempotency. The caller MUST
+// hold reloadMu. It does not mutate Manager state. On success it returns the validated
+// claims; it returns ErrLicenseUnchanged when key is the current key re-pushed (an
+// idempotent no-op) and ErrReplayDetected for a genuine replay.
 func (m *Manager) parseAndCheckReplayLocked(key string) (*Claims, error) {
 	claims, err := ParseAndVerify(key)
 	if err != nil {
 		return nil, fmt.Errorf("reload: %w", err)
 	}
-
-	current := m.loadClaims()
-	if current != nil && current.Iat > 0 && claims.Iat <= current.Iat {
-		return nil, ErrReplayDetected
+	if err := classifyReplay(m.loadClaims(), claims); err != nil {
+		return nil, err
 	}
 	return claims, nil
+}
+
+// PreviewReload reports how Reload / ReloadNoDowngrade would treat claims against the
+// current license WITHOUT applying it: nil when it would apply (strictly newer, or the
+// first key), ErrLicenseUnchanged for an idempotent re-push of the current key, or
+// ErrReplayDetected for a replay. The provisioning admin handler uses it to order the
+// unchanged/replay outcomes ahead of its edition-change check (so a re-push of the
+// current key is a clean no-op and a replay is reported as a replay, not an edition
+// change). Thread-safe: serialized via reloadMu.
+func (m *Manager) PreviewReload(claims *Claims) error {
+	m.reloadMu.Lock()
+	defer m.reloadMu.Unlock()
+	return classifyReplay(m.loadClaims(), claims)
+}
+
+// classifyReplay is the single replay/idempotency decision (ADR-0041) shared by the
+// reload paths and PreviewReload, so they can never disagree. Given the current claims
+// (nil when no key is loaded yet) and an incoming candidate:
+//   - nil            → apply (incoming is strictly newer, or there is no current iat)
+//   - ErrLicenseUnchanged → incoming is the current key re-pushed (same iat AND same
+//     claims): an idempotent no-op, not a replay
+//   - ErrReplayDetected   → incoming is strictly older, OR same iat with different
+//     claims (a forged or stale key): reject
+func classifyReplay(current, incoming *Claims) error {
+	if current == nil || current.Iat == 0 {
+		return nil // first load, or a legacy key with no iat — accept any valid key
+	}
+	switch {
+	case incoming.Iat > current.Iat:
+		return nil
+	case incoming.Iat == current.Iat && claimsEqual(current, incoming):
+		return ErrLicenseUnchanged
+	default:
+		return ErrReplayDetected
+	}
+}
+
+// claimsEqual reports whether two license claims are equivalent across every field, so
+// a same-iat re-push is treated as "unchanged" only when it really is the same license.
+// A same-iat key with any differing field (org, edition, exp, nodes, limits) is NOT
+// equal and remains a replay. Claims is fully comparable (Edition is a string type,
+// Limits is all scalars), so a struct compare is a true deep compare AND is
+// compile-enforced complete: a future non-comparable field would fail to build here
+// rather than silently drop out of the equality.
+func claimsEqual(a, b *Claims) bool {
+	return *a == *b
 }
 
 // applyLocked atomically swaps edition/limits/claims to the given claims, updates

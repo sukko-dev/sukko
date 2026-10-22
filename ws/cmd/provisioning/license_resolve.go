@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/rs/zerolog"
@@ -31,6 +32,14 @@ func resolveProvisioningLicense(envMgr *license.Manager, envKey, dbKey string, l
 	if envMgr != nil {
 		if dbKey != "" {
 			if err := envMgr.Reload(dbKey); err != nil {
+				if errors.Is(err, license.ErrLicenseUnchanged) {
+					// The DB key equals SUKKO_LICENSE_KEY already loaded at construction
+					// — a no-op, not a failure. Keep it as the effective snapshot key.
+					logger.Info().
+						Str("edition", envMgr.Edition().String()).
+						Msg("license loaded from DB (same as SUKKO_LICENSE_KEY)")
+					return envMgr, dbKey, nil
+				}
 				logger.Warn().Err(err).Msg("DB license key failed reload, using env var")
 				return envMgr, envKey, nil
 			}

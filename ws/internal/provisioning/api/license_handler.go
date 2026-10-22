@@ -38,6 +38,7 @@ var (
 const (
 	reloadSuccess           = "success"            // upgrade/renewal applied live
 	reloadDowngradeDeferred = "downgrade_deferred" // valid downgrade stored + broadcast, applies at next restart
+	reloadUnchanged         = "unchanged"          // re-push of the current key — idempotent no-op
 	reloadInvalidSignature  = "invalid_signature"
 	reloadExpired           = "expired"
 	reloadReplay            = "replay_detected"
@@ -54,6 +55,9 @@ const (
 	// lowers the edition, so it does not change this running process — it takes effect
 	// at the next restart (ADR-0038 Model C). The running edition is unchanged.
 	reloadStatusPendingRestart = "pending_restart"
+	// reloadStatusUnchanged means the pushed key is the one already active — an
+	// idempotent re-push (e.g. `sukko up`'s push-service reconcile). Nothing changed.
+	reloadStatusUnchanged = "unchanged"
 )
 
 const (
@@ -218,6 +222,17 @@ func (h *LicenseHandler) HandleReload(w http.ResponseWriter, r *http.Request) {
 		replayAnchor = current.Iat
 	}
 	if replayAnchor > 0 && incomingClaims.Iat <= replayAnchor {
+		// A re-push of the current key is an idempotent no-op, not a replay — this is
+		// what `sukko up`'s push-service reconcile does on every boot. "Current" means
+		// either the running LIVE key (PreviewReload, which also covers the first push
+		// before any API reload) OR the most-recently-ACCEPTED raw key (CurrentKey,
+		// byte-equal) — the latter covers a still-DEFERRED downgrade, whose iat equals
+		// the persisted anchor but whose claims differ from the live key. A genuinely
+		// older, or forged same-iat, key matches neither and is rejected below.
+		if req.Key == h.CurrentKey() || errors.Is(h.manager.PreviewReload(incomingClaims), license.ErrLicenseUnchanged) {
+			h.writeReloadUnchanged(w, clientIP, adminSub, adminKID)
+			return
+		}
 		h.handleReloadError(w, fmt.Errorf("reload: %w", license.ErrReplayDetected), clientIP, adminSub, adminKID)
 		return
 	}
@@ -230,6 +245,13 @@ func (h *LicenseHandler) HandleReload(w http.ResponseWriter, r *http.Request) {
 	// the WatchLicense stream's rule; both runtime surfaces defer downgrades to restart.
 	applied, err := h.manager.ReloadNoDowngrade(req.Key)
 	if err != nil {
+		// Defensive: if the key became current between the pre-check and here (a
+		// concurrent reload), ReloadNoDowngrade reports ErrLicenseUnchanged — treat it
+		// as the same idempotent no-op rather than a 500.
+		if errors.Is(err, license.ErrLicenseUnchanged) {
+			h.writeReloadUnchanged(w, clientIP, adminSub, adminKID)
+			return
+		}
 		h.handleReloadError(w, err, clientIP, adminSub, adminKID)
 		return
 	}
@@ -288,6 +310,33 @@ func (h *LicenseHandler) HandleReload(w http.ResponseWriter, r *http.Request) {
 		Org:       org,
 		ExpiresAt: expiresAt.Format(time.RFC3339),
 		Status:    status,
+	})
+}
+
+// writeReloadUnchanged responds to an idempotent re-push of the current key: a 200 with
+// the unchanged edition/org/expiry and status "unchanged", plus the reloadUnchanged
+// metric and an audit line — but NO DB write and NO LicenseChanged broadcast, because
+// nothing changed. This is the push-service reconcile path (`sukko up` re-pushing the
+// key provisioning already auto-loaded), which otherwise read as a replay (409).
+func (h *LicenseHandler) writeReloadUnchanged(w http.ResponseWriter, clientIP, adminSub, adminKID string) {
+	licenseReloadTotal.WithLabelValues(reloadUnchanged).Inc()
+	var org, expiresAt string
+	if current := h.manager.Claims(); current != nil {
+		org = current.Org
+		expiresAt = time.Unix(current.Exp, 0).Format(time.RFC3339)
+	}
+	h.logger.Info().
+		Bool("audit", true).
+		Str("admin_sub", adminSub).
+		Str("admin_kid", adminKID).
+		Str("edition", h.manager.Edition().String()).
+		Str("client_ip", clientIP).
+		Msg("license reload is a no-op — pushed key matches the current one")
+	_ = httputil.WriteJSON(w, http.StatusOK, licenseReloadResponse{
+		Edition:   h.manager.Edition().String(),
+		Org:       org,
+		ExpiresAt: expiresAt,
+		Status:    reloadStatusUnchanged,
 	})
 }
 

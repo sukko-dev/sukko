@@ -138,12 +138,14 @@ func TestHandleReload_ReplayDetected(t *testing.T) {
 		t.Fatalf("first reload status = %d, want %d", rec1.Code, http.StatusOK)
 	}
 
-	// Second reload with same iat — replay (edition still matches, replay fires first)
+	// Second reload — same iat but DIFFERENT claims (a forged/stale key). This is a
+	// genuine replay: the same iat does not make it the current key, so it is rejected
+	// with 409. (A re-push of the IDENTICAL key is a no-op — see the Unchanged test.)
 	key2 := license.SignTestLicense(license.Claims{
 		Edition: license.Community,
-		Org:     "Acme",
+		Org:     "Impostor",
 		Exp:     time.Now().Add(365 * 24 * time.Hour).Unix(),
-		Iat:     iat, // same iat — triggers ErrReplayDetected
+		Iat:     iat, // same iat, different org — triggers ErrReplayDetected
 	}, testLicensePriv)
 
 	body2, _ := json.Marshal(licenseReloadRequest{Key: key2})
@@ -153,6 +155,86 @@ func TestHandleReload_ReplayDetected(t *testing.T) {
 
 	if rec2.Code != http.StatusConflict {
 		t.Errorf("replay status = %d, want %d", rec2.Code, http.StatusConflict)
+	}
+}
+
+// reloadKey POSTs key to HandleReload and asserts the status code, returning the
+// recorder so the caller can inspect the body.
+func reloadKey(t *testing.T, h *LicenseHandler, key string, wantCode int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(licenseReloadRequest{Key: key})
+	rec := httptest.NewRecorder()
+	h.HandleReload(rec, httptest.NewRequest(http.MethodPost, "/api/v1/license", bytes.NewReader(body)))
+	if rec.Code != wantCode {
+		t.Fatalf("reload status = %d, want %d; body=%s", rec.Code, wantCode, rec.Body.String())
+	}
+	return rec
+}
+
+// TestHandleReload_IdenticalKeyUnchanged pins the idempotent no-op at the handler: a
+// re-push of the current key (same iat AND same claims — what `sukko up`'s push-service
+// reconcile does) returns 200 status "unchanged", not a 409 replay, AND does NOT persist
+// a second time or broadcast (the load-bearing ADR-0041 claim).
+//
+//nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
+func TestHandleReload_IdenticalKeyUnchanged(t *testing.T) {
+	license.SetPublicKeyForTesting(testLicensePub)
+	repo := provtestutil.NewMockLicenseStateStore()
+	h := NewLicenseHandler(license.NewTestManager(license.Community), repo, eventbus.New(zerolog.Nop()), zerolog.Nop())
+
+	key := license.SignTestLicense(license.Claims{
+		Edition: license.Community, Org: "Acme",
+		Exp: time.Now().Add(365 * 24 * time.Hour).Unix(), Iat: time.Now().Unix(),
+	}, testLicensePriv)
+
+	reloadKey(t, h, key, http.StatusOK) // first — applied + persisted once
+	if n := repo.UpsertCallCount(); n != 1 {
+		t.Fatalf("after first reload Upsert calls = %d, want 1", n)
+	}
+
+	rec := reloadKey(t, h, key, http.StatusOK) // re-push the identical key
+	var resp licenseReloadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != reloadStatusUnchanged {
+		t.Errorf("status = %q, want %q", resp.Status, reloadStatusUnchanged)
+	}
+	if n := repo.UpsertCallCount(); n != 1 {
+		t.Errorf("after unchanged re-push Upsert calls = %d, want 1 (a no-op must not persist)", n)
+	}
+}
+
+// TestHandleReload_DeferredDowngradeRepush pins the deferral-window case: re-pushing a
+// still-DEFERRED downgrade key (its iat equals the persisted anchor but its claims differ
+// from the live key) is a 200 "unchanged" no-op, not a 409 replay. Without the
+// CurrentKey() byte-equal check it would wrongly 409 "iat not newer than current".
+//
+//nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
+func TestHandleReload_DeferredDowngradeRepush(t *testing.T) {
+	license.SetPublicKeyForTesting(testLicensePub)
+	h := NewLicenseHandler(license.NewTestManager(license.Community), provtestutil.NewMockLicenseStateStore(), eventbus.New(zerolog.Nop()), zerolog.Nop())
+	exp := time.Now().Add(365 * 24 * time.Hour).Unix()
+
+	// Boot the live edition up to Pro.
+	pro := license.SignTestLicense(license.Claims{Edition: license.Pro, Org: "Acme", Exp: exp, Iat: 10}, testLicensePriv)
+	reloadKey(t, h, pro, http.StatusOK)
+
+	// A valid downgrade (newer iat) — accepted but deferred to restart (pending_restart).
+	downgrade := license.SignTestLicense(license.Claims{Edition: license.Community, Org: "Acme", Exp: exp, Iat: 20}, testLicensePriv)
+	rec1 := reloadKey(t, h, downgrade, http.StatusOK)
+	var r1 licenseReloadResponse
+	_ = json.Unmarshal(rec1.Body.Bytes(), &r1)
+	if r1.Status != reloadStatusPendingRestart {
+		t.Fatalf("downgrade status = %q, want %q", r1.Status, reloadStatusPendingRestart)
+	}
+
+	// Re-push the SAME deferred key — must be 200 unchanged, not a 409 replay.
+	rec2 := reloadKey(t, h, downgrade, http.StatusOK)
+	var r2 licenseReloadResponse
+	_ = json.Unmarshal(rec2.Body.Bytes(), &r2)
+	if r2.Status != reloadStatusUnchanged {
+		t.Errorf("deferred re-push status = %q, want %q (not a replay)", r2.Status, reloadStatusUnchanged)
 	}
 }
 

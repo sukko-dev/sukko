@@ -66,6 +66,90 @@ func TestReload_ReplayRejected_SameIat(t *testing.T) {
 	}
 }
 
+// TestReload_IdenticalKey_Unchanged pins the idempotent no-op: re-pushing the current
+// key (same iat AND same claims) returns ErrLicenseUnchanged and leaves state untouched
+// — NOT a replay. This is exactly what `sukko up`'s push-service reconcile does on every
+// boot, re-pushing the key provisioning already auto-loaded.
+//
+//nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
+func TestReload_IdenticalKey_Unchanged(t *testing.T) {
+	setupReloadTest(t)
+	m := NewTestManager(Community)
+
+	key := signKey(t, Pro, "Acme", time.Now().Add(365*24*time.Hour), 100)
+	if err := m.Reload(key); err != nil {
+		t.Fatalf("first Reload: %v", err)
+	}
+	before := m.Claims()
+
+	if err := m.Reload(key); !errors.Is(err, ErrLicenseUnchanged) {
+		t.Fatalf("re-push of the current key = %v, want ErrLicenseUnchanged", err)
+	}
+	if m.Claims() != before {
+		t.Error("claims pointer changed on an unchanged re-push — expected a true no-op (no swap)")
+	}
+	if got := m.Edition(); got != Pro {
+		t.Errorf("edition = %s, want Pro (unchanged)", got)
+	}
+}
+
+// TestReloadNoDowngrade_IdenticalKey_Unchanged pins the same idempotent no-op on the
+// runtime path, which the WatchLicense stream re-hits on every reconnect.
+//
+//nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
+func TestReloadNoDowngrade_IdenticalKey_Unchanged(t *testing.T) {
+	setupReloadTest(t)
+	m := NewTestManager(Community)
+
+	key := signKey(t, Pro, "Acme", time.Now().Add(365*24*time.Hour), 100)
+	if err := m.Reload(key); err != nil {
+		t.Fatalf("boot Reload: %v", err)
+	}
+
+	applied, err := m.ReloadNoDowngrade(key)
+	if !errors.Is(err, ErrLicenseUnchanged) {
+		t.Fatalf("re-push via ReloadNoDowngrade = %v, want ErrLicenseUnchanged", err)
+	}
+	if applied {
+		t.Error("applied = true, want false on an unchanged re-push")
+	}
+}
+
+// TestClassifyReplay pins the outcomes of the shared classifier directly, so the
+// same-iat-DIFFERENT-claims rows stay ErrReplayDetected (idempotency never widens into
+// accepting a forged same-iat key). classifyReplay is a pure function over its args and
+// touches no package state, so it is safe to run in parallel with the key-mutating
+// tests in this file.
+func TestClassifyReplay(t *testing.T) {
+	t.Parallel()
+	base := &Claims{Edition: Pro, Org: "Acme", Exp: 1000, Iat: 100, Nodes: 3, Limits: Limits{MaxTotalConnections: 10000}}
+	cases := []struct {
+		name     string
+		current  *Claims
+		incoming *Claims
+		want     error
+	}{
+		{"first load (nil current)", nil, base, nil},
+		{"legacy current, no iat", &Claims{Edition: Pro, Iat: 0}, base, nil},
+		{"strictly newer", base, &Claims{Edition: Pro, Org: "Acme", Exp: 1000, Iat: 200, Nodes: 3, Limits: Limits{MaxTotalConnections: 10000}}, nil},
+		{"identical", base, &Claims{Edition: Pro, Org: "Acme", Exp: 1000, Iat: 100, Nodes: 3, Limits: Limits{MaxTotalConnections: 10000}}, ErrLicenseUnchanged},
+		{"strictly older", base, &Claims{Edition: Pro, Org: "Acme", Exp: 1000, Iat: 50}, ErrReplayDetected},
+		{"same iat, different org", base, &Claims{Edition: Pro, Org: "Evil", Exp: 1000, Iat: 100}, ErrReplayDetected},
+		{"same iat, different edition", base, &Claims{Edition: Enterprise, Org: "Acme", Exp: 1000, Iat: 100}, ErrReplayDetected},
+		{"same iat, different exp", base, &Claims{Edition: Pro, Org: "Acme", Exp: 2000, Iat: 100}, ErrReplayDetected},
+		{"same iat, different nodes", base, &Claims{Edition: Pro, Org: "Acme", Exp: 1000, Iat: 100, Nodes: 9, Limits: Limits{MaxTotalConnections: 10000}}, ErrReplayDetected},
+		{"same iat, different limits", base, &Claims{Edition: Pro, Org: "Acme", Exp: 1000, Iat: 100, Nodes: 3, Limits: Limits{MaxTotalConnections: 2000}}, ErrReplayDetected},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := classifyReplay(tc.current, tc.incoming); !errors.Is(got, tc.want) {
+				t.Errorf("classifyReplay = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 //nolint:paralleltest // SetPublicKeyForTesting mutates package-level state
 func TestReload_ReplayRejected_OlderIat(t *testing.T) {
 	setupReloadTest(t)
