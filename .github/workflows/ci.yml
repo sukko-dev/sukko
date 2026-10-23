@@ -432,3 +432,41 @@ jobs:
 
       - name: Run sdk-js grid cell
         run: task e2e:cell:sdk-js SDK_JS_DIR=.sdk-js
+
+  # sdk-py Web Push grid cell — drives sdk-py's VAPID client against the push topology.
+  # Needs uv (to run pytest) in addition to Go (cmd/e2efixture + Task). Heavy Docker job,
+  # post-merge/nightly/dispatch only, not PRs.
+  e2e-sdk-py-grid:
+    name: "sdk grid: sdk-py (push)"
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sukko
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Checkout sdk-py (SDK under test)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: sukko-dev/sdk-py
+          path: .sdk-py
+          ref: main
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ws/go.mod
+          cache: true
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+
+      - name: Fail fast if Docker is unavailable
+        # This SDK-grid cell MUST fail (not silently skip) without Docker.
+        run: docker version
+
+      - name: Install Task
+        run: go install github.com/go-task/task/v3/cmd/task@v3.44.0
+
+      - name: Run sdk-py Web Push grid cell
+        run: task e2e:cell:sdk-py-push SDK_PY_DIR=.sdk-py

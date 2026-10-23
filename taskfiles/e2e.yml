@@ -565,6 +565,61 @@ tasks:
         done
         echo "VERDICT: sdk-go Web Push VAPID cell PASS against a push-enabled stack"
 
+  cell:sdk-py-push:
+    desc: "SDK-runner cell — drive sdk-py's Web Push client (VAPID key) against a source-built push-enabled stack (ADR-0040 Tier2). Requires SDK_PY_DIR=<sdk-py checkout>."
+    requires:
+      vars: [SDK_PY_DIR]
+    vars:
+      # Same push topology as cell:sdk-go-push (push-service + GATEWAY_PUSH_ENABLED). sdk-py's
+      # suite reads the SUKKO_IT_* env (not a JSON file), so the fixture uses --format shell.
+      EDITION: enterprise
+      BACKEND: kafka
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/push-validate.override.yml --profile enterprise --profile kafka'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      WS_URL: ws://localhost:13000/ws
+      PUSH_READY_URL: http://localhost:3009/ready
+    cmds:
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== SDK cell: sdk-py push (Web Push VAPID) edition={{.EDITION}} ==="
+        e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate + push-service /ready ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} {{.EDITION}} false
+        e2e_kafka_ready {{.COMPOSE}}
+        i=1
+        while [ "$i" -le 60 ]; do
+          if curl -sf "{{.PUSH_READY_URL}}" >/dev/null 2>&1; then echo "push-service ready"; break; fi
+          [ "$i" -eq 60 ] && { echo "push-service never became ready"; exit 1; }
+          i=$((i + 1)); sleep 2
+        done
+      - |
+        set -eu
+        echo "=== Provision fixture + run sdk-py Web Push test ==="
+        fixture="$(cd ws && go run ./cmd/e2efixture \
+          --admin-key "$(pwd)/../{{.ADMIN_KEY_FILE}}" \
+          --provisioning-url "{{.PROVISIONING_URL}}" \
+          --ws-url "{{.WS_URL}}" \
+          --edition "{{.EDITION}}")"
+        eval "$fixture"
+        echo "    fixture tenant channel: $SUKKO_IT_CHANNEL"
+        # set +e around the run (Task's mvdan/sh aborts `v=$(failing)` under set -e before a ||).
+        set +e
+        ( cd {{.SDK_PY_DIR}} && uv run --extra dev pytest -m integration tests/integration -k test_push_vapid_key -v ) >/tmp/sdkpy_push.out 2>&1
+        code=$?
+        set -e
+        cat /tmp/sdkpy_push.out
+        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-py push suite failed (exit $code)"; exit 1; }
+        # Anti-vacuous: the push test must PASS, not skip (a wrong edition would skip it).
+        grep -qE '[[:space:]]1 passed' /tmp/sdkpy_push.out || { echo "VERDICT: push test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+        echo "VERDICT: sdk-py Web Push VAPID cell PASS against a push-enabled stack"
+
   cell:pro-kafka:
     desc: "Grid cell — Pro/kafka (full green set; proves suites are backend-agnostic; + token-revocation on the push-smoke cadence)."
     cmds:

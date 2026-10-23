@@ -351,7 +351,9 @@ extends it to **Web Push**: it boots the push topology (the `push-validate` over
 `GATEWAY_PUSH_ENABLED` + the `enterprise` compose profile that starts `push-service`), polls
 `push-service /ready`, and runs sdk-go's VAPID-key test (the keypair auto-generates on first
 fetch). Notification *delivery* stays with the tester's `push` suite — an SDK cannot be a
-browser push receiver. Extending the SSE and push cells to the other SDKs remains open on #61.
+browser push receiver. `cell:sdk-py-push` extends the Web Push cell to sdk-py (same topology;
+sdk-py reads the `SUKKO_IT_*` env, so the fixture uses `--format shell`). Still open on #61:
+sdk-py SSE (its client exists), and sdk-js Web Push (needs a push test in that SDK).
 
 **Fail-closed contract:** a suite fails its cell on a non-`pass` report, any `fail`/`error`
 check, or **any skipped check not declared in the cell's allow-list**. The skip allow-list
