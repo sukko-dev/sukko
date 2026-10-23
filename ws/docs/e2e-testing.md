@@ -342,8 +342,12 @@ fixture — it reuses the tester's `auth.Setup` + channel/routing rules + api-ke
 the `SUKKO_IT_*` env the SDK suite reads), then runs the suite with an **anti-vacuous
 verdict**: the required tests (`TestRoundTrip`, `TestAPIKeyAuth`, `TestReconnectReplay`)
 MUST pass, never skip. It is a separate heavy job (post-merge/nightly/dispatch, not PRs),
-checks out `sukko-dev/sdk-go@main`, and is not a green-set grid cell. Pro-gated *feature*
-cells (SSE, push) land in later slices (issue #61); this cell proves the integration path.
+checks out `sukko-dev/sdk-go@main`, and is not a green-set grid cell. The `e2e-sdk-js-grid`
+job + `cell:sdk-js` extend this to the sdk-js **SSE** client — the first SDK cell asserting a
+Pro-gated *feature* (SSE transport, `features.go` SSETransport:Pro, gate-only): it runs the
+SDK's SSE subscribe→receive test against the same Pro+kafka stack (fixture emitted as a
+`.fixture.json` via `cmd/e2efixture --format json`; needs bun as well as Go). Web Push across
+SDKs is the next slice of #61.
 
 **Fail-closed contract:** a suite fails its cell on a non-`pass` report, any `fail`/`error`
 check, or **any skipped check not declared in the cell's allow-list**. The skip allow-list

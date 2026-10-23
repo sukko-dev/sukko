@@ -57,10 +57,14 @@ func run() error {
 	edition := flag.String("edition", "community", "the stack's license edition, exported as SUKKO_IT_EDITION so edition-gated cells (de)activate")
 	channelBase := flag.String("channel-base", "general.smoke", "channel suffix (under the tenant) the suite targets; must match the provisioned channel rules")
 	testID := flag.String("test-id", fmt.Sprintf("sdkgrid-%d", time.Now().UnixNano()), "unique id for the throwaway tenant + key")
+	format := flag.String("format", "shell", "output format: 'shell' (export SUKKO_IT_* lines, for go/py suites) or 'json' (a sdk-js .fixture.json object)")
 	flag.Parse()
 
 	if *adminKeyPath == "" {
 		return errors.New("--admin-key is required (the gen-admin-key output path mounted for this cell)")
+	}
+	if *format != "shell" && *format != "json" {
+		return fmt.Errorf("--format must be 'shell' or 'json', got %q", *format)
 	}
 
 	// Diagnostics to stderr only — stdout must stay a clean evaluable fixture.
@@ -130,18 +134,35 @@ func run() error {
 	}
 	channel := setup.TenantID + "." + *channelBase
 
-	// stdout is the evaluable fixture and nothing else — this is program data output,
-	// not logging (§V/forbidigo targets fmt.Print* logging), so build the block and
-	// write it directly rather than through a Print call.
-	block := fmt.Sprintf(
-		"export SUKKO_IT_WS_URL='%s'\n"+
-			"export SUKKO_IT_TOKEN='%s'\n"+
-			"export SUKKO_IT_API_KEY='%s'\n"+
-			"export SUKKO_IT_CHANNEL='%s'\n"+
-			"export SUKKO_IT_EDITION='%s'\n",
-		*wsURL, token, apiKey.KeyID, channel, *edition)
+	// stdout is the fixture and nothing else — this is program data output, not logging
+	// (§V/forbidigo targets fmt.Print* logging), so build the block and write it directly.
+	var block string
+	if *format == "json" {
+		// The sdk-js e2e harness reads a .fixture.json object (not env). composeProject is
+		// omitted — the SDK-grid cells do not bounce a service, so the SSE/round-trip tests
+		// never read it.
+		out, marshalErr := json.Marshal(map[string]string{
+			"wsUrl":   *wsURL,
+			"token":   token,
+			"apiKey":  apiKey.KeyID,
+			"channel": channel,
+			"edition": *edition,
+		})
+		if marshalErr != nil {
+			return fmt.Errorf("marshaling json fixture: %w", marshalErr)
+		}
+		block = string(out) + "\n"
+	} else {
+		block = fmt.Sprintf(
+			"export SUKKO_IT_WS_URL='%s'\n"+
+				"export SUKKO_IT_TOKEN='%s'\n"+
+				"export SUKKO_IT_API_KEY='%s'\n"+
+				"export SUKKO_IT_CHANNEL='%s'\n"+
+				"export SUKKO_IT_EDITION='%s'\n",
+			*wsURL, token, apiKey.KeyID, channel, *edition)
+	}
 	if _, err := os.Stdout.WriteString(block); err != nil {
-		return fmt.Errorf("writing fixture env: %w", err)
+		return fmt.Errorf("writing fixture: %w", err)
 	}
 	return nil
 }

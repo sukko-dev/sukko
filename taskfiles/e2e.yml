@@ -432,12 +432,74 @@ tasks:
         echo "    fixture tenant channel: $SUKKO_IT_CHANNEL"
         echo "=== Run sdk-go live suite against the grid stack ==="
         run="^($(echo {{.REQUIRED_TESTS}} | tr ' ' '|'))\$"
-        out="$(cd {{.SDK_GO_DIR}} && go test -race -tags e2e -v -run "$run" -timeout 10m ./e2e/... 2>&1)" || { echo "$out"; echo "VERDICT: sdk-go suite failed"; exit 1; }
-        echo "$out"
+        # Task runs via mvdan/sh, where `v=$(failing)` under `set -e` aborts before a `||`
+        # can surface output — so disable -e around the run and branch on the captured exit.
+        set +e
+        ( cd {{.SDK_GO_DIR}} && go test -race -tags e2e -v -run "$run" -timeout 10m ./e2e/... ) >/tmp/sdkgo_e2e.out 2>&1
+        code=$?
+        set -e
+        cat /tmp/sdkgo_e2e.out
+        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-go suite failed (exit $code)"; exit 1; }
         for t in {{.REQUIRED_TESTS}}; do
-          echo "$out" | grep -qE -- "--- PASS: $t" || { echo "VERDICT: $t did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+          grep -qE -- "--- PASS: $t" /tmp/sdkgo_e2e.out || { echo "VERDICT: $t did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
         done
         echo "VERDICT: sdk-go required cells all PASS against Pro+kafka"
+
+  cell:sdk-js:
+    desc: "SDK-runner cell — drive the sdk-js SSE live test against a source-built Pro+kafka stack (ADR-0040 Tier2). Requires SDK_JS_DIR=<sdk-js checkout>."
+    requires:
+      vars: [SDK_JS_DIR]
+    vars:
+      # SSE transport is Pro-gated (features.go SSETransport) and gate-only (no extra
+      # topology), so a plain Pro cell reaches it. kafka keeps the data-path identical to
+      # the sdk-go cell. This is the first SDK cell asserting a real Pro-gated feature.
+      EDITION: pro
+      BACKEND: kafka
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/kafka.override.yml --profile kafka'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      WS_URL: ws://localhost:13000/ws
+    cmds:
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - defer: rm -f {{.SDK_JS_DIR}}/e2e/.fixture.json
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== SDK cell: sdk-js (SSE) edition={{.EDITION}} backend={{.BACKEND}} ==="
+        e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate (expect edition={{.EDITION}} expired=false) ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} {{.EDITION}} false
+        e2e_kafka_ready {{.COMPOSE}}
+      - |
+        set -eu
+        echo "=== Provision SDK fixture (cmd/e2efixture --format json) ==="
+        # sdk-js reads a .fixture.json object; e2efixture emits it (json format avoids a
+        # taskfile constructing a secret-shaped line, which the pre-commit scanner flags).
+        (cd ws && go run ./cmd/e2efixture \
+          --admin-key "$(pwd)/../{{.ADMIN_KEY_FILE}}" \
+          --provisioning-url "{{.PROVISIONING_URL}}" \
+          --ws-url "{{.WS_URL}}" \
+          --edition "{{.EDITION}}" \
+          --format json) > "{{.SDK_JS_DIR}}/e2e/.fixture.json"
+        echo "    wrote {{.SDK_JS_DIR}}/e2e/.fixture.json"
+        echo "=== Build SDK packages + run the SSE live test ==="
+        cd {{.SDK_JS_DIR}}
+        bun install
+        bun run --filter '@sukko/sdk' --filter '@sukko/websocket-node' build
+        # Task runs via mvdan/sh, where `v=$(failing)` under `set -e` aborts before a `||`
+        # can surface output — so disable -e around the run and branch on the captured exit.
+        set +e
+        bun run --filter '@sukko/e2e' test sse >/tmp/sdkjs_sse.out 2>&1
+        code=$?
+        set -e
+        cat /tmp/sdkjs_sse.out
+        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-js SSE suite failed (exit $code)"; exit 1; }
+        grep -qE 'Test Files[[:space:]]+1 passed' /tmp/sdkjs_sse.out || { echo "VERDICT: no SSE test ran (vacuous green refused)"; exit 1; }
+        echo "VERDICT: sdk-js SSE cell PASS against Pro+kafka"
 
   cell:pro-kafka:
     desc: "Grid cell — Pro/kafka (full green set; proves suites are backend-agnostic; + token-revocation on the push-smoke cadence)."
