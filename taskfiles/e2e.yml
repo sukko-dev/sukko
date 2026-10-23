@@ -498,7 +498,8 @@ tasks:
         set -e
         cat /tmp/sdkjs_sse.out
         [ "$code" -eq 0 ] || { echo "VERDICT: sdk-js SSE suite failed (exit $code)"; exit 1; }
-        grep -qE 'Test Files[[:space:]]+1 passed' /tmp/sdkjs_sse.out || { echo "VERDICT: no SSE test ran (vacuous green refused)"; exit 1; }
+        # Assert the Tests line (not Test Files) shows a PASS — a skipped file still "passes".
+        grep -qE 'Tests[[:space:]]+1 passed' /tmp/sdkjs_sse.out || { echo "VERDICT: SSE test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
         echo "VERDICT: sdk-js SSE cell PASS against Pro+kafka"
 
   cell:sdk-go-push:
@@ -666,6 +667,63 @@ tasks:
         [ "$code" -eq 0 ] || { echo "VERDICT: sdk-py SSE suite failed (exit $code)"; exit 1; }
         grep -qE '[[:space:]]1 passed' /tmp/sdkpy_sse.out || { echo "VERDICT: SSE test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
         echo "VERDICT: sdk-py SSE cell PASS against Pro+kafka"
+
+  cell:sdk-js-push:
+    desc: "SDK-runner cell — drive sdk-js's Web Push client (VAPID key) against a source-built push-enabled stack (ADR-0040). Requires SDK_JS_DIR=<sdk-js checkout>."
+    requires:
+      vars: [SDK_JS_DIR]
+    vars:
+      # Same push topology as cell:sdk-go-push / cell:sdk-py-push. sdk-js reads a .fixture.json
+      # (--format json), which carries `edition` so the Pro-gated push test un-skips.
+      EDITION: enterprise
+      BACKEND: kafka
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/push-validate.override.yml --profile enterprise --profile kafka'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      WS_URL: ws://localhost:13000/ws
+      PUSH_READY_URL: http://localhost:3009/ready
+    cmds:
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - defer: rm -f {{.SDK_JS_DIR}}/e2e/.fixture.json
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== SDK cell: sdk-js push (Web Push VAPID) edition={{.EDITION}} ==="
+        e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate + push-service /ready ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} {{.EDITION}} false
+        e2e_kafka_ready {{.COMPOSE}}
+        i=1
+        while [ "$i" -le 60 ]; do
+          if curl -sf "{{.PUSH_READY_URL}}" >/dev/null 2>&1; then echo "push-service ready"; break; fi
+          [ "$i" -eq 60 ] && { echo "push-service never became ready"; exit 1; }
+          i=$((i + 1)); sleep 2
+        done
+      - |
+        set -eu
+        echo "=== Provision fixture (--format json) + run sdk-js Web Push test ==="
+        (cd ws && go run ./cmd/e2efixture \
+          --admin-key "$(pwd)/../{{.ADMIN_KEY_FILE}}" \
+          --provisioning-url "{{.PROVISIONING_URL}}" \
+          --ws-url "{{.WS_URL}}" \
+          --edition "{{.EDITION}}" \
+          --format json) > "{{.SDK_JS_DIR}}/e2e/.fixture.json"
+        echo "    wrote {{.SDK_JS_DIR}}/e2e/.fixture.json"
+        cd {{.SDK_JS_DIR}}
+        bun install
+        bun run --filter '@sukko/sdk' --filter '@sukko/websocket-node' build
+        set +e
+        bun run --filter '@sukko/e2e' test push >/tmp/sdkjs_push.out 2>&1
+        code=$?
+        set -e
+        cat /tmp/sdkjs_push.out
+        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-js push suite failed (exit $code)"; exit 1; }
+        grep -qE 'Tests[[:space:]]+1 passed' /tmp/sdkjs_push.out || { echo "VERDICT: push test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+        echo "VERDICT: sdk-js Web Push cell PASS against a push-enabled stack"
 
   cell:pro-kafka:
     desc: "Grid cell — Pro/kafka (full green set; proves suites are backend-agnostic; + token-revocation on the push-smoke cadence)."

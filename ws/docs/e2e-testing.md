@@ -355,8 +355,10 @@ browser push receiver. `cell:sdk-py-push` extends the Web Push cell to sdk-py (s
 sdk-py reads the `SUKKO_IT_*` env, so the fixture uses `--format shell`). `cell:sdk-py-sse`
 extends SSE to sdk-py (Pro+kafka, gate-only; per ADR-0042 SSE is a supported receive-only
 transport across the SDKs). So SSE is proven on sdk-js + sdk-py, Web Push on sdk-go + sdk-py;
-sdk-go SSE is a deferred gap (ADR-0042). Still open on #61: sdk-js Web Push (needs a push test
-in that SDK).
+sdk-go SSE is a deferred gap (ADR-0042). `cell:sdk-js-push` completes the Web Push row (sdk-js
+VAPID fetch on the push topology). So the SDK grid now proves: plumbing (sdk-go), SSE on
+sdk-js + sdk-py, Web Push on all three. Pro-gated SDK tests gate on the fixture's `edition`
+(the Community nightlies skip them; the source-built grid cells run them via `--format json`).
 
 **Fail-closed contract:** a suite fails its cell on a non-`pass` report, any `fail`/`error`
 check, or **any skipped check not declared in the cell's allow-list**. The skip allow-list

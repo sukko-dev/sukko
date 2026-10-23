@@ -433,6 +433,10 @@ jobs:
       - name: Run sdk-js grid cell
         run: task e2e:cell:sdk-js SDK_JS_DIR=.sdk-js
 
+      - name: Run sdk-js Web Push grid cell
+        # Boots the push topology (the SSE cell above tore its stack down, freeing the ports).
+        run: task e2e:cell:sdk-js-push SDK_JS_DIR=.sdk-js
+
   # sdk-py Web Push grid cell — drives sdk-py's VAPID client against the push topology.
   # Needs uv (to run pytest) in addition to Go (cmd/e2efixture + Task). Heavy Docker job,
   # post-merge/nightly/dispatch only, not PRs.
