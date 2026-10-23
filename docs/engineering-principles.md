@@ -112,6 +112,8 @@ Tests MUST be run with Go's race detector (`-race` flag) in local development an
 
 **Test coverage for all changes is mandatory — no exceptions.** Bug fixes: reproduce and verify the fix; strengthen any test that missed it. Enhancements/refactors: update tests for changed behavior; add tests for new paths. New features: cover happy path, error paths, edge cases, and concurrency safety.
 
+**End-to-end coverage is mandatory.** Every user-facing capability — CLI commands, SDK client operations, REST/gRPC endpoints, and message-pipeline behaviors — MUST have an end-to-end test that drives it against a real running stack, not only unit tests over mocks. A capability is not complete until an e2e test proves it works end to end, and new capabilities MUST ship with their e2e coverage. E2E coverage MUST be audited periodically across all repositories (platform, CLI, SDKs); any functionality found without e2e coverage MUST be tracked and closed.
+
 ## IX. Security
 
 **Rate Limiting** — Rate limiting MUST be applied at multiple levels (global, per-IP, per-tenant). Rate limit responses MUST use HTTP 429 with `Retry-After` header.
