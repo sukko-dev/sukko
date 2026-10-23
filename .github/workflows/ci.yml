@@ -344,3 +344,45 @@ jobs:
 
       - name: Run push-validate E2E
         run: task e2e:push-validate
+
+  # ---------------------------------------------------------------------------
+  # SDK-runner grid (ADR-0040 Tier2, issue #61) — drives a language SDK's OWN live
+  # suite against a source-built edition stack, proving the SDK CLIENTS (not the
+  # tester's in-process clients) work against Pro-gated and kafka data-path features.
+  # ---------------------------------------------------------------------------
+  # Boots a source-built Pro+kafka stack, provisions a throwaway tenant with the
+  # cmd/e2efixture helper, then runs sdk-go's live suite through it with an
+  # anti-vacuous verdict (the required tests MUST pass, never skip). Drives sdk-go
+  # main — a forward-compat signal complementing the SDK repos' released-vs-released
+  # nightlies. Heavy Docker job, so post-merge/nightly/dispatch only, not PRs.
+  e2e-sdk-grid:
+    name: "sdk grid: sdk-go"
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sukko
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Checkout sdk-go (SDK under test)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: sukko-dev/sdk-go
+          path: .sdk-go
+          ref: main
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ws/go.mod
+          cache: true
+
+      - name: Fail fast if Docker is unavailable
+        # This SDK-grid cell MUST fail (not silently skip) without Docker.
+        run: docker version
+
+      - name: Install Task
+        run: go install github.com/go-task/task/v3/cmd/task@v3.44.0
+
+      - name: Run sdk-go grid cell
+        run: task e2e:cell:sdk-go SDK_GO_DIR=.sdk-go

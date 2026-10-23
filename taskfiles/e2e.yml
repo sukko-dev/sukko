@@ -379,6 +379,66 @@ tasks:
         echo "=== P2 failover chaos: kill master, assert recovery ==="
         e2e_sentinel_failover {{.TESTER_TOKEN}} {{.COMPOSE}}
 
+  # ---------------------------------------------------------------------------
+  # SDK-runner cells (ADR-0040 Tier2) — drive a language SDK's OWN live suite, not
+  # the tester's clients, against a source-built edition stack. They hook in at the
+  # cell level because the tester has no external-client seam: boot with e2e_boot_cell,
+  # provision a throwaway tenant with `cmd/e2efixture` (the §XIV-sanctioned Go helper,
+  # reusing the tester's own provisioning), then run the SDK suite and apply an
+  # anti-vacuous verdict — the required tests MUST pass, never skip.
+  # ---------------------------------------------------------------------------
+  cell:sdk-go:
+    desc: "SDK-runner cell — drive the sdk-go live suite against a source-built Pro+kafka stack (ADR-0040 Tier2). Requires SDK_GO_DIR=<sdk-go checkout>."
+    requires:
+      vars: [SDK_GO_DIR]
+    vars:
+      # Pro+kafka is the fullest data-path cell: the kafka backend gives the pos cursor
+      # the round-trip asserts and the retention the reconnect-replay leg needs; Pro is
+      # the forward target (SSE/push cells land in later slices).
+      EDITION: pro
+      BACKEND: kafka
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/kafka.override.yml --profile kafka'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      WS_URL: ws://localhost:13000/ws
+      # The SDK cell asserts Pro reachability by RUNNING the SDK, so these must PASS
+      # (not skip) — the verdict enforces it. Push stays skipped (needs push topology).
+      REQUIRED_TESTS: "TestRoundTrip TestAPIKeyAuth TestReconnectReplay"
+    cmds:
+      # Teardown runs even on failure (Taskfile defer, LIFO): stack down, then remove the key.
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== SDK cell: sdk-go edition={{.EDITION}} backend={{.BACKEND}} ==="
+        e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate (expect edition={{.EDITION}} expired=false) ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} {{.EDITION}} false
+        e2e_kafka_ready {{.COMPOSE}}
+      - |
+        set -eu
+        echo "=== Provision SDK fixture (cmd/e2efixture) ==="
+        fixture="$(cd ws && go run ./cmd/e2efixture \
+          --admin-key "$(pwd)/../{{.ADMIN_KEY_FILE}}" \
+          --provisioning-url "{{.PROVISIONING_URL}}" \
+          --ws-url "{{.WS_URL}}" \
+          --edition "{{.EDITION}}")"
+        # eval exports the SUKKO_IT_* env; the go test subshell inherits it (no inline prefix).
+        eval "$fixture"
+        echo "    fixture tenant channel: $SUKKO_IT_CHANNEL"
+        echo "=== Run sdk-go live suite against the grid stack ==="
+        run="^($(echo {{.REQUIRED_TESTS}} | tr ' ' '|'))\$"
+        out="$(cd {{.SDK_GO_DIR}} && go test -race -tags e2e -v -run "$run" -timeout 10m ./e2e/... 2>&1)" || { echo "$out"; echo "VERDICT: sdk-go suite failed"; exit 1; }
+        echo "$out"
+        for t in {{.REQUIRED_TESTS}}; do
+          echo "$out" | grep -qE -- "--- PASS: $t" || { echo "VERDICT: $t did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+        done
+        echo "VERDICT: sdk-go required cells all PASS against Pro+kafka"
+
   cell:pro-kafka:
     desc: "Grid cell — Pro/kafka (full green set; proves suites are backend-agnostic; + token-revocation on the push-smoke cadence)."
     cmds:

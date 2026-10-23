@@ -332,6 +332,19 @@ gated by the grid cells that run it via `REQUIRE_PASS` (every positive cell exce
 paid cells only);
 `push` keeps its own job. These jobs are not green-set grid cells.
 
+**SDK-runner grid (ADR-0040 Tier2):** the `e2e-sdk-grid` job and the `cell:sdk-go`
+task drive a language SDK's **own** live suite — not the tester's in-process clients —
+against a source-built edition stack, proving the SDK **clients** work against the
+paid and kafka data-path surface (the SDK repos' own nightlies only reach the released
+**Community** platform). `cell:sdk-go` boots a Pro+kafka stack with `e2e_boot_cell`,
+provisions a throwaway tenant with the `cmd/e2efixture` helper (the §XIV-sanctioned Go
+fixture — it reuses the tester's `auth.Setup` + channel/routing rules + api-key, emitting
+the `SUKKO_IT_*` env the SDK suite reads), then runs the suite with an **anti-vacuous
+verdict**: the required tests (`TestRoundTrip`, `TestAPIKeyAuth`, `TestReconnectReplay`)
+MUST pass, never skip. It is a separate heavy job (post-merge/nightly/dispatch, not PRs),
+checks out `sukko-dev/sdk-go@main`, and is not a green-set grid cell. Pro-gated *feature*
+cells (SSE, push) land in later slices (issue #61); this cell proves the integration path.
+
 **Fail-closed contract:** a suite fails its cell on a non-`pass` report, any `fail`/`error`
 check, or **any skipped check not declared in the cell's allow-list**. The skip allow-list
 is a per-cell, per-suite `<suite>:<check>` set (default **empty**); declared skips are
