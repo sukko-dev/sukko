@@ -393,6 +393,12 @@ jobs:
         # stack down (defer), freeing the fixed host ports for this boot.
         run: task e2e:cell:sdk-go-push SDK_GO_DIR=.sdk-go
 
+      - name: Run sdk-go SSE grid cell
+        # Pro-gated SSE transport (gate-only, no push topology) on a plain Pro+kafka stack —
+        # the sdk-go counterpart to cell:sdk-py-sse / the sdk-js SSE job. The push cell above
+        # tore its stack down (defer), freeing the fixed host ports for this boot.
+        run: task e2e:cell:sdk-go-sse SDK_GO_DIR=.sdk-go
+
   # sdk-js SSE grid cell — the first SDK cell asserting a Pro-gated feature (SSE transport).
   # Needs bun (to build the SDK packages + run vitest) in addition to Go (for cmd/e2efixture
   # and Task). Heavy Docker job, post-merge/nightly/dispatch only, not PRs.

@@ -621,6 +621,54 @@ tasks:
         grep -qE '[[:space:]]1 passed' /tmp/sdkpy_push.out || { echo "VERDICT: push test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
         echo "VERDICT: sdk-py Web Push VAPID cell PASS against a push-enabled stack"
 
+  cell:sdk-go-sse:
+    desc: "SDK-runner cell — drive sdk-go's SSE live test against a source-built Pro+kafka stack (ADR-0040/0042). Requires SDK_GO_DIR=<sdk-go checkout>."
+    requires:
+      vars: [SDK_GO_DIR]
+    vars:
+      # SSE transport is Pro-gated and gate-only (no push topology needed), so a plain Pro+kafka
+      # cell reaches it — same shape as cell:sdk-py-sse. sdk-go reads the SUKKO_IT_* env (--format shell).
+      EDITION: pro
+      BACKEND: kafka
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/kafka.override.yml --profile kafka'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      WS_URL: ws://localhost:13000/ws
+    cmds:
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== SDK cell: sdk-go SSE edition={{.EDITION}} backend={{.BACKEND}} ==="
+        e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate (expect edition={{.EDITION}} expired=false) ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} {{.EDITION}} false
+        e2e_kafka_ready {{.COMPOSE}}
+      - |
+        set -eu
+        echo "=== Provision fixture + run sdk-go SSE test ==="
+        fixture="$(cd ws && go run ./cmd/e2efixture \
+          --admin-key "$(pwd)/../{{.ADMIN_KEY_FILE}}" \
+          --provisioning-url "{{.PROVISIONING_URL}}" \
+          --ws-url "{{.WS_URL}}" \
+          --edition "{{.EDITION}}")"
+        eval "$fixture"
+        echo "    fixture tenant channel: $SUKKO_IT_CHANNEL"
+        # set +e around the run (Task's mvdan/sh aborts `v=$(failing)` under set -e before a ||).
+        set +e
+        ( cd {{.SDK_GO_DIR}} && go test -race -tags e2e -v -run '^TestSSESubscribeReceive$' -timeout 10m ./e2e/... ) >/tmp/sdkgo_sse.out 2>&1
+        code=$?
+        set -e
+        cat /tmp/sdkgo_sse.out
+        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-go SSE suite failed (exit $code)"; exit 1; }
+        # Anti-vacuous: the SSE test must PASS, not skip (a non-Pro stack would skip it).
+        grep -qE -- "--- PASS: TestSSESubscribeReceive" /tmp/sdkgo_sse.out || { echo "VERDICT: SSE test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+        echo "VERDICT: sdk-go SSE cell PASS against Pro+kafka"
+
   cell:sdk-py-sse:
     desc: "SDK-runner cell — drive sdk-py's SSE live test against a source-built Pro+kafka stack (ADR-0040/0042). Requires SDK_PY_DIR=<sdk-py checkout>."
     requires:
