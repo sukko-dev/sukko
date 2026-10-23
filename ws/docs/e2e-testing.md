@@ -332,6 +332,34 @@ gated by the grid cells that run it via `REQUIRE_PASS` (every positive cell exce
 paid cells only);
 `push` keeps its own job. These jobs are not green-set grid cells.
 
+**SDK-runner grid (ADR-0040 Tier2):** the `e2e-sdk-grid` job and the `cell:sdk-go`
+task drive a language SDK's **own** live suite — not the tester's in-process clients —
+against a source-built edition stack, proving the SDK **clients** work against the
+paid and kafka data-path surface (the SDK repos' own nightlies only reach the released
+**Community** platform). `cell:sdk-go` boots a Pro+kafka stack with `e2e_boot_cell`,
+provisions a throwaway tenant with the `cmd/e2efixture` helper (the §XIV-sanctioned Go
+fixture — it reuses the tester's `auth.Setup` + channel/routing rules + api-key, emitting
+the `SUKKO_IT_*` env the SDK suite reads), then runs the suite with an **anti-vacuous
+verdict**: the required tests (`TestRoundTrip`, `TestAPIKeyAuth`, `TestReconnectReplay`)
+MUST pass, never skip. It is a separate heavy job (post-merge/nightly/dispatch, not PRs),
+checks out `sukko-dev/sdk-go@main`, and is not a green-set grid cell. The `e2e-sdk-js-grid`
+job + `cell:sdk-js` extend this to the sdk-js **SSE** client — the first SDK cell asserting a
+Pro-gated *feature* (SSE transport, `features.go` SSETransport:Pro, gate-only): it runs the
+SDK's SSE subscribe→receive test against the same Pro+kafka stack (fixture emitted as a
+`.fixture.json` via `cmd/e2efixture --format json`; needs bun as well as Go). `cell:sdk-go-push`
+extends it to **Web Push**: it boots the push topology (the `push-validate` override's
+`GATEWAY_PUSH_ENABLED` + the `enterprise` compose profile that starts `push-service`), polls
+`push-service /ready`, and runs sdk-go's VAPID-key test (the keypair auto-generates on first
+fetch). Notification *delivery* stays with the tester's `push` suite — an SDK cannot be a
+browser push receiver. `cell:sdk-py-push` extends the Web Push cell to sdk-py (same topology;
+sdk-py reads the `SUKKO_IT_*` env, so the fixture uses `--format shell`). `cell:sdk-py-sse`
+extends SSE to sdk-py (Pro+kafka, gate-only; per ADR-0042 SSE is a supported receive-only
+transport across the SDKs). So SSE is proven on sdk-js + sdk-py, Web Push on sdk-go + sdk-py;
+sdk-go SSE is a deferred gap (ADR-0042). `cell:sdk-js-push` completes the Web Push row (sdk-js
+VAPID fetch on the push topology). So the SDK grid now proves: plumbing (sdk-go), SSE on
+sdk-js + sdk-py, Web Push on all three. Pro-gated SDK tests gate on the fixture's `edition`
+(the Community nightlies skip them; the source-built grid cells run them via `--format json`).
+
 **Fail-closed contract:** a suite fails its cell on a non-`pass` report, any `fail`/`error`
 check, or **any skipped check not declared in the cell's allow-list**. The skip allow-list
 is a per-cell, per-suite `<suite>:<check>` set (default **empty**); declared skips are
