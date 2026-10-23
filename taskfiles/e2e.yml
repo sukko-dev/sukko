@@ -501,6 +501,70 @@ tasks:
         grep -qE 'Test Files[[:space:]]+1 passed' /tmp/sdkjs_sse.out || { echo "VERDICT: no SSE test ran (vacuous green refused)"; exit 1; }
         echo "VERDICT: sdk-js SSE cell PASS against Pro+kafka"
 
+  cell:sdk-go-push:
+    desc: "SDK-runner cell — drive sdk-go's Web Push client (VAPID key) against a source-built push-enabled stack (ADR-0040 Tier2). Requires SDK_GO_DIR=<sdk-go checkout>."
+    requires:
+      vars: [SDK_GO_DIR]
+    vars:
+      # Web Push needs the push TOPOLOGY, not just a license gate: the push-service must be
+      # running and the gateway's push surface enabled. So this cell uses the push-validate
+      # override (GATEWAY_PUSH_ENABLED=true) + the `enterprise` compose profile (which starts
+      # push-service — the profile name is topology; the license edition is set separately).
+      # Enterprise ⊇ Pro and matches the proven push-validate boot. The VAPID keypair is
+      # auto-generated on first fetch, so no credential pre-provisioning is needed.
+      EDITION: enterprise
+      BACKEND: kafka
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/push-validate.override.yml --profile enterprise --profile kafka'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      WS_URL: ws://localhost:13000/ws
+      PUSH_READY_URL: http://localhost:3009/ready
+      REQUIRED_TESTS: "TestPushVAPIDKey"
+    cmds:
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== SDK cell: sdk-go push (Web Push VAPID) edition={{.EDITION}} ==="
+        e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate + push-service /ready ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} {{.EDITION}} false
+        e2e_kafka_ready {{.COMPOSE}}
+        # push-service /ready is 503 until the license syncs over WatchLicense — poll it
+        # (not /health, which is always-200 liveness) before fetching the VAPID key.
+        i=1
+        while [ "$i" -le 60 ]; do
+          if curl -sf "{{.PUSH_READY_URL}}" >/dev/null 2>&1; then echo "push-service ready"; break; fi
+          [ "$i" -eq 60 ] && { echo "push-service never became ready"; exit 1; }
+          i=$((i + 1)); sleep 2
+        done
+      - |
+        set -eu
+        echo "=== Provision fixture + run sdk-go Web Push test ==="
+        fixture="$(cd ws && go run ./cmd/e2efixture \
+          --admin-key "$(pwd)/../{{.ADMIN_KEY_FILE}}" \
+          --provisioning-url "{{.PROVISIONING_URL}}" \
+          --ws-url "{{.WS_URL}}" \
+          --edition "{{.EDITION}}")"
+        eval "$fixture"
+        echo "    fixture tenant channel: $SUKKO_IT_CHANNEL"
+        run="^($(echo {{.REQUIRED_TESTS}} | tr ' ' '|'))\$"
+        # set +e around the run (Task's mvdan/sh aborts `v=$(failing)` under set -e before a ||).
+        set +e
+        ( cd {{.SDK_GO_DIR}} && go test -race -tags e2e -v -run "$run" -timeout 10m ./e2e/... ) >/tmp/sdkgo_push.out 2>&1
+        code=$?
+        set -e
+        cat /tmp/sdkgo_push.out
+        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-go push suite failed (exit $code)"; exit 1; }
+        for t in {{.REQUIRED_TESTS}}; do
+          grep -qE -- "--- PASS: $t" /tmp/sdkgo_push.out || { echo "VERDICT: $t did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+        done
+        echo "VERDICT: sdk-go Web Push VAPID cell PASS against a push-enabled stack"
+
   cell:pro-kafka:
     desc: "Grid cell — Pro/kafka (full green set; proves suites are backend-agnostic; + token-revocation on the push-smoke cadence)."
     cmds:

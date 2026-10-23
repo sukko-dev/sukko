@@ -346,8 +346,12 @@ checks out `sukko-dev/sdk-go@main`, and is not a green-set grid cell. The `e2e-s
 job + `cell:sdk-js` extend this to the sdk-js **SSE** client — the first SDK cell asserting a
 Pro-gated *feature* (SSE transport, `features.go` SSETransport:Pro, gate-only): it runs the
 SDK's SSE subscribe→receive test against the same Pro+kafka stack (fixture emitted as a
-`.fixture.json` via `cmd/e2efixture --format json`; needs bun as well as Go). Web Push across
-SDKs is the next slice of #61.
+`.fixture.json` via `cmd/e2efixture --format json`; needs bun as well as Go). `cell:sdk-go-push`
+extends it to **Web Push**: it boots the push topology (the `push-validate` override's
+`GATEWAY_PUSH_ENABLED` + the `enterprise` compose profile that starts `push-service`), polls
+`push-service /ready`, and runs sdk-go's VAPID-key test (the keypair auto-generates on first
+fetch). Notification *delivery* stays with the tester's `push` suite — an SDK cannot be a
+browser push receiver. Extending the SSE and push cells to the other SDKs remains open on #61.
 
 **Fail-closed contract:** a suite fails its cell on a non-`pass` report, any `fail`/`error`
 check, or **any skipped check not declared in the cell's allow-list**. The skip allow-list

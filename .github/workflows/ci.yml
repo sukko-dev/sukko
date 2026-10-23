@@ -387,6 +387,12 @@ jobs:
       - name: Run sdk-go grid cell
         run: task e2e:cell:sdk-go SDK_GO_DIR=.sdk-go
 
+      - name: Run sdk-go Web Push grid cell
+        # Separate cell: it boots the push topology (push-service + GATEWAY_PUSH_ENABLED),
+        # which the plumbing cell above deliberately does not. The plumbing cell tore its
+        # stack down (defer), freeing the fixed host ports for this boot.
+        run: task e2e:cell:sdk-go-push SDK_GO_DIR=.sdk-go
+
   # sdk-js SSE grid cell — the first SDK cell asserting a Pro-gated feature (SSE transport).
   # Needs bun (to build the SDK packages + run vitest) in addition to Go (for cmd/e2efixture
   # and Task). Heavy Docker job, post-merge/nightly/dispatch only, not PRs.
