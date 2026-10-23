@@ -620,6 +620,53 @@ tasks:
         grep -qE '[[:space:]]1 passed' /tmp/sdkpy_push.out || { echo "VERDICT: push test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
         echo "VERDICT: sdk-py Web Push VAPID cell PASS against a push-enabled stack"
 
+  cell:sdk-py-sse:
+    desc: "SDK-runner cell — drive sdk-py's SSE live test against a source-built Pro+kafka stack (ADR-0040/0042). Requires SDK_PY_DIR=<sdk-py checkout>."
+    requires:
+      vars: [SDK_PY_DIR]
+    vars:
+      # SSE transport is Pro-gated and gate-only (no push topology needed), so a plain Pro+kafka
+      # cell reaches it — same shape as cell:sdk-js. sdk-py reads the SUKKO_IT_* env (--format shell).
+      EDITION: pro
+      BACKEND: kafka
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/kafka.override.yml --profile kafka'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      WS_URL: ws://localhost:13000/ws
+    cmds:
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== SDK cell: sdk-py SSE edition={{.EDITION}} backend={{.BACKEND}} ==="
+        e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate (expect edition={{.EDITION}} expired=false) ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} {{.EDITION}} false
+        e2e_kafka_ready {{.COMPOSE}}
+      - |
+        set -eu
+        echo "=== Provision fixture + run sdk-py SSE test ==="
+        fixture="$(cd ws && go run ./cmd/e2efixture \
+          --admin-key "$(pwd)/../{{.ADMIN_KEY_FILE}}" \
+          --provisioning-url "{{.PROVISIONING_URL}}" \
+          --ws-url "{{.WS_URL}}" \
+          --edition "{{.EDITION}}")"
+        eval "$fixture"
+        echo "    fixture tenant channel: $SUKKO_IT_CHANNEL"
+        # set +e around the run (Task's mvdan/sh aborts `v=$(failing)` under set -e before a ||).
+        set +e
+        ( cd {{.SDK_PY_DIR}} && uv run --extra dev pytest -m integration tests/integration -k test_sse_subscribe_receive -v ) >/tmp/sdkpy_sse.out 2>&1
+        code=$?
+        set -e
+        cat /tmp/sdkpy_sse.out
+        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-py SSE suite failed (exit $code)"; exit 1; }
+        grep -qE '[[:space:]]1 passed' /tmp/sdkpy_sse.out || { echo "VERDICT: SSE test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+        echo "VERDICT: sdk-py SSE cell PASS against Pro+kafka"
+
   cell:pro-kafka:
     desc: "Grid cell — Pro/kafka (full green set; proves suites are backend-agnostic; + token-revocation on the push-smoke cadence)."
     cmds:

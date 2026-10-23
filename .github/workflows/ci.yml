@@ -470,3 +470,7 @@ jobs:
 
       - name: Run sdk-py Web Push grid cell
         run: task e2e:cell:sdk-py-push SDK_PY_DIR=.sdk-py
+
+      - name: Run sdk-py SSE grid cell
+        # Gate-only Pro feature (no push topology) — the push cell above tore its stack down.
+        run: task e2e:cell:sdk-py-sse SDK_PY_DIR=.sdk-py
