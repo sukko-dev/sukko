@@ -42,9 +42,13 @@ type Handler struct {
 	router      http.Handler
 }
 
-// NewHandler creates an Handler. Returns (nil, nil) when AdminUIEnabled=false.
+// NewHandler creates the admin UI handler. It returns an http.Handler (not *Handler)
+// so that the disabled case returns a TRUE-nil interface: callers wire the result
+// straight into api.RouterConfig.AdminUIHandler, whose mount guard is
+// `if AdminUIHandler != nil`. Returning a typed-nil *Handler would wrap a nil pointer
+// in a non-nil interface, defeating that guard and panicking on every /admin/* request.
 func NewHandler(cfg platform.AdminUIConfig, svc *provisioning.Service, sseDelegate SSEDelegate,
-	edMgr *license.Manager, logger zerolog.Logger) (*Handler, error) {
+	edMgr *license.Manager, logger zerolog.Logger) (http.Handler, error) {
 	if !cfg.AdminUIEnabled {
 		return nil, nil
 	}

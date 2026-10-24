@@ -428,8 +428,18 @@ func main() {
 		)
 	}
 
-	// Initialize Admin UI handler (returns nil when ADMIN_UI_ENABLED=false — router nil-guards).
-	adminUIHandler, err := adminui.NewHandler(cfg.AdminUIConfig, svc, sharedAnalyticsSSEHandler, cfg.EditionManager(), structuredLogger)
+	// Pass the analytics SSE delegate as a TRUE-nil interface when analytics is disabled
+	// (sharedAnalyticsSSEHandler is a nil *AnalyticsSSEHandler by default). Assigning a
+	// typed-nil pointer straight into NewHandler's SSEDelegate interface parameter makes
+	// Handler.sseDelegate non-nil, so GET /admin/analytics/stream calls ServeHTTP on a nil
+	// receiver and panics (500) instead of returning 503 SSE_UNAVAILABLE.
+	var analyticsSSEDelegate adminui.SSEDelegate
+	if sharedAnalyticsSSEHandler != nil {
+		analyticsSSEDelegate = sharedAnalyticsSSEHandler
+	}
+
+	// Initialize Admin UI handler (returns a nil http.Handler when ADMIN_UI_ENABLED=false — router nil-guards).
+	adminUIHandler, err := adminui.NewHandler(cfg.AdminUIConfig, svc, analyticsSSEDelegate, cfg.EditionManager(), structuredLogger)
 	if err != nil {
 		structuredLogger.Fatal().Err(err).Msg("Failed to create Admin UI handler")
 	}
