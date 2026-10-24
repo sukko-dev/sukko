@@ -489,7 +489,10 @@ tasks:
         echo "=== Build SDK packages + run the SSE live test ==="
         cd {{.SDK_JS_DIR}}
         bun install
-        bun run --filter '@sukko/sdk' --filter '@sukko/websocket-node' build
+        # Build @sukko/sdk FIRST, then @sukko/websocket-node — the latter's dts build imports
+        # @sukko/sdk's types, so a single parallel `--filter A --filter B build` races and
+        # intermittently fails with "Cannot find module '@sukko/sdk'". The `&&` forces order.
+        bun run --filter '@sukko/sdk' build && bun run --filter '@sukko/websocket-node' build
         # Task runs via mvdan/sh, where `v=$(failing)` under `set -e` aborts before a `||`
         # can surface output — so disable -e around the run and branch on the captured exit.
         set +e
@@ -763,7 +766,9 @@ tasks:
         echo "    wrote {{.SDK_JS_DIR}}/e2e/.fixture.json"
         cd {{.SDK_JS_DIR}}
         bun install
-        bun run --filter '@sukko/sdk' --filter '@sukko/websocket-node' build
+        # @sukko/sdk first, then @sukko/websocket-node (its dts build needs @sukko/sdk's types;
+        # a parallel build races — see cell:sdk-js). The `&&` forces order.
+        bun run --filter '@sukko/sdk' build && bun run --filter '@sukko/websocket-node' build
         set +e
         bun run --filter '@sukko/e2e' test push >/tmp/sdkjs_push.out 2>&1
         code=$?
