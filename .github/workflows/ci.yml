@@ -22,7 +22,11 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # The nightly schedule run gets its OWN group so a push to main can't cancel it: the SDK grid
+  # jobs now run ONLY on schedule/dispatch, so a push sharing the ref group would silently drop
+  # that night's grid coverage (cancel-in-progress is evaluated for the incoming run, so the flag
+  # alone can't protect a running job — the group must differ). Push/PR keep the usual ref group.
+  group: ${{ github.event_name == 'schedule' && 'ci-nightly' || format('ci-{0}', github.ref) }}
   cancel-in-progress: true
 
 permissions:
@@ -354,10 +358,11 @@ jobs:
   # cmd/e2efixture helper, then runs sdk-go's live suite through it with an
   # anti-vacuous verdict (the required tests MUST pass, never skip). Drives sdk-go
   # main — a forward-compat signal complementing the SDK repos' released-vs-released
-  # nightlies. Heavy Docker job, so post-merge/nightly/dispatch only, not PRs.
+  # nightlies. Heavy Docker job — nightly/dispatch only (not push, not PRs): these source-built
+  # SDK forward-compat cells run on the nightly cadence, like the SDK repos' own live-e2e nightlies.
   e2e-sdk-grid:
     name: "sdk grid: sdk-go"
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -399,12 +404,13 @@ jobs:
         # tore its stack down (defer), freeing the fixed host ports for this boot.
         run: task e2e:cell:sdk-go-sse SDK_GO_DIR=.sdk-go
 
-  # sdk-js SSE grid cell — the first SDK cell asserting a Pro-gated feature (SSE transport).
-  # Needs bun (to build the SDK packages + run vitest) in addition to Go (for cmd/e2efixture
-  # and Task). Heavy Docker job, post-merge/nightly/dispatch only, not PRs.
+  # sdk-js WS+SSE grid cell — runs the SDK's round-trip (WS) + SSE live tests; SSE is the
+  # Pro-gated transport. Needs bun (to build the SDK packages + run vitest) in addition to Go
+  # (for cmd/e2efixture and Task). Heavy Docker job — nightly/dispatch only (not push, not PRs);
+  # see sdk-go job.
   e2e-sdk-js-grid:
     name: "sdk grid: sdk-js"
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -445,10 +451,10 @@ jobs:
 
   # sdk-py Web Push grid cell — drives sdk-py's VAPID client against the push topology.
   # Needs uv (to run pytest) in addition to Go (cmd/e2efixture + Task). Heavy Docker job,
-  # post-merge/nightly/dispatch only, not PRs.
+  # nightly/dispatch only (not push, not PRs); see sdk-go job.
   e2e-sdk-py-grid:
     name: "sdk grid: sdk-py"
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
