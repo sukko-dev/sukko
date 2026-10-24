@@ -21,7 +21,7 @@ const testToken = "test-admin-token-32-chars-longxxx"
 
 // buildHandler creates a fully initialized AdminUIHandler for testing.
 // svc may be nil — only tests that exercise service calls need a real service.
-func buildHandler(t *testing.T, token string, edMgr *license.Manager) *adminui.Handler {
+func buildHandler(t *testing.T, token string, edMgr *license.Manager) http.Handler {
 	t.Helper()
 	cfg := platform.AdminUIConfig{
 		AdminUIEnabled:  true,
@@ -38,12 +38,78 @@ func buildHandler(t *testing.T, token string, edMgr *license.Manager) *adminui.H
 	return h
 }
 
-// buildProEditionManager creates a Community-edition Manager for testing.
-// (Pro/Enterprise testing requires a signed license key — not available in unit tests.)
-func buildProEditionManager(t *testing.T) *license.Manager {
+// TestNewHandlerDisabledReturnsNilInterface guards the §II boundary between the admin
+// UI constructor and the router mount. cmd/provisioning wires NewHandler's return value
+// straight into api.RouterConfig.AdminUIHandler (an http.Handler), whose mount guard is
+// `if AdminUIHandler != nil`. When the admin UI is disabled, NewHandler MUST yield a
+// TRUE-nil http.Handler: a typed-nil *Handler wrapped in the interface is non-nil to
+// that guard, so it gets mounted and every /admin/* request nil-derefs the handler →
+// panic → 500 instead of the correct 404.
+func TestNewHandlerDisabledReturnsNilInterface(t *testing.T) {
+	t.Parallel()
+
+	// Explicit `=` (not `:=`) so h keeps its http.Handler type: the whole point is to
+	// assert the INTERFACE is nil, not the concrete pointer. A `:=` here would let a
+	// future edit shadow h with the concrete return type and silently stop guarding.
+	var h http.Handler
+	var err error
+	h, err = adminui.NewHandler(platform.AdminUIConfig{AdminUIEnabled: false}, nil, nil, nil, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewHandler(disabled): unexpected error: %v", err)
+	}
+	if h != nil {
+		t.Fatalf("NewHandler(disabled) = non-nil http.Handler (%T); want nil so the router skips the /admin mount", h)
+	}
+}
+
+// TestAdminUI_AnalyticsStreamUnavailableWhenNoDelegate covers the 503 branch that the
+// main.go typed-nil guard keeps reachable: with a nil SSE delegate (analytics not
+// configured — the default), GET /admin/analytics/stream must return 503 SSE_UNAVAILABLE,
+// not panic. A typed-nil delegate passed into NewHandler would make h.sseDelegate non-nil,
+// skip the `== nil` check, and call ServeHTTP on a nil receiver → 500.
+func TestAdminUI_AnalyticsStreamUnavailableWhenNoDelegate(t *testing.T) {
+	t.Parallel()
+	// Pro edition so the Analytics feature gate passes; buildHandler wires a nil delegate.
+	h := buildHandler(t, testToken, license.NewTestManager(license.Pro))
+
+	// The route is session-protected — log in to obtain a session cookie.
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token="+testToken))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusSeeOther {
+		t.Fatalf("login: got %d, want 303", loginRec.Code)
+	}
+	var session *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == adminui.AdminSessionCookieName {
+			session = c
+		}
+	}
+	if session == nil {
+		t.Fatal("login did not set a session cookie")
+	}
+
+	req := adminReq(http.MethodGet, "/analytics/stream")
+	req.AddCookie(session)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /analytics/stream with nil delegate = %d, want 503", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "SSE_UNAVAILABLE") {
+		t.Errorf("body = %q, want it to contain SSE_UNAVAILABLE", rec.Body.String())
+	}
+}
+
+// buildCommunityEditionManager creates a Community-edition license Manager for testing —
+// so the admin UI Gate serves the upgrade page (Community lacks the AdminUI feature). Any
+// edition is constructible here via license.NewTestManager (e.g. the analytics stream test
+// uses license.NewTestManager(license.Pro)); pass nil to buildHandler to bypass the Gate.
+func buildCommunityEditionManager(t *testing.T) *license.Manager {
 	t.Helper()
-	mgr := license.NewTestManager(license.Community)
-	return mgr
+	return license.NewTestManager(license.Community)
 }
 
 // adminReq builds an http.Request for the AdminUIHandler. Since the handler is mounted
@@ -56,7 +122,7 @@ func adminReq(method, path string) *http.Request {
 // TestAdminUI_StaticAssets_ContentType verifies static files are served with correct Content-Type.
 func TestAdminUI_StaticAssets_ContentType(t *testing.T) {
 	t.Parallel()
-	h := buildHandler(t, testToken, buildProEditionManager(t))
+	h := buildHandler(t, testToken, buildCommunityEditionManager(t))
 	tests := []struct {
 		path     string
 		wantMIME string
@@ -85,7 +151,7 @@ func TestAdminUI_StaticAssets_ContentType(t *testing.T) {
 // schema returns application/json.
 func TestAdminUI_ContentTypeIsolation(t *testing.T) {
 	t.Parallel()
-	h := buildHandler(t, testToken, buildProEditionManager(t))
+	h := buildHandler(t, testToken, buildCommunityEditionManager(t))
 
 	// Schema endpoint — no auth required.
 	req := adminReq(http.MethodGet, "/schemas/channel-rules.json")
@@ -207,7 +273,7 @@ func TestAdminUI_Logout_ClearsCookie(t *testing.T) {
 // TestAdminUI_SessionRequired_Redirect verifies protected routes redirect when no session.
 func TestAdminUI_SessionRequired_Redirect(t *testing.T) {
 	t.Parallel()
-	h := buildHandler(t, testToken, buildProEditionManager(t))
+	h := buildHandler(t, testToken, buildCommunityEditionManager(t))
 	// Community edition → AdminUIGate returns upgrade page (no auth). Test Pro-gated paths
 	// by using a nil edition manager which falls through to session checks.
 	routes := []string{"/", "/status", "/system/health"}
@@ -284,23 +350,10 @@ func TestAdminUI_MountedContentTypeIsolation(t *testing.T) {
 	}
 }
 
-// TestAdminUI_HandlerDisabled verifies NewHandler returns nil when AdminUIEnabled=false.
-func TestAdminUI_HandlerDisabled(t *testing.T) {
-	t.Parallel()
-	cfg := platform.AdminUIConfig{AdminUIEnabled: false}
-	h, err := adminui.NewHandler(cfg, nil, nil, nil, zerolog.Nop())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if h != nil {
-		t.Error("expected nil handler when AdminUIEnabled=false")
-	}
-}
-
 // TestAdminUI_ChannelRulesSchemaEndpoint verifies the schema endpoint serves valid JSON.
 func TestAdminUI_ChannelRulesSchemaEndpoint(t *testing.T) {
 	t.Parallel()
-	h := buildHandler(t, testToken, buildProEditionManager(t))
+	h := buildHandler(t, testToken, buildCommunityEditionManager(t))
 	req := adminReq(http.MethodGet, "/schemas/channel-rules.json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

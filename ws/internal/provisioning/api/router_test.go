@@ -21,6 +21,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/sukko-dev/sukko/internal/provisioning"
+	"github.com/sukko-dev/sukko/internal/provisioning/adminui"
 	"github.com/sukko-dev/sukko/internal/provisioning/api"
 	provauth "github.com/sukko-dev/sukko/internal/provisioning/auth"
 	"github.com/sukko-dev/sukko/internal/provisioning/eventbus"
@@ -29,6 +30,7 @@ import (
 	"github.com/sukko-dev/sukko/internal/provisioning/testutil"
 	"github.com/sukko-dev/sukko/internal/shared/auth"
 	"github.com/sukko-dev/sukko/internal/shared/license"
+	"github.com/sukko-dev/sukko/internal/shared/platform"
 	sharedtestutil "github.com/sukko-dev/sukko/internal/shared/testutil"
 )
 
@@ -153,6 +155,35 @@ func mustNewRouter(t *testing.T, cfg api.RouterConfig) http.Handler {
 	t.Helper()
 	r, _ := mustNewRouterWithAuth(t, cfg)
 	return r
+}
+
+// TestRouterAdminUIDisabledReturns404 pins the end-to-end wiring that the headline bug
+// broke: with the admin UI disabled, adminui.NewHandler returns a TRUE-nil http.Handler,
+// so the RouterConfig.AdminUIHandler mount guard must skip /admin and every /admin/*
+// request 404s — not panic on a nil receiver → 500. (Before the NewHandler-returns-
+// http.Handler fix, the disabled handler was a typed-nil that the guard mounted, and
+// these requests returned 500.)
+func TestRouterAdminUIDisabledReturns404(t *testing.T) {
+	t.Parallel()
+
+	adminUIHandler, err := adminui.NewHandler(platform.AdminUIConfig{AdminUIEnabled: false}, nil, nil, nil, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("adminui.NewHandler(disabled): %v", err)
+	}
+	router := mustNewRouter(t, api.RouterConfig{
+		Service:        newTestService(),
+		Logger:         zerolog.Nop(),
+		AdminUIHandler: adminUIHandler,
+	})
+
+	for _, path := range []string{"/admin/", "/admin/login", "/admin/analytics/stream"} {
+		req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s with admin UI disabled = %d, want 404", path, rec.Code)
+		}
+	}
 }
 
 // mustNewRouterWithAuth creates a test router and returns a function that adds
