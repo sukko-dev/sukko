@@ -282,3 +282,54 @@ func TestServiceImageMap_CoversAllBuildServices(t *testing.T) {
 		t.Errorf("transform emitted warnings for build: services not in serviceImageMap:\n%s\nAdd these services to serviceImageMap in main.go", warnings)
 	}
 }
+
+// TestTransform_StripsRelativeHostPathBindMounts covers the rule that keeps repo-relative
+// bind-mounts out of the published/CLI compose (run from the operator's .sukko dir, where
+// such paths don't exist and would silently create empty host dirs). Relative sources
+// (./ or ../), short or long syntax, are stripped; absolute paths and named volumes stay.
+func TestTransform_StripsRelativeHostPathBindMounts(t *testing.T) {
+	cases := []struct {
+		name     string
+		volume   string // one entry under `volumes:`
+		probe    string // substring whose presence/absence proves the outcome
+		stripped bool   // true: probe must be absent; false: must be preserved
+	}{
+		{"short relative ./", "      - ./x/dashboards:/var/lib/grafana/dashboards:ro", "./x/dashboards", true},
+		{"short relative ../", "      - ../sibling:/data", "../sibling", true},
+		{"short relative quoted", `      - "./quoted:/data:ro"`, "quoted", true},
+		{"long-syntax relative", "      - type: bind\n        source: ./long-src\n        target: /data", "long-src", true},
+		{"absolute preserved", "      - /abs/host:/data", "/abs/host", false},
+		{"named volume preserved", "      - named-vol:/var/lib/grafana", "named-vol", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := "services:\n  grafana:\n    image: grafana/grafana:10.2.0\n    volumes:\n" + tc.volume + "\n"
+			var out, errOut bytes.Buffer
+			if err := run(strings.NewReader(input), &out, &errOut); err != nil {
+				t.Fatalf("run returned error: %v", err)
+			}
+			present := strings.Contains(out.String(), tc.probe)
+			if present == tc.stripped {
+				t.Errorf("%q: present=%v, stripped=%v (mismatch)\n%s", tc.probe, present, tc.stripped, out.String())
+			}
+		})
+	}
+}
+
+// TestTransform_EmptyVolumesKeyRemoved: when the only volume is a stripped relative
+// bind-mount, the now-empty volumes: key must be dropped (Grafana block stays clean).
+func TestTransform_EmptyVolumesKeyRemoved(t *testing.T) {
+	input := `services:
+  grafana:
+    image: grafana/grafana:10.2.0
+    volumes:
+      - ./only/mount:/data
+`
+	var out, errOut bytes.Buffer
+	if err := run(strings.NewReader(input), &out, &errOut); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+	if strings.Contains(out.String(), "volumes:") {
+		t.Errorf("empty volumes key should be removed, got:\n%s", out.String())
+	}
+}
