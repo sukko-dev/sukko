@@ -496,13 +496,15 @@ tasks:
         # Task runs via mvdan/sh, where `v=$(failing)` under `set -e` aborts before a `||`
         # can surface output — so disable -e around the run and branch on the captured exit.
         set +e
-        bun run --filter '@sukko/e2e' test sse >/tmp/sdkjs_sse.out 2>&1
+        NO_COLOR=1 FORCE_COLOR=0 bun run --filter '@sukko/e2e' test sse >/tmp/sdkjs_sse.out 2>&1
         code=$?
         set -e
         cat /tmp/sdkjs_sse.out
         [ "$code" -eq 0 ] || { echo "VERDICT: sdk-js SSE suite failed (exit $code)"; exit 1; }
         # Assert the Tests line (not Test Files) shows a PASS — a skipped file still "passes".
-        grep -qE 'Tests[[:space:]]+1 passed' /tmp/sdkjs_sse.out || { echo "VERDICT: SSE test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+        # Strip ANSI SGR codes first: vitest can colorize even when redirected to a file, and the
+        # escape codes between "Tests" and "1 passed" break [[:space:]]+ (false "vacuous" verdict).
+        perl -pe 's/\e\[[0-9;]*m//g' /tmp/sdkjs_sse.out | grep -qE 'Tests[[:space:]]+1 passed' || { echo "VERDICT: SSE test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
         echo "VERDICT: sdk-js SSE cell PASS against Pro+kafka"
 
   cell:sdk-go-push:
@@ -770,12 +772,13 @@ tasks:
         # a parallel build races — see cell:sdk-js). The `&&` forces order.
         bun run --filter '@sukko/sdk' build && bun run --filter '@sukko/websocket-node' build
         set +e
-        bun run --filter '@sukko/e2e' test push >/tmp/sdkjs_push.out 2>&1
+        NO_COLOR=1 FORCE_COLOR=0 bun run --filter '@sukko/e2e' test push >/tmp/sdkjs_push.out 2>&1
         code=$?
         set -e
         cat /tmp/sdkjs_push.out
         [ "$code" -eq 0 ] || { echo "VERDICT: sdk-js push suite failed (exit $code)"; exit 1; }
-        grep -qE 'Tests[[:space:]]+1 passed' /tmp/sdkjs_push.out || { echo "VERDICT: push test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+        # Strip ANSI SGR codes first (vitest may colorize even when redirected — see cell:sdk-js SSE).
+        perl -pe 's/\e\[[0-9;]*m//g' /tmp/sdkjs_push.out | grep -qE 'Tests[[:space:]]+1 passed' || { echo "VERDICT: push test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
         echo "VERDICT: sdk-js Web Push cell PASS against a push-enabled stack"
 
   cell:pro-kafka:
