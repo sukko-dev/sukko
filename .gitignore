@@ -4,6 +4,7 @@ ws/server
 ws/provisioning
 ws/push
 ws/tester
+ws/e2efixture
 ws/cli
 ws/migrate-dlq
 ws/webhook-worker

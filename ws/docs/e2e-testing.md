@@ -343,11 +343,13 @@ the `SUKKO_IT_*` env the SDK suite reads), then runs the suite with an **anti-va
 verdict**: the required tests (`TestRoundTrip`, `TestAPIKeyAuth`, `TestReconnectReplay`)
 MUST pass, never skip. It is a separate heavy job (nightly/dispatch only — not push, not PRs),
 checks out `sukko-dev/sdk-go@main`, and is not a green-set grid cell. The `e2e-sdk-js-grid`
-job + `cell:sdk-js` extend this to the sdk-js client — it runs the SDK's **WS (round-trip) +
-SSE** live tests against the same Pro+kafka stack (SSE is the Pro-gated transport, `features.go`
-SSETransport:Pro; the suite's remaining files — api-key, rest-publish, reconnect — need a
-cross-repo sdk-js change before they can run against the grid fixture). Fixture emitted as a
-`.fixture.json` via `cmd/e2efixture --format json`; needs bun as well as Go. `cell:sdk-go-push`
+job + `cell:sdk-js` extend this to the sdk-js client — it runs the SDK's **full non-push live
+suite** (WS round-trip, SSE, api-key, rest-publish, reconnect) against the same Pro+kafka stack
+(SSE is the Pro-gated transport, `features.go` SSETransport:Pro). The reconnect test bounces the
+gateway container, so the cell pins the compose project name (`-p`) and passes it to the fixture
+(`cmd/e2efixture --compose-project`), which emits it in the `.fixture.json` so the test can target
+`<project>-ws-gateway-1`. Fixture emitted as a `.fixture.json` via `cmd/e2efixture --format json`;
+needs bun as well as Go. `cell:sdk-go-push`
 extends it to **Web Push**: it boots the push topology (the `push-validate` override's
 `GATEWAY_PUSH_ENABLED` + the `enterprise` compose profile that starts `push-service`), polls
 `push-service /ready`, and runs sdk-go's VAPID-key test (the keypair auto-generates on first
