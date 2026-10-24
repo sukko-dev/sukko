@@ -446,7 +446,7 @@ tasks:
         echo "VERDICT: sdk-go required cells all PASS against Pro+kafka"
 
   cell:sdk-js:
-    desc: "SDK-runner cell — drive the sdk-js WS (round-trip) + SSE live tests against a source-built Pro+kafka stack (ADR-0040 Tier2). Requires SDK_JS_DIR=<sdk-js checkout>."
+    desc: "SDK-runner cell — drive the sdk-js full non-push live suite (WS round-trip, SSE, api-key, rest-publish, reconnect) against a source-built Pro+kafka stack (ADR-0040 Tier2). Requires SDK_JS_DIR=<sdk-js checkout>."
     requires:
       vars: [SDK_JS_DIR]
     vars:
@@ -455,7 +455,11 @@ tasks:
       # the sdk-go cell. This is the first SDK cell asserting a real Pro-gated feature.
       EDITION: pro
       BACKEND: kafka
-      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/kafka.override.yml --profile kafka'
+      # Pin the compose project name with `-p` so it is deterministic (not the checkout-dir
+      # basename) and rides every compose call — up, down, exec — identically. The reconnect
+      # test bounces `<project>-ws-gateway-1`, so the fixture is told this same name below.
+      COMPOSE_PROJECT: sukko-sdkjs-grid
+      COMPOSE: 'docker compose -p {{.COMPOSE_PROJECT}} -f docker-compose.yml -f taskfiles/e2e/kafka.override.yml --profile kafka'
       ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
       PROVISIONING_URL: http://localhost:18080
       WS_URL: ws://localhost:13000/ws
@@ -466,7 +470,7 @@ tasks:
       - |
         set -eu
         . taskfiles/e2e/stack.sh
-        echo "=== SDK cell: sdk-js (WS+SSE) edition={{.EDITION}} backend={{.BACKEND}} ==="
+        echo "=== SDK cell: sdk-js (full non-push suite) edition={{.EDITION}} backend={{.BACKEND}} ==="
         e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
       - |
         set -eu
@@ -479,14 +483,16 @@ tasks:
         echo "=== Provision SDK fixture (cmd/e2efixture --format json) ==="
         # sdk-js reads a .fixture.json object; e2efixture emits it (json format avoids a
         # taskfile constructing a secret-shaped line, which the pre-commit scanner flags).
+        # --compose-project lets the reconnect test bounce <project>-ws-gateway-1.
         (cd ws && go run ./cmd/e2efixture \
           --admin-key "$(pwd)/../{{.ADMIN_KEY_FILE}}" \
           --provisioning-url "{{.PROVISIONING_URL}}" \
           --ws-url "{{.WS_URL}}" \
           --edition "{{.EDITION}}" \
+          --compose-project "{{.COMPOSE_PROJECT}}" \
           --format json) > "{{.SDK_JS_DIR}}/e2e/.fixture.json"
         echo "    wrote {{.SDK_JS_DIR}}/e2e/.fixture.json"
-        echo "=== Build SDK packages + run the WS (round-trip) + SSE live tests ==="
+        echo "=== Build SDK packages + run the full non-push live suite ==="
         cd {{.SDK_JS_DIR}}
         bun install
         # Build @sukko/sdk FIRST, then @sukko/websocket-node — the latter's dts build imports
@@ -496,23 +502,23 @@ tasks:
         # Task runs via mvdan/sh, where `v=$(failing)` under `set -e` aborts before a `||`
         # can surface output — so disable -e around the run and branch on the captured exit.
         set +e
-        # WS core (round-trip) + SSE live tests — both subscribe to the FIXTURE's channel, so they
-        # work against the grid's throwaway tenant. The suite's other files (api-key, rest-publish,
-        # reconnect) hardcode the `demo` tenant / need a service bounce the grid fixture doesn't
-        # provide — adding them needs a cross-repo sdk-js change (tracked separately). push stays
-        # its own cell (it needs the push topology). sse runs only on Pro (the grid IS Pro).
-        NO_COLOR=1 FORCE_COLOR=0 bun run --filter '@sukko/e2e' test round-trip sse >/tmp/sdkjs_e2e.out 2>&1
+        # The full non-push suite: all five files derive their channel from the FIXTURE (sdk-js#27),
+        # so they run against the grid's throwaway tenant. reconnect bounces <project>-ws-gateway-1,
+        # which is why the fixture carries --compose-project above. push stays its own cell (it needs
+        # the push topology). sse + the rest run on Pro (the grid IS Pro).
+        NO_COLOR=1 FORCE_COLOR=0 bun run --filter '@sukko/e2e' test round-trip sse api-key rest-publish reconnect >/tmp/sdkjs_e2e.out 2>&1
         code=$?
         set -e
         cat /tmp/sdkjs_e2e.out
         [ "$code" -eq 0 ] || { echo "VERDICT: sdk-js suite failed (exit $code)"; exit 1; }
         # Anti-vacuous, per file (mirrors cell:sdk-go): each file MUST show a vitest PASS with NO
         # skipped suffix — "(N test[s]) <time>", refusing "(N test | M skipped)". A runtime ctx.skip()
-        # (sse on a non-Pro stack) still prints ✓, so match the count, not just ✓. ANSI-strip first (#66).
-        for f in round-trip sse; do
+        # still prints ✓ (sse off-Pro; reconnect without composeProject), so match the count, not just
+        # ✓ — the guard FORCES composeProject to be wired, else reconnect skips and fails here. ANSI #66.
+        for f in round-trip sse api-key rest-publish reconnect; do
           perl -pe 's/\e\[[0-9;]*m//g' /tmp/sdkjs_e2e.out | grep -qE "✓ ${f}\.test\.ts \([0-9]+ tests?\) " || { echo "VERDICT: sdk-js ${f} did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
         done
-        echo "VERDICT: sdk-js WS+SSE cells PASS against Pro+kafka"
+        echo "VERDICT: sdk-js full non-push suite PASS against Pro+kafka"
 
   cell:sdk-go-push:
     desc: "SDK-runner cell — drive sdk-go's Web Push client (VAPID key) against a source-built push-enabled stack (ADR-0040 Tier2). Requires SDK_GO_DIR=<sdk-go checkout>."

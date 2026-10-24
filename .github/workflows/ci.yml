@@ -404,10 +404,10 @@ jobs:
         # tore its stack down (defer), freeing the fixed host ports for this boot.
         run: task e2e:cell:sdk-go-sse SDK_GO_DIR=.sdk-go
 
-  # sdk-js WS+SSE grid cell — runs the SDK's round-trip (WS) + SSE live tests; SSE is the
-  # Pro-gated transport. Needs bun (to build the SDK packages + run vitest) in addition to Go
-  # (for cmd/e2efixture and Task). Heavy Docker job — nightly/dispatch only (not push, not PRs);
-  # see sdk-go job.
+  # sdk-js grid cell — runs the SDK's full non-push live suite (WS round-trip, SSE, api-key,
+  # rest-publish, reconnect) against the source-built Pro+kafka stack. Needs bun (to build the
+  # SDK packages + run vitest) in addition to Go (for cmd/e2efixture and Task). Heavy Docker job —
+  # nightly/dispatch only (not push, not PRs); see sdk-go job.
   e2e-sdk-js-grid:
     name: "sdk grid: sdk-js"
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -446,7 +446,7 @@ jobs:
         run: task e2e:cell:sdk-js SDK_JS_DIR=.sdk-js
 
       - name: Run sdk-js Web Push grid cell
-        # Boots the push topology (the SSE cell above tore its stack down, freeing the ports).
+        # Boots the push topology (the sdk-js cell above tore its stack down, freeing the ports).
         run: task e2e:cell:sdk-js-push SDK_JS_DIR=.sdk-js
 
   # sdk-py Web Push grid cell — drives sdk-py's VAPID client against the push topology.
