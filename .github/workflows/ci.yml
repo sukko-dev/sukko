@@ -403,7 +403,7 @@ jobs:
   # Needs bun (to build the SDK packages + run vitest) in addition to Go (for cmd/e2efixture
   # and Task). Heavy Docker job, post-merge/nightly/dispatch only, not PRs.
   e2e-sdk-js-grid:
-    name: "sdk grid: sdk-js (SSE)"
+    name: "sdk grid: sdk-js"
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -447,7 +447,7 @@ jobs:
   # Needs uv (to run pytest) in addition to Go (cmd/e2efixture + Task). Heavy Docker job,
   # post-merge/nightly/dispatch only, not PRs.
   e2e-sdk-py-grid:
-    name: "sdk grid: sdk-py (push)"
+    name: "sdk grid: sdk-py"
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
