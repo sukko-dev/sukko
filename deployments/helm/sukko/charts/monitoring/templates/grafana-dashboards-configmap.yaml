@@ -15,10 +15,12 @@ data:
         orgId: 1
         folder: 'Sukko'
         folderUid: 'sukko'
+        # Read-only: operators fork ("Save As") to customize rather than editing ours in
+        # place (in-place edits are lost on the next deploy). Matches the compose provider.
         type: file
-        disableDeletion: false
+        disableDeletion: true
         updateIntervalSeconds: 30
-        allowUiUpdates: true
+        allowUiUpdates: false
         options:
           path: /var/lib/grafana/dashboards
 ---

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -102,6 +103,10 @@ func transformServices(root *yaml.Node, errOut io.Writer) error {
 
 // transformService replaces build: with image: for a single service.
 func transformService(name string, def *yaml.Node, errOut io.Writer) {
+	// Strip dev-only host-path bind-mounts regardless of build: — the published/CLI
+	// compose runs from the operator's .sukko dir, where repo-relative paths don't exist.
+	stripHostPathBindMounts(def)
+
 	buildIdx := findMapKeyIndex(def, "build")
 	if buildIdx < 0 {
 		return // No build key — pass through unchanged
@@ -149,6 +154,51 @@ func transformService(name string, def *yaml.Node, errOut io.Writer) {
 	newContent = append(newContent, imageKeyNode, imageValueNode)
 	newContent = append(newContent, def.Content...)
 	def.Content = newContent
+}
+
+// stripHostPathBindMounts removes dev-only host-path bind-mount volumes (relative
+// sources starting with ./ or ../) from a service, in both short syntax
+// ("./host:/container[:mode]") and long syntax ({type: bind, source: ./host, …}). The
+// published/CLI compose is run from the operator's .sukko project dir, where repo-relative
+// paths don't exist — such a bind-mount there (with the default create_host_path) would
+// silently create empty directories and mount nothing. Named volumes and absolute paths
+// are left untouched.
+func stripHostPathBindMounts(def *yaml.Node) {
+	volIdx := findMapKeyIndex(def, "volumes")
+	if volIdx < 0 {
+		return
+	}
+	seq := def.Content[volIdx+1]
+	if seq.Kind != yaml.SequenceNode {
+		return
+	}
+	kept := seq.Content[:0]
+	for _, item := range seq.Content {
+		if isRelativeHostPathBindMount(item) {
+			continue // drop dev-only host-path bind-mount
+		}
+		kept = append(kept, item)
+	}
+	seq.Content = kept
+	// Drop the now-empty volumes key entirely.
+	if len(seq.Content) == 0 {
+		def.Content = append(def.Content[:volIdx], def.Content[volIdx+2:]...)
+	}
+}
+
+// isRelativeHostPathBindMount reports whether a volume list entry is a bind-mount whose
+// source is a relative path (./ or ../), in either short or long compose syntax.
+func isRelativeHostPathBindMount(item *yaml.Node) bool {
+	var src string
+	switch item.Kind {
+	case yaml.ScalarNode:
+		src = item.Value // "source:target[:mode]"
+	case yaml.MappingNode:
+		if s := findMapValue(item, "source"); s != nil {
+			src = s.Value
+		}
+	}
+	return strings.HasPrefix(src, "./") || strings.HasPrefix(src, "../")
 }
 
 // findMapValue finds a key in a mapping node and returns its value node.

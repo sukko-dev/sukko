@@ -360,6 +360,13 @@ services:
     configs:
       - source: grafana-datasources
         target: /etc/grafana/provisioning/datasources/datasources.yaml
+      - source: grafana-dashboards-provider
+        target: /etc/grafana/provisioning/dashboards/dashboards.yaml
+    volumes:
+      # Default Sukko dashboards — read-only, single source (the same JSON files the Helm
+      # monitoring chart ships via .Files.Get; no duplication). The provider below loads
+      # everything in this directory into the read-only "Sukko" folder.
+      - ./deployments/helm/sukko/charts/monitoring/dashboards:/var/lib/grafana/dashboards:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
       interval: 5s
@@ -561,6 +568,23 @@ configs:
           access: proxy
           url: http://pyroscope:4040
           editable: false
+  # Loads the bind-mounted dashboards into a read-only "Sukko" folder. allowUiUpdates:false
+  # means operators fork ("Save As") to customize rather than editing ours in place (edits
+  # would be lost on the next deploy); operator-made dashboards live in their own folders.
+  grafana-dashboards-provider:
+    content: |
+      apiVersion: 1
+      providers:
+        - name: 'sukko-dashboards'
+          orgId: 1
+          folder: 'Sukko'
+          folderUid: 'sukko'
+          type: file
+          disableDeletion: true
+          allowUiUpdates: false
+          updateIntervalSeconds: 30
+          options:
+            path: /var/lib/grafana/dashboards
 
 volumes:
   postgres-data:
