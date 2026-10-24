@@ -446,7 +446,7 @@ tasks:
         echo "VERDICT: sdk-go required cells all PASS against Pro+kafka"
 
   cell:sdk-js:
-    desc: "SDK-runner cell — drive the sdk-js SSE live test against a source-built Pro+kafka stack (ADR-0040 Tier2). Requires SDK_JS_DIR=<sdk-js checkout>."
+    desc: "SDK-runner cell — drive the sdk-js WS (round-trip) + SSE live tests against a source-built Pro+kafka stack (ADR-0040 Tier2). Requires SDK_JS_DIR=<sdk-js checkout>."
     requires:
       vars: [SDK_JS_DIR]
     vars:
@@ -466,7 +466,7 @@ tasks:
       - |
         set -eu
         . taskfiles/e2e/stack.sh
-        echo "=== SDK cell: sdk-js (SSE) edition={{.EDITION}} backend={{.BACKEND}} ==="
+        echo "=== SDK cell: sdk-js (WS+SSE) edition={{.EDITION}} backend={{.BACKEND}} ==="
         e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
       - |
         set -eu
@@ -486,7 +486,7 @@ tasks:
           --edition "{{.EDITION}}" \
           --format json) > "{{.SDK_JS_DIR}}/e2e/.fixture.json"
         echo "    wrote {{.SDK_JS_DIR}}/e2e/.fixture.json"
-        echo "=== Build SDK packages + run the SSE live test ==="
+        echo "=== Build SDK packages + run the WS (round-trip) + SSE live tests ==="
         cd {{.SDK_JS_DIR}}
         bun install
         # Build @sukko/sdk FIRST, then @sukko/websocket-node — the latter's dts build imports
@@ -496,16 +496,23 @@ tasks:
         # Task runs via mvdan/sh, where `v=$(failing)` under `set -e` aborts before a `||`
         # can surface output — so disable -e around the run and branch on the captured exit.
         set +e
-        NO_COLOR=1 FORCE_COLOR=0 bun run --filter '@sukko/e2e' test sse >/tmp/sdkjs_sse.out 2>&1
+        # WS core (round-trip) + SSE live tests — both subscribe to the FIXTURE's channel, so they
+        # work against the grid's throwaway tenant. The suite's other files (api-key, rest-publish,
+        # reconnect) hardcode the `demo` tenant / need a service bounce the grid fixture doesn't
+        # provide — adding them needs a cross-repo sdk-js change (tracked separately). push stays
+        # its own cell (it needs the push topology). sse runs only on Pro (the grid IS Pro).
+        NO_COLOR=1 FORCE_COLOR=0 bun run --filter '@sukko/e2e' test round-trip sse >/tmp/sdkjs_e2e.out 2>&1
         code=$?
         set -e
-        cat /tmp/sdkjs_sse.out
-        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-js SSE suite failed (exit $code)"; exit 1; }
-        # Assert the Tests line (not Test Files) shows a PASS — a skipped file still "passes".
-        # Strip ANSI SGR codes first: vitest can colorize even when redirected to a file, and the
-        # escape codes between "Tests" and "1 passed" break [[:space:]]+ (false "vacuous" verdict).
-        perl -pe 's/\e\[[0-9;]*m//g' /tmp/sdkjs_sse.out | grep -qE 'Tests[[:space:]]+1 passed' || { echo "VERDICT: SSE test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
-        echo "VERDICT: sdk-js SSE cell PASS against Pro+kafka"
+        cat /tmp/sdkjs_e2e.out
+        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-js suite failed (exit $code)"; exit 1; }
+        # Anti-vacuous, per file (mirrors cell:sdk-go): each file MUST show a vitest PASS with NO
+        # skipped suffix — "(N test[s]) <time>", refusing "(N test | M skipped)". A runtime ctx.skip()
+        # (sse on a non-Pro stack) still prints ✓, so match the count, not just ✓. ANSI-strip first (#66).
+        for f in round-trip sse; do
+          perl -pe 's/\e\[[0-9;]*m//g' /tmp/sdkjs_e2e.out | grep -qE "✓ ${f}\.test\.ts \([0-9]+ tests?\) " || { echo "VERDICT: sdk-js ${f} did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
+        done
+        echo "VERDICT: sdk-js WS+SSE cells PASS against Pro+kafka"
 
   cell:sdk-go-push:
     desc: "SDK-runner cell — drive sdk-go's Web Push client (VAPID key) against a source-built push-enabled stack (ADR-0040 Tier2). Requires SDK_GO_DIR=<sdk-go checkout>."
