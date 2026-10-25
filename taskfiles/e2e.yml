@@ -687,6 +687,62 @@ tasks:
         grep -qE -- "--- PASS: TestSSESubscribeReceive" /tmp/sdkgo_sse.out || { echo "VERDICT: SSE test did not PASS (skipped/absent) — vacuous green refused"; exit 1; }
         echo "VERDICT: sdk-go SSE cell PASS against Pro+kafka"
 
+  cell:sdk-py:
+    desc: "SDK-runner cell — drive sdk-py's core live suite (WS round-trip, sync lifecycle, api-key, reconnect-replay) against a source-built Pro+kafka stack (ADR-0040 Tier2). Requires SDK_PY_DIR=<sdk-py checkout>."
+    requires:
+      vars: [SDK_PY_DIR]
+    vars:
+      # kafka keeps the data-path identical to the sdk-go/js core cells; the reconnect-replay
+      # test needs the kafka pos cursor. No composeProject: sdk-py's reconnect test drops only
+      # the WS via an in-process gated transport (like sdk-go's proxy), never a container bounce.
+      EDITION: pro
+      BACKEND: kafka
+      COMPOSE: 'docker compose -f docker-compose.yml -f taskfiles/e2e/kafka.override.yml --profile kafka'
+      ADMIN_KEY_FILE: taskfiles/e2e/.admin.key
+      PROVISIONING_URL: http://localhost:18080
+      WS_URL: ws://localhost:13000/ws
+      # The core tests selected by name — api-key + reconnect derive their channel from the
+      # fixture (SUKKO_IT_CHANNEL), appending a suffix to its last segment so the channel stays
+      # under the grid tenant's `general.*` rules.
+      # sse + push have their own cells; test_auto_token_refresh is a @pytest.mark.skip stub.
+      CORE_TESTS: "test_async_subscribe_publish_receive_roundtrip or test_sync_lifecycle_and_publish or test_api_key_auth or test_reconnect_with_replay"
+    cmds:
+      - defer: "{{.COMPOSE}} down -v"
+      - defer: rm -f {{.ADMIN_KEY_FILE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== SDK cell: sdk-py core edition={{.EDITION}} backend={{.BACKEND}} ==="
+        e2e_boot_cell {{.EDITION}} {{.BACKEND}} "$(pwd)/{{.ADMIN_KEY_FILE}}" +1y {{.COMPOSE}}
+      - |
+        set -eu
+        . taskfiles/e2e/stack.sh
+        echo "=== Readiness gate (expect edition={{.EDITION}} expired=false) ==="
+        e2e_readiness_gate {{.PROVISIONING_URL}} {{.EDITION}} false
+        e2e_kafka_ready {{.COMPOSE}}
+      - |
+        set -eu
+        echo "=== Provision fixture + run sdk-py core suite ==="
+        fixture="$(cd ws && go run ./cmd/e2efixture \
+          --admin-key "$(pwd)/../{{.ADMIN_KEY_FILE}}" \
+          --provisioning-url "{{.PROVISIONING_URL}}" \
+          --ws-url "{{.WS_URL}}" \
+          --edition "{{.EDITION}}")"
+        eval "$fixture"
+        echo "    fixture tenant channel: $SUKKO_IT_CHANNEL"
+        # set +e around the run (Task's mvdan/sh aborts `v=$(failing)` under set -e before a ||).
+        set +e
+        ( cd {{.SDK_PY_DIR}} && uv run --extra dev pytest -m integration tests/integration -k "{{.CORE_TESTS}}" -v ) >/tmp/sdkpy_core.out 2>&1
+        code=$?
+        set -e
+        cat /tmp/sdkpy_core.out
+        [ "$code" -eq 0 ] || { echo "VERDICT: sdk-py core suite failed (exit $code)"; exit 1; }
+        # Anti-vacuous, count-exact (like cell:sdk-py-sse's `1 passed`): all 4 selected tests MUST pass. A
+        # skipped one would read "3 passed, 1 skipped" — the exact "4 passed" refuses that (and a
+        # count drift forces a human to re-check the selection). `deselected` does not match.
+        grep -qE '[[:space:]]4 passed' /tmp/sdkpy_core.out || { echo "VERDICT: sdk-py core suite did not report 4 passed (a selected test skipped/failed) — vacuous green refused"; exit 1; }
+        echo "VERDICT: sdk-py core cell PASS against Pro+kafka"
+
   cell:sdk-py-sse:
     desc: "SDK-runner cell — drive sdk-py's SSE live test against a source-built Pro+kafka stack (ADR-0040/0042). Requires SDK_PY_DIR=<sdk-py checkout>."
     requires:

@@ -357,11 +357,15 @@ fetch). Notification *delivery* stays with the tester's `push` suite — an SDK 
 browser push receiver. `cell:sdk-py-push` extends the Web Push cell to sdk-py (same topology;
 sdk-py reads the `SUKKO_IT_*` env, so the fixture uses `--format shell`). `cell:sdk-py-sse`
 extends SSE to sdk-py (Pro+kafka, gate-only; per ADR-0042 SSE is a supported receive-only
-transport across the SDKs). So SSE is proven on sdk-js + sdk-py, Web Push on sdk-go + sdk-py;
-sdk-go SSE is a deferred gap (ADR-0042). `cell:sdk-js-push` completes the Web Push row (sdk-js
-VAPID fetch on the push topology). So the SDK grid now proves: plumbing (sdk-go), SSE on
-sdk-js + sdk-py, Web Push on all three. Pro-gated SDK tests gate on the fixture's `edition`
-(the Community nightlies skip them; the source-built grid cells run them via `--format json`).
+transport across the SDKs). `cell:sdk-py` adds sdk-py's **core** suite (WS round-trip, sync
+lifecycle, api-key, reconnect-replay) — the sdk-py counterpart to `cell:sdk-go`/`cell:sdk-js`;
+its reconnect test drops only the WS via an in-process gated transport (like sdk-go's proxy),
+so it needs no compose project name. So SSE is proven on sdk-js + sdk-py, Web Push on sdk-go +
+sdk-py; sdk-go SSE is a deferred gap (ADR-0042). `cell:sdk-js-push` completes the Web Push row
+(sdk-js VAPID fetch on the push topology). So the SDK grid now proves the core data path on all
+three SDKs, SSE on sdk-js + sdk-py, and Web Push on all three. Pro-gated SDK tests gate on the fixture's `edition`
+(the Community nightlies skip them; the source-built grid cells run them — sdk-js reads a
+`--format json` fixture, sdk-go/sdk-py read the `--format shell` `SUKKO_IT_*` env).
 
 **Fail-closed contract:** a suite fails its cell on a non-`pass` report, any `fail`/`error`
 check, or **any skipped check not declared in the cell's allow-list**. The skip allow-list
