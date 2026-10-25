@@ -484,7 +484,13 @@ jobs:
       - name: Install Task
         run: go install github.com/go-task/task/v3/cmd/task@v3.44.0
 
+      - name: Run sdk-py core grid cell
+        # WS round-trip, sync lifecycle, api-key, reconnect-replay — the sdk-py counterpart to
+        # cell:sdk-go / cell:sdk-js. Each cell boots and tears down its own stack (defer down -v).
+        run: task e2e:cell:sdk-py SDK_PY_DIR=.sdk-py
+
       - name: Run sdk-py Web Push grid cell
+        # The core cell above tore its stack down, freeing the fixed host ports for this boot.
         run: task e2e:cell:sdk-py-push SDK_PY_DIR=.sdk-py
 
       - name: Run sdk-py SSE grid cell
