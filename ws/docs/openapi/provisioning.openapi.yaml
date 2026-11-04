@@ -1423,7 +1423,8 @@ paths:
       summary: Register an admin public key
       description: |
         Register a new Ed25519 or RS256 public key for admin JWT authentication.
-        Requires an existing admin JWT (bootstrap via `ADMIN_BOOTSTRAP_KEY` env var on first deploy).
+        Requires admin or system role — tenant JWTs are rejected with 403. Bootstrap the
+        first key via the `ADMIN_BOOTSTRAP_KEY` env var on first deploy.
       tags: [Admin Keys]
       security:
         - bearerAuth: []
@@ -1468,11 +1469,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "403":
+          description: Forbidden — tenant JWT rejected; admin or system role required (INSUFFICIENT_ROLE)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
     get:
       operationId: listAdminKeys
       summary: List active admin keys
-      description: Returns all active (non-revoked) admin keys. Requires admin JWT.
+      description: Returns all active (non-revoked) admin keys. Requires admin or system role — tenant JWTs are rejected with 403.
       tags: [Admin Keys]
       security:
         - bearerAuth: []
@@ -1496,6 +1503,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "403":
+          description: Forbidden — tenant JWT rejected; admin or system role required (INSUFFICIENT_ROLE)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /api/v1/admin/keys/{id}:
     delete:
@@ -1503,7 +1516,7 @@ paths:
       summary: Revoke an admin key
       description: |
         Revoke an admin key. Cannot revoke the last active key (returns 409).
-        Requires admin JWT.
+        Requires admin or system role — tenant JWTs are rejected with 403.
       tags: [Admin Keys]
       security:
         - bearerAuth: []
@@ -1530,6 +1543,12 @@ paths:
               example:
                 key_id: "ak_abc123"
                 status: "revoked"
+        "403":
+          description: Forbidden — tenant JWT rejected; admin or system role required (INSUFFICIENT_ROLE)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           description: Key not found or already revoked
           content:
