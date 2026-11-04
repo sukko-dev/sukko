@@ -24,6 +24,11 @@ const (
 const (
 	authzDenialInsufficientRole = "insufficient_role"
 	authzDenialTenantMismatch   = "tenant_mismatch"
+	// authzDenialSelfAssertedRole flags a non-operator token (a tenant JWT) that presented a
+	// privileged admin/system role — an attempt to use a self-signed role as control-plane
+	// authority. Separated from insufficient_role so the attempt is independently alertable (§VI,
+	// §IX), not folded into ordinary role denials.
+	authzDenialSelfAssertedRole = "self_asserted_role"
 )
 
 // Tenant operation label values (Constitution §I — metric label values are symbolic strings).

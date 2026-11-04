@@ -40,7 +40,38 @@ const (
 	// operator (no tenant claim) passes the tenant's current slug. Handlers read it via
 	// getEffectiveTenantSlug.
 	tenantSlugContextKey contextKey = "tenant_slug"
+	// operatorContextKey marks a request as authenticated by the operator control plane — an
+	// admin JWT (iss:"sukko-admin") validated against a registered admin key. It is set ONLY by
+	// AdminJWTMiddleware, after AdminValidator succeeds; nothing a tenant controls can set it.
+	// Read via isOperator, which returns false when unset — deliberately NO fail-open default,
+	// unlike auth.GetActorType (which defaults to "system"). The provisioning API is an operator
+	// control plane (ADR-0033): admin/system authority is bound to this marker, never to the
+	// self-asserted `roles` claim, which a tenant signs for itself (§IX).
+	operatorContextKey contextKey = "operator"
 )
+
+// withOperator marks ctx as authenticated by the operator control plane. Called only from
+// AdminJWTMiddleware once an admin JWT has been validated.
+func withOperator(ctx context.Context) context.Context {
+	return context.WithValue(ctx, operatorContextKey, true)
+}
+
+// isOperator reports whether ctx was authenticated as a platform operator (a validated admin
+// JWT). Returns false when unset — a tenant JWT never sets the marker, so a self-asserted
+// roles:["admin"] claim cannot pass an operator gate.
+func isOperator(ctx context.Context) bool {
+	v, _ := ctx.Value(operatorContextKey).(bool)
+	return v
+}
+
+// hasOperatorRole reports whether ctx is an authenticated operator holding at least one of the
+// given roles. Operator authenticity comes from the admin-JWT issuer (isOperator), NOT the
+// self-asserted `roles` claim: a tenant-signed token with roles:["admin"] is not an operator and
+// never passes. The role check still applies to operator tokens, so a reduced-privilege admin
+// JWT (e.g. roles:["viewer"]) is correctly denied an admin/system gate (§IX, ADR-0033).
+func hasOperatorRole(ctx context.Context, claims *auth.Claims, roles ...string) bool {
+	return isOperator(ctx) && claims != nil && slices.ContainsFunc(roles, claims.HasRole)
+}
 
 // LoggingMiddleware provides structured request logging.
 func LoggingMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
@@ -136,6 +167,11 @@ func AdminJWTMiddleware(validator *provauth.AdminValidator, logger zerolog.Logge
 			// INET column, and a port suffix made every admin-action audit INSERT fail
 			// (SQLSTATE 22P02) — silently losing the §IX-mandatory audit records.
 			ctx = auth.WithActor(ctx, kid, provisioning.ActorTypeAdmin, httputil.GetClientIP(r))
+			// Mark the request as operator-authenticated. This is the SOLE site that sets the
+			// operator marker, and it runs only after AdminValidator verified the sukko-admin
+			// issuer and the registered admin key — so admin/system authority is bound to the
+			// signing identity, not to a self-asserted roles claim (§IX, ADR-0033).
+			ctx = withOperator(ctx)
 
 			logger.Debug().
 				Str("admin_key_id", kid).
@@ -240,18 +276,28 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Check if user has any of the required roles
-			if slices.ContainsFunc(roles, claims.HasRole) {
+			// Admin/system authority is bound to the operator control plane (a validated admin
+			// JWT), never to the self-asserted roles claim a tenant signs for itself (§IX,
+			// ADR-0033). hasOperatorRole requires BOTH the operator marker and a matching role.
+			if hasOperatorRole(r.Context(), claims, roles...) {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// LOG-020: Role-based authorization denial
+			// A non-operator token that nonetheless carries a privileged role is a tenant trying to
+			// use a self-asserted admin/system claim as control-plane authority. Flag it distinctly
+			// (a separate metric reason + a self_asserted field) so the attempt is independently
+			// alertable (§VI, §IX), not folded into ordinary role denials. LOG-020.
+			selfAsserted := !isOperator(r.Context()) && slices.ContainsFunc(roles, claims.HasRole)
+			denialReason := authzDenialInsufficientRole
+			if selfAsserted {
+				denialReason = authzDenialSelfAssertedRole
+			}
 			zerolog.Ctx(r.Context()).Warn().
 				Str(logging.LogKeyTenantSlug, claims.TenantID).Str("subject", claims.Subject).
-				Strs("required_roles", roles).Str("path", r.URL.Path).
+				Strs("required_roles", roles).Str("path", r.URL.Path).Bool("self_asserted", selfAsserted).
 				Msg("authorization denied: insufficient role")
-			RecordAuthorizationDenial(authzDenialInsufficientRole)
+			RecordAuthorizationDenial(denialReason)
 			httputil.WriteError(w, http.StatusForbidden, errCodeInsufficientRole, "Required role: "+strings.Join(roles, " or "))
 		})
 	}
@@ -278,13 +324,16 @@ func RequireTenant(lookup provisioning.TenantLookupFunc, holdPeriod time.Duratio
 				return
 			}
 
-			// (1) Admin/system roles may act on ANY tenant — the ownership check is skipped — but the
-			// tenant is still RESOLVED so its UUID is stashed for handlers keyed by it (webhooks,
-			// connections), uniform with every other tenant resource (ADR-0033). Skipping the stash
-			// here is what previously left those two resources unreachable by operators. A missing or
-			// soft-deleted tenant 404s at the middleware, as it already does at the service layer
-			// (every admin handler resolves via GetBySlug, which filters deleted_at IS NULL).
-			if claims.HasRole(provisioning.ActorTypeAdmin) || claims.HasRole(provisioning.ActorTypeSystem) {
+			// (1) An operator (validated admin JWT) with an admin/system role may act on ANY tenant —
+			// the ownership check is skipped — but the tenant is still RESOLVED so its UUID is stashed
+			// for handlers keyed by it (webhooks, connections), uniform with every other tenant
+			// resource (ADR-0033). Skipping the stash here is what previously left those two resources
+			// unreachable by operators. A missing or soft-deleted tenant 404s at the middleware, as it
+			// already does at the service layer (every admin handler resolves via GetBySlug, which
+			// filters deleted_at IS NULL). The ownership-skip is gated on the operator marker, not the
+			// self-asserted roles claim: a tenant token with roles:["admin"] falls through to the
+			// ownership check below and is confined to its own tenant (§IX).
+			if hasOperatorRole(r.Context(), claims, provisioning.ActorTypeAdmin, provisioning.ActorTypeSystem) {
 				tenant, err := lookup(r.Context(), tenantSlug)
 				if err != nil {
 					if errors.Is(err, provisioning.ErrTenantNotFound) {
