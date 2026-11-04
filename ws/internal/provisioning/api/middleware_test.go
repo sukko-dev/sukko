@@ -29,9 +29,17 @@ func withTenantSlug(r *http.Request, slug string) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
 }
 
-// withClaims injects auth claims into r's context.
+// withClaims injects auth claims into r's context (a tenant-authenticated request — no
+// operator marker, so a self-asserted admin/system role confers no control-plane authority).
 func withClaims(r *http.Request, claims *auth.Claims) *http.Request {
 	return r.WithContext(auth.WithClaims(r.Context(), claims))
+}
+
+// withOperatorClaims injects auth claims AND the operator marker, standing in for a request
+// authenticated by AdminJWTMiddleware (a validated admin JWT). Only such a request may exercise
+// admin/system authority (§IX, ADR-0033).
+func withOperatorClaims(r *http.Request, claims *auth.Claims) *http.Request {
+	return r.WithContext(withOperator(auth.WithClaims(r.Context(), claims)))
 }
 
 // requireTenantHandler wraps a "got it" handler with RequireTenant using the provided lookup func.
@@ -160,24 +168,36 @@ func TestRequireTenant(t *testing.T) {
 	tests := []struct {
 		name       string
 		claims     *auth.Claims
+		operator   bool // request carries the operator marker (validated admin JWT)
 		slugParam  string
 		tenant     *provisioning.Tenant
 		lookupErr  error
 		wantStatus int
 	}{
 		{
-			name:       "admin role bypasses ownership check",
-			claims:     &auth.Claims{TenantID: "other-tenant", Roles: []string{"admin"}},
+			name:       "operator with admin role bypasses ownership check",
+			claims:     &auth.Claims{Roles: []string{"admin"}},
+			operator:   true,
 			slugParam:  "acme-corp",
 			tenant:     activeTenant,
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "system role bypasses ownership check",
-			claims:     &auth.Claims{TenantID: "other-tenant", Roles: []string{"system"}},
+			name:       "operator with system role bypasses ownership check",
+			claims:     &auth.Claims{Roles: []string{"system"}},
+			operator:   true,
 			slugParam:  "acme-corp",
 			tenant:     activeTenant,
 			wantStatus: http.StatusOK,
+		},
+		{
+			// §IX regression: a tenant self-asserting admin is NOT an operator, so it must
+			// fall through to the ownership check and be confined to its own tenant.
+			name:       "self-asserted admin from tenant token does not bypass ownership",
+			claims:     &auth.Claims{TenantID: "other-tenant", Roles: []string{"admin"}},
+			slugParam:  "acme-corp",
+			tenant:     activeTenant,
+			wantStatus: http.StatusForbidden,
 		},
 		{
 			name:       "direct slug match passes",
@@ -304,7 +324,10 @@ func TestRequireTenant(t *testing.T) {
 
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 			req = withTenantSlug(req, tt.slugParam)
-			if tt.claims != nil {
+			switch {
+			case tt.operator:
+				req = withOperatorClaims(req, tt.claims)
+			case tt.claims != nil:
 				req = withClaims(req, tt.claims)
 			}
 			// Inject zerolog logger (required by middleware for warning logs).
@@ -353,6 +376,7 @@ func TestRequireTenant_StashesTenantUUID(t *testing.T) {
 	tests := []struct {
 		name      string
 		claims    *auth.Claims
+		operator  bool // request carries the operator marker (validated admin JWT)
 		slugParam string
 		wantUUID  string
 	}{
@@ -371,18 +395,20 @@ func TestRequireTenant_StashesTenantUUID(t *testing.T) {
 			wantUUID:  "uuid-renamed",
 		},
 		{
-			// Admin/system resolve and stash the tenant UUID (ADR-0033) — the ownership check is
-			// skipped, but the identity is still resolved so UUID-keyed handlers (webhooks,
-			// connections) work for operators.
-			name:      "admin resolves and stashes the uuid",
+			// An operator (admin role) resolves and stashes the tenant UUID (ADR-0033) — the
+			// ownership check is skipped, but the identity is still resolved so UUID-keyed handlers
+			// (webhooks, connections) work for operators.
+			name:      "operator resolves and stashes the uuid",
 			claims:    &auth.Claims{Roles: []string{"admin"}},
+			operator:  true,
 			slugParam: "acme",
 			wantUUID:  "uuid-active",
 		},
 		{
 			// Operators act on ANY tenant: no TenantID claim, yet the URL tenant's UUID is stashed.
-			name:      "admin reaches a tenant it does not own",
+			name:      "operator reaches a tenant it does not own",
 			claims:    &auth.Claims{Roles: []string{"system"}},
+			operator:  true,
 			slugParam: "new-corp",
 			wantUUID:  "uuid-renamed",
 		},
@@ -401,7 +427,11 @@ func TestRequireTenant_StashesTenantUUID(t *testing.T) {
 
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 			req = withTenantSlug(req, tt.slugParam)
-			req = withClaims(req, tt.claims)
+			if tt.operator {
+				req = withOperatorClaims(req, tt.claims)
+			} else {
+				req = withClaims(req, tt.claims)
+			}
 			req = req.WithContext(zerolog.Nop().WithContext(req.Context()))
 
 			rec := httptest.NewRecorder()
@@ -436,17 +466,17 @@ func TestRequireTenant_AdminMissingTenant404(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req = withTenantSlug(req, "ghost")
-	req = withClaims(req, &auth.Claims{Roles: []string{"admin"}})
+	req = withOperatorClaims(req, &auth.Claims{Roles: []string{"admin"}})
 	req = req.WithContext(zerolog.Nop().WithContext(req.Context()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 for admin on a missing tenant", rec.Code)
+		t.Errorf("status = %d, want 404 for operator on a missing tenant", rec.Code)
 	}
 	if reached {
-		t.Error("handler must not be reached when the admin tenant lookup 404s")
+		t.Error("handler must not be reached when the operator tenant lookup 404s")
 	}
 }
 
@@ -564,12 +594,14 @@ func TestWebhooksConnections_OperatorOnlyChain(t *testing.T) {
 		name       string
 		edition    license.Edition
 		roles      []string
+		operator   bool // request carries the operator marker (validated admin JWT)
 		wantStatus int
 		wantCode   string
 	}{
-		{"pro + tenant token is rejected by role", license.Pro, []string{"user"}, http.StatusForbidden, errCodeInsufficientRole},
-		{"community + operator is rejected by the edition gate first", license.Community, []string{"admin"}, http.StatusForbidden, errCodeEditionLimit},
-		{"pro + operator is allowed", license.Pro, []string{"admin"}, http.StatusOK, ""},
+		{"pro + tenant token is rejected by role", license.Pro, []string{"user"}, false, http.StatusForbidden, errCodeInsufficientRole},
+		{"pro + tenant self-asserting admin is rejected by role", license.Pro, []string{"admin"}, false, http.StatusForbidden, errCodeInsufficientRole},
+		{"community + operator is rejected by the edition gate first", license.Community, []string{"admin"}, true, http.StatusForbidden, errCodeEditionLimit},
+		{"pro + operator is allowed", license.Pro, []string{"admin"}, true, http.StatusOK, ""},
 	}
 
 	for _, tt := range tests {
@@ -577,7 +609,11 @@ func TestWebhooksConnections_OperatorOnlyChain(t *testing.T) {
 			t.Parallel()
 
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
-			req = withClaims(req, &auth.Claims{Roles: tt.roles})
+			if tt.operator {
+				req = withOperatorClaims(req, &auth.Claims{Roles: tt.roles})
+			} else {
+				req = withClaims(req, &auth.Claims{Roles: tt.roles})
+			}
 			req = req.WithContext(zerolog.Nop().WithContext(req.Context()))
 
 			rec := httptest.NewRecorder()

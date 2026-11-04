@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Sukko Provisioning API
-  version: 1.2.0
+  version: 1.3.0
   description: |
     REST API for managing tenants, JWT signing keys, API keys, routing rules,
     channel rules, and quotas in the Sukko multi-tenant WebSocket platform.
@@ -17,11 +17,16 @@ info:
 
     ## Authorization
 
-    Role-based access control with tenant isolation:
-    - **admin/system**: Full access to all tenants and operations
-    - **tenant owner**: Access to own tenant's resources only (JWT `tenant_id` must match)
+    The provisioning API is an operator control plane. Admin/system authority is conferred ONLY
+    by an **admin JWT** (`iss: "sukko-admin"`, signed by a registered admin key) — never by the
+    `roles` claim on a tenant JWT, which a tenant signs for itself. A tenant JWT carrying
+    `roles: ["admin"]` (or `"system"`) is rejected `403 INSUFFICIENT_ROLE`.
+    - **operator (admin JWT) with admin/system role**: manages all tenants and operations.
+    - **tenant owner (tenant JWT)**: read-only access to its own tenant's resources (JWT
+      `tenant_id` must match); it cannot perform admin/system operations.
 
-    Operations like creating tenants, suspending, and modifying routing rules require `admin` or `system` role.
+    Operations like creating tenants, suspending, and modifying routing rules require an operator
+    (admin JWT) holding the `admin` or `system` role.
 
     ## Pagination
 
@@ -54,7 +59,7 @@ paths:
     post:
       operationId: createTenant
       summary: Create a new tenant
-      description: Creates a tenant with optional initial JWT signing key. Requires admin or system role.
+      description: Creates a tenant with optional initial JWT signing key. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [Tenants]
       security:
         - bearerAuth: []
@@ -87,7 +92,7 @@ paths:
     get:
       operationId: listTenants
       summary: List all tenants
-      description: Returns paginated list of tenants. Requires admin or system role.
+      description: Returns paginated list of tenants. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [Tenants]
       security:
         - bearerAuth: []
@@ -175,7 +180,7 @@ paths:
       operationId: deprovisionTenant
       summary: Deprovision tenant
       description: |
-        Marks tenant for deletion. Requires admin or system role.
+        Marks tenant for deletion. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
 
         With `?force=true`, the tenant is deleted immediately and the response status is `deleted`.
         Without it, the tenant is marked for async deprovisioning and the response status is `deprovisioning`.
@@ -295,7 +300,7 @@ paths:
     post:
       operationId: suspendTenant
       summary: Suspend tenant
-      description: Suspends an active tenant. Requires admin or system role.
+      description: Suspends an active tenant. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [Tenants]
       security:
         - bearerAuth: []
@@ -329,7 +334,7 @@ paths:
     post:
       operationId: reactivateTenant
       summary: Reactivate tenant
-      description: Reactivates a suspended tenant. Requires admin or system role.
+      description: Reactivates a suspended tenant. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [Tenants]
       security:
         - bearerAuth: []
@@ -567,7 +572,7 @@ paths:
       operationId: addRoutingRule
       summary: Add a routing rule
       description: |
-        Adds a single routing rule without replacing existing rules. Requires admin or system role.
+        Adds a single routing rule without replacing existing rules. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
 
         The rule is stored with the normalized pattern (bare `*` → `**`). Returns 409 on duplicate
         priority or duplicate pattern. Non-empty `egress_topics` require the Pro edition
@@ -649,7 +654,7 @@ paths:
       operationId: setRoutingRules
       summary: Set routing rules
       description: |
-        Replaces all routing rules for the tenant. Requires admin or system role.
+        Replaces all routing rules for the tenant. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
 
         Rules are evaluated in ascending priority order — **first match wins**. Publishing to a channel no rule matches is rejected with `409 PUBLISH_NOT_ROUTABLE` — it is never silently routed or dead-lettered.
 
@@ -725,7 +730,7 @@ paths:
     delete:
       operationId: deleteRoutingRules
       summary: Delete routing rules
-      description: Removes all routing rules for the tenant. Idempotent — returns 200 even if no rules exist. Requires admin or system role.
+      description: Removes all routing rules for the tenant. Idempotent — returns 200 even if no rules exist. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [Routing Rules]
       security:
         - bearerAuth: []
@@ -794,7 +799,7 @@ paths:
       operationId: createTopic
       summary: Create a provisioned topic
       description: |
-        Provisions a non-default topic for the tenant. Requires admin or system role.
+        Provisions a non-default topic for the tenant. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
         No edition feature gate — available on every edition. The wall is the
         tenant's `max_topics` quota row (seeded from `MAX_TOPICS_PER_TENANT`,
         default 50, and adjustable per tenant via `PATCH /quotas`); the ratified
@@ -875,7 +880,7 @@ paths:
       operationId: deleteTopic
       summary: Delete a provisioned topic
       description: |
-        Removes a provisioned topic. Requires admin or system role. The `default`
+        Removes a provisioned topic. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403. The `default`
         and `dead-letter` suffixes are reserved and cannot be deleted. A topic that
         is still referenced by a routing rule (as ingress or egress) cannot be
         deleted — remove the rule first.
@@ -950,7 +955,7 @@ paths:
       operationId: setChannelRules
       summary: Set channel rules
       description: |
-        Replaces channel access control rules for the tenant. Requires admin or system role.
+        Replaces channel access control rules for the tenant. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
         Per-tenant rules are the sole channel-authorization source: a tenant with no rules
         (or an empty rule side) is denied all subscribes/publishes on that side.
         Patterns support wildcards (`*`) and the `{principal}` placeholder, which is
@@ -984,7 +989,7 @@ paths:
     delete:
       operationId: deleteChannelRules
       summary: Delete channel rules
-      description: Removes channel rules for the tenant. The tenant is then denied all channel subscribes and publishes (deny-all — there is no fallback rule set). Requires admin or system role.
+      description: Removes channel rules for the tenant. The tenant is then denied all channel subscribes and publishes (deny-all — there is no fallback rule set). Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [Channel Rules]
       security:
         - bearerAuth: []
@@ -1027,7 +1032,7 @@ paths:
     patch:
       operationId: updateQuota
       summary: Update tenant quotas
-      description: Partial update — only provided fields are changed. Requires admin or system role.
+      description: Partial update — only provided fields are changed. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [Quotas]
       security:
         - bearerAuth: []

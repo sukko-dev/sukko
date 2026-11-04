@@ -240,6 +240,27 @@ func validateProvisioningRouting(
 				routingRule("role-gate-2.**", routing.DefaultTopicSuffix, 61))
 			return expectReject("role gate write (user)", badStatus, badErr, http.StatusForbidden, errCodeInsufficientRole)
 		}))
+		// §IX escalation guard: a TENANT token that self-asserts admin+system is NOT an operator —
+		// admin/system authority is bound to the sukko-admin issuer (ADR-0033), never to the
+		// self-signed roles claim. A routing write with such a token must still be rejected 403,
+		// exactly like the user-role token. This is the end-to-end witness, against the real stack,
+		// that the provisioning control plane cannot be entered with a self-asserted role.
+		escalationToken, escMintErr := setupA.Minter.MintWithClaims(auth.MintOptions{
+			Subject: "routing-tenant-admin-" + uuid.NewString()[:8],
+			Roles:   []string{"admin", "system"},
+		})
+		if escMintErr != nil {
+			checks = append(checks, metrics.CheckResult{
+				Name: "routing escalation guard", Status: metrics.CheckStatusFail,
+				Error: fmt.Sprintf("mint tenant-admin token: %v", escMintErr),
+			})
+		} else {
+			checks = append(checks, provRoutingCheck("routing escalation guard", func() error {
+				status, err := provClient.AddRoutingRuleRawWithToken(ctx, tenantA, escalationToken,
+					routingRule("escalation-guard.**", routing.DefaultTopicSuffix, 62))
+				return expectReject("escalation guard (tenant self-asserted admin)", status, err, http.StatusForbidden, errCodeInsufficientRole)
+			}))
+		}
 		checks = appendReset(ctx, checks, provClient, tenantA, logger)
 	}
 
@@ -311,6 +332,22 @@ func checkCrossTenantMismatch(
 	// Negative: A-scoped user token writes tenant B → 403 TENANT_MISMATCH.
 	status, wErr := setupB.ProvClient.SetRoutingRulesRawWithToken(ctx, tenantB, userTokenA, testRoutingRulesRaw())
 	if err := expectReject("cross-tenant write", status, wErr, http.StatusForbidden, errCodeTenantMismatch); err != nil {
+		return metrics.CheckResult{Name: name, Status: metrics.CheckStatusFail, Error: err.Error()}
+	}
+
+	// §IX cross-tenant escalation witness: an A-scoped token self-asserting admin+system is NOT an
+	// operator, so RequireTenant applies the ownership check (not the operator skip) — a write to
+	// tenant B is still rejected 403 TENANT_MISMATCH. This is the end-to-end proof, against the
+	// real stack, that a self-signed role cannot cross the tenant boundary (ADR-0033, §IX).
+	escToken, escErr := setupA.Minter.MintWithClaims(auth.MintOptions{
+		Subject: "xtenant-admin-" + uuid.NewString()[:8],
+		Roles:   []string{"admin", "system"},
+	})
+	if escErr != nil {
+		return metrics.CheckResult{Name: name, Status: metrics.CheckStatusFail, Error: fmt.Sprintf("mint escalation token: %v", escErr)}
+	}
+	escStatus, escWErr := setupB.ProvClient.SetRoutingRulesRawWithToken(ctx, tenantB, escToken, testRoutingRulesRaw())
+	if err := expectReject("cross-tenant escalation write", escStatus, escWErr, http.StatusForbidden, errCodeTenantMismatch); err != nil {
 		return metrics.CheckResult{Name: name, Status: metrics.CheckStatusFail, Error: err.Error()}
 	}
 	return metrics.CheckResult{Name: name, Status: metrics.CheckStatusPass}

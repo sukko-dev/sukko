@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/sukko-dev/sukko/internal/provisioning"
 	"github.com/sukko-dev/sukko/internal/provisioning/api"
+	provauth "github.com/sukko-dev/sukko/internal/provisioning/auth"
 	"github.com/sukko-dev/sukko/internal/provisioning/eventbus"
 	"github.com/sukko-dev/sukko/internal/provisioning/testutil"
 	"github.com/sukko-dev/sukko/internal/shared/auth"
@@ -69,19 +72,34 @@ func newTopicsTestEnv(t *testing.T, maxTopics int) *topicsTestEnv {
 	}
 
 	validator, privateKey := newTestValidator(t)
+	// Topic writes are operator-only (ADR-0033): adminAuth authenticates as an OPERATOR (a
+	// validated admin JWT), while memberAuth is a tenant token used to prove the role gate rejects
+	// tenant callers. A tenant self-asserted admin is covered by the escalation regression test.
+	adminPub, adminPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate admin keypair: %v", err)
+	}
+	const adminKID = "topics-admin-key"
+	adminRegistry := provauth.NewAdminKeyRegistry()
+	adminRegistry.Refresh([]*auth.KeyInfo{{KeyID: adminKID, Algorithm: "EdDSA", PublicKey: adminPub, IsActive: true}})
+
 	router, err := api.NewRouter(api.RouterConfig{
-		Service:        svc,
-		Logger:         zerolog.Nop(),
-		Validator:      validator,
-		EditionManager: license.NewTestManager(license.Enterprise),
+		Service:          svc,
+		Logger:           zerolog.Nop(),
+		Validator:        validator,
+		AdminValidator:   provauth.NewAdminValidator(adminRegistry),
+		AdminKeyRegistry: adminRegistry,
+		EditionManager:   license.NewTestManager(license.Enterprise),
 	})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
 
 	return &topicsTestEnv{
-		router:     router,
-		adminAuth:  roleAuth(t, privateKey, "admin"),
+		router: router,
+		adminAuth: func(req *http.Request) {
+			req.Header.Set("Authorization", "Bearer "+signAdminJWT(t, adminPriv, adminKID, "admin"))
+		},
 		memberAuth: roleAuth(t, privateKey, "member"),
 		tenant:     tenant,
 		topicStore: topicStore,
@@ -89,7 +107,8 @@ func newTopicsTestEnv(t *testing.T, maxTopics int) *topicsTestEnv {
 	}
 }
 
-// roleAuth returns a request decorator that signs a tenant JWT with the given role.
+// roleAuth returns a request decorator that signs a TENANT JWT with the given role — used to
+// prove the operator-only role gate rejects tenant callers whatever role they self-assert.
 func roleAuth(t *testing.T, privateKey *ecdsa.PrivateKey, role string) func(*http.Request) {
 	t.Helper()
 	return func(req *http.Request) {

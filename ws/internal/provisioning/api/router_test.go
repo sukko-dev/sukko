@@ -194,9 +194,27 @@ func mustNewRouterWithAuth(t *testing.T, cfg api.RouterConfig) (handler http.Han
 	if cfg.EditionManager == nil {
 		cfg.EditionManager = license.NewTestManager(license.Enterprise)
 	}
-	var privateKey *ecdsa.PrivateKey
 	if cfg.Validator == nil {
-		cfg.Validator, privateKey = newTestValidator(t)
+		cfg.Validator, _ = newTestValidator(t)
+	}
+	// Wire the operator control plane so addAuth authenticates as an OPERATOR — a validated admin
+	// JWT (iss:"sukko-admin"), the only credential with admin/system authority over the
+	// provisioning API. Tenants self-manage nothing through it (ADR-0033, §IX), so functional
+	// tests act as the operator managing a tenant, never as a tenant with a self-asserted role.
+	const adminKID = "test-admin-key-1"
+	var adminPriv ed25519.PrivateKey
+	if cfg.AdminValidator == nil {
+		adminPub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("generate admin keypair: %v", err)
+		}
+		adminPriv = priv
+		registry := provauth.NewAdminKeyRegistry()
+		registry.Refresh([]*auth.KeyInfo{{KeyID: adminKID, Algorithm: "EdDSA", PublicKey: adminPub, IsActive: true}})
+		cfg.AdminValidator = provauth.NewAdminValidator(registry)
+		if cfg.AdminKeyRegistry == nil {
+			cfg.AdminKeyRegistry = registry
+		}
 	}
 	router, err := api.NewRouter(cfg)
 	if err != nil {
@@ -204,20 +222,10 @@ func mustNewRouterWithAuth(t *testing.T, cfg api.RouterConfig) (handler http.Han
 	}
 
 	addAuth := func(req *http.Request) {
-		if privateKey == nil {
-			t.Fatal("mustNewRouterWithAuth: no private key available — pass Validator via cfg to use custom auth")
+		if adminPriv == nil {
+			t.Fatal("mustNewRouterWithAuth: no admin key available — pass AdminValidator via cfg to use custom operator auth")
 		}
-		claims := &auth.Claims{
-			RegisteredClaims: jwt.RegisteredClaims{
-				Subject:   "test-admin",
-				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
-				IssuedAt:  jwt.NewNumericDate(time.Now()),
-			},
-			TenantID: "test-tenant",
-			Roles:    []string{"admin"},
-		}
-		token := createTestToken(t, privateKey, claims)
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", "Bearer "+signAdminJWT(t, adminPriv, adminKID, "admin"))
 	}
 	return router, addAuth
 }
@@ -410,14 +418,21 @@ func TestRouter_AuthRequired_ValidToken(t *testing.T) {
 		t.Fatalf("NewMultiTenantValidator failed: %v", err)
 	}
 
+	// Seed the tenant so its owner can read its own routing rules — a route open to the tenant
+	// (not operator-gated), isolating the authentication boundary from the operator-only admin
+	// gates (a valid tenant token authenticates, but cannot reach admin routes; ADR-0033).
+	tenantStore := testutil.NewMockTenantStore()
+	svc := newTestServiceWithStores(tenantStore, testutil.NewMockRoutingRulesStore())
+	_ = tenantStore.Create(context.Background(), testutil.NewTestTenant("test-tenant"))
+
 	router := mustNewRouter(t, api.RouterConfig{
-		Service: newTestService(),
+		Service: svc,
 		Logger:  zerolog.Nop(),
 
 		Validator: validator,
 	})
 
-	// Create a valid token with admin role
+	// A valid tenant token for its own tenant.
 	claims := &auth.Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   "user-123",
@@ -425,13 +440,13 @@ func TestRouter_AuthRequired_ValidToken(t *testing.T) {
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 		TenantID: "test-tenant",
-		Roles:    []string{"admin"},
+		Roles:    []string{"user"},
 	}
 
 	token := createTestToken(t, privateKey, claims)
 
-	// Request with valid token should succeed
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/tenants", nil)
+	// Request with a valid token should authenticate and reach the tenant's own read.
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/tenants/test-tenant/routing-rules", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -570,105 +585,62 @@ func TestRouter_AuthRequired_InvalidToken(t *testing.T) {
 func TestRouter_AuthRequired_RoleRequirement(t *testing.T) {
 	t.Parallel()
 
-	// Create a key registry with a test key
-	registry := auth.NewStaticKeyRegistry()
-	ecPEM, privateKey := generateTestECKey(t)
-
-	keyInfo := &auth.KeyInfo{
-		KeyID:        "test-key-1",
-		TenantID:     "test-tenant",
-		Algorithm:    "ES256",
-		PublicKeyPEM: ecPEM,
-		IsActive:     true,
-	}
-	if err := registry.AddKey(keyInfo); err != nil {
-		t.Fatalf("AddKey failed: %v", err)
-	}
-
-	validator, err := auth.NewMultiTenantValidator(auth.MultiTenantValidatorConfig{
-		KeyRegistry:    registry,
-		TenantResolver: identityTenantResolver{},
-	})
+	// Admin/system authority is operator-only (ADR-0033): a tenant token NEVER passes a role
+	// gate, whatever role it self-asserts; an operator (validated admin JWT) passes only when it
+	// actually holds the required role. Wire both a tenant validator and an operator validator.
+	tenantValidator, tenantKey := newTestValidator(t)
+	adminPub, adminPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("NewMultiTenantValidator failed: %v", err)
+		t.Fatalf("generate admin keypair: %v", err)
 	}
+	const adminKID = "role-req-admin-key"
+	registry := provauth.NewAdminKeyRegistry()
+	registry.Refresh([]*auth.KeyInfo{{KeyID: adminKID, Algorithm: "EdDSA", PublicKey: adminPub, IsActive: true}})
 
 	router := mustNewRouter(t, api.RouterConfig{
-		Service: newTestService(),
-		Logger:  zerolog.Nop(),
-
-		Validator: validator,
+		Service:          newTestService(),
+		Logger:           zerolog.Nop(),
+		Validator:        tenantValidator,
+		AdminValidator:   provauth.NewAdminValidator(registry),
+		AdminKeyRegistry: registry,
 	})
+
+	tenantToken := func(roles ...string) string {
+		return createTestToken(t, tenantKey, &auth.Claims{
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject:   "user-123",
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				IssuedAt:  jwt.NewNumericDate(time.Now()),
+			},
+			TenantID: "test-tenant",
+			Roles:    roles,
+		})
+	}
 
 	tests := []struct {
 		name       string
-		roles      []string
+		token      string
 		path       string
-		method     string
 		wantStatus int
 	}{
-		{
-			name:       "admin can list tenants",
-			roles:      []string{"admin"},
-			path:       "/api/v1/tenants",
-			method:     http.MethodGet,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "system can list tenants",
-			roles:      []string{"system"},
-			path:       "/api/v1/tenants",
-			method:     http.MethodGet,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "user without admin role cannot list tenants",
-			roles:      []string{"user"},
-			path:       "/api/v1/tenants",
-			method:     http.MethodGet,
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:       "system can get active keys",
-			roles:      []string{"system"},
-			path:       "/api/v1/keys/active",
-			method:     http.MethodGet,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "admin can get active keys",
-			roles:      []string{"admin"},
-			path:       "/api/v1/keys/active",
-			method:     http.MethodGet,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "user cannot get active keys",
-			roles:      []string{"user"},
-			path:       "/api/v1/keys/active",
-			method:     http.MethodGet,
-			wantStatus: http.StatusForbidden,
-		},
+		{"operator admin can list tenants", signAdminJWT(t, adminPriv, adminKID, "admin"), "/api/v1/tenants", http.StatusOK},
+		{"operator system can list tenants", signAdminJWT(t, adminPriv, adminKID, "system"), "/api/v1/tenants", http.StatusOK},
+		{"operator holding only a viewer role cannot list tenants", signAdminJWT(t, adminPriv, adminKID, "viewer"), "/api/v1/tenants", http.StatusForbidden},
+		{"tenant self-asserted admin cannot list tenants", tenantToken("admin"), "/api/v1/tenants", http.StatusForbidden},
+		{"tenant self-asserted system cannot list tenants", tenantToken("system"), "/api/v1/tenants", http.StatusForbidden},
+		{"tenant user cannot list tenants", tenantToken("user"), "/api/v1/tenants", http.StatusForbidden},
+		{"operator admin can get active keys", signAdminJWT(t, adminPriv, adminKID, "admin"), "/api/v1/keys/active", http.StatusOK},
+		{"operator system can get active keys", signAdminJWT(t, adminPriv, adminKID, "system"), "/api/v1/keys/active", http.StatusOK},
+		{"tenant self-asserted admin cannot get active keys", tenantToken("admin"), "/api/v1/keys/active", http.StatusForbidden},
+		{"tenant user cannot get active keys", tenantToken("user"), "/api/v1/keys/active", http.StatusForbidden},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			claims := &auth.Claims{
-				RegisteredClaims: jwt.RegisteredClaims{
-					Subject:   "user-123",
-					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
-					IssuedAt:  jwt.NewNumericDate(time.Now()),
-				},
-				TenantID: "test-tenant",
-				Roles:    tt.roles,
-			}
-
-			token := createTestToken(t, privateKey, claims)
-
-			req := httptest.NewRequestWithContext(context.Background(), tt.method, tt.path, nil)
-			req.Header.Set("Authorization", "Bearer "+token)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, tt.path, nil)
+			req.Header.Set("Authorization", "Bearer "+tt.token)
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 
@@ -1169,26 +1141,16 @@ func TestRouter_ChannelRules_PublishFields(t *testing.T) {
 func TestRouter_RoutingRules_RequiresAdminRole(t *testing.T) {
 	t.Parallel()
 
-	registry := auth.NewStaticKeyRegistry()
-	ecPEM, privateKey := generateTestECKey(t)
-	keyInfo := &auth.KeyInfo{
-		KeyID:        "test-key-1",
-		TenantID:     "test-tenant",
-		Algorithm:    "ES256",
-		PublicKeyPEM: ecPEM,
-		IsActive:     true,
-	}
-	if err := registry.AddKey(keyInfo); err != nil {
-		t.Fatalf("AddKey failed: %v", err)
-	}
-
-	validator, err := auth.NewMultiTenantValidator(auth.MultiTenantValidatorConfig{
-		KeyRegistry:    registry,
-		TenantResolver: identityTenantResolver{},
-	})
+	// Routing-rule writes are operator-only (ADR-0033): only an operator (validated admin JWT)
+	// may write, whatever role a tenant self-asserts. Reads stay open to the owning tenant.
+	tenantValidator, tenantKey := newTestValidator(t)
+	adminPub, adminPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("NewMultiTenantValidator failed: %v", err)
+		t.Fatalf("generate admin keypair: %v", err)
 	}
+	const adminKID = "routing-admin-key"
+	registry := provauth.NewAdminKeyRegistry()
+	registry.Refresh([]*auth.KeyInfo{{KeyID: adminKID, Algorithm: "EdDSA", PublicKey: adminPub, IsActive: true}})
 
 	tenantStore := testutil.NewMockTenantStore()
 	routingStore := testutil.NewMockRoutingRulesStore()
@@ -1196,51 +1158,70 @@ func TestRouter_RoutingRules_RequiresAdminRole(t *testing.T) {
 	_ = tenantStore.Create(context.Background(), testutil.NewTestTenant("test-tenant"))
 
 	router := mustNewRouter(t, api.RouterConfig{
-		Service: svc,
-		Logger:  zerolog.Nop(),
-
-		Validator: validator,
+		Service:          svc,
+		Logger:           zerolog.Nop(),
+		Validator:        tenantValidator,
+		AdminValidator:   provauth.NewAdminValidator(registry),
+		AdminKeyRegistry: registry,
 	})
+
+	tenantToken := func(roles ...string) string {
+		return createTestToken(t, tenantKey, &auth.Claims{
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject:   "user-123",
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				IssuedAt:  jwt.NewNumericDate(time.Now()),
+			},
+			TenantID: "test-tenant",
+			Roles:    roles,
+		})
+	}
 
 	tests := []struct {
 		name          string
-		roles         []string
+		token         string
 		method        string
 		wantForbidden bool // true = expect 403, false = expect auth to pass (any non-401/403)
 	}{
 		{
-			name:          "user cannot PUT routing rules",
-			roles:         []string{"user"},
-			method:        http.MethodPut,
-			wantForbidden: true,
-		},
-		{
-			name:          "admin can PUT routing rules",
-			roles:         []string{"admin"},
+			name:          "operator can PUT routing rules",
+			token:         signAdminJWT(t, adminPriv, adminKID, "admin"),
 			method:        http.MethodPut,
 			wantForbidden: false,
 		},
 		{
-			name:          "user cannot POST routing rule",
-			roles:         []string{"user"},
-			method:        http.MethodPost,
-			wantForbidden: true,
-		},
-		{
-			name:          "admin can POST routing rule",
-			roles:         []string{"admin"},
+			name:          "operator can POST routing rule",
+			token:         signAdminJWT(t, adminPriv, adminKID, "admin"),
 			method:        http.MethodPost,
 			wantForbidden: false,
 		},
 		{
-			name:          "user cannot DELETE routing rules",
-			roles:         []string{"user"},
+			name:          "tenant self-asserted admin cannot PUT routing rules",
+			token:         tenantToken("admin"),
+			method:        http.MethodPut,
+			wantForbidden: true,
+		},
+		{
+			name:          "tenant user cannot PUT routing rules",
+			token:         tenantToken("user"),
+			method:        http.MethodPut,
+			wantForbidden: true,
+		},
+		{
+			name:          "tenant self-asserted admin cannot POST routing rule",
+			token:         tenantToken("admin"),
+			method:        http.MethodPost,
+			wantForbidden: true,
+		},
+		{
+			name:          "tenant user cannot DELETE routing rules",
+			token:         tenantToken("user"),
 			method:        http.MethodDelete,
 			wantForbidden: true,
 		},
 		{
-			name:          "user can GET routing rules",
-			roles:         []string{"user"},
+			name:          "tenant user can GET its own routing rules",
+			token:         tenantToken("user"),
 			method:        http.MethodGet,
 			wantForbidden: false,
 		},
@@ -1250,16 +1231,7 @@ func TestRouter_RoutingRules_RequiresAdminRole(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			claims := &auth.Claims{
-				RegisteredClaims: jwt.RegisteredClaims{
-					Subject:   "user-123",
-					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
-					IssuedAt:  jwt.NewNumericDate(time.Now()),
-				},
-				TenantID: "test-tenant",
-				Roles:    tt.roles,
-			}
-			token := createTestToken(t, privateKey, claims)
+			token := tt.token
 
 			var body *bytes.Reader
 			switch tt.method {
@@ -1696,42 +1668,35 @@ func TestRouter_RenameTenant_RequiresAdminRole(t *testing.T) {
 func TestRouter_AdminKeys_RequiresAdminRole(t *testing.T) {
 	t.Parallel()
 
-	// Validator with a known key; sign every test token with that same key so the
-	// router validates them and the assertion turns purely on the role claim.
-	ecPEM, privateKey := generateTestECKey(t)
-	registry := auth.NewStaticKeyRegistry()
-	if err := registry.AddKey(&auth.KeyInfo{
-		KeyID:        "test-key-1",
-		TenantID:     "test-tenant",
-		Algorithm:    "ES256",
-		PublicKeyPEM: ecPEM,
-		IsActive:     true,
-	}); err != nil {
-		t.Fatalf("AddKey: %v", err)
-	}
-	validator, err := auth.NewMultiTenantValidator(auth.MultiTenantValidatorConfig{
-		KeyRegistry:    registry,
-		TenantResolver: identityTenantResolver{},
-	})
+	// Admin-key registration is operator-only: authority comes from the sukko-admin issuer, not
+	// a self-asserted role (§IX, ADR-0033). Wire a tenant validator (for the denial cases) and an
+	// operator validator (for the allowed case).
+	tenantValidator, tenantKey := newTestValidator(t)
+	adminPub, adminPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("NewMultiTenantValidator: %v", err)
+		t.Fatalf("generate admin keypair: %v", err)
 	}
+	const adminKID = "adminkeys-operator"
+	opRegistry := provauth.NewAdminKeyRegistry()
+	opRegistry.Refresh([]*auth.KeyInfo{{KeyID: adminKID, Algorithm: "EdDSA", PublicKey: adminPub, IsActive: true}})
 
-	// Wire the admin-key deps so /admin/keys is mounted. The repository holds a nil
-	// pool, which the denied cases never reach (RequireRole rejects them first); the
-	// allowed case reaches the handler and is rejected at body validation (400) with
-	// the deliberately-invalid key below — proving it passed the gate, no DB needed.
+	// Wire the admin-key deps so /admin/keys is mounted. The repository holds a nil pool, which the
+	// denied cases never reach (RequireRole rejects them first); the allowed case reaches the
+	// handler and is rejected at body validation (400) with the deliberately-invalid key below —
+	// proving it passed the gate, no DB needed. The handler's registry is separate from the
+	// AdminValidator's auth registry; the 400-body path never touches it.
 	router := mustNewRouter(t, api.RouterConfig{
 		Service:          newTestService(),
 		Logger:           zerolog.Nop(),
-		Validator:        validator,
+		Validator:        tenantValidator,
+		AdminValidator:   provauth.NewAdminValidator(opRegistry),
 		AdminKeyRepo:     repository.NewAdminKeyRepository(nil),
 		AdminKeyRegistry: provauth.NewAdminKeyRegistry(),
 		EventBus:         eventbus.New(zerolog.Nop()),
 	})
 
-	signToken := func(roles []string) string {
-		return createTestToken(t, privateKey, &auth.Claims{
+	tenantToken := func(roles ...string) string {
+		return createTestToken(t, tenantKey, &auth.Claims{
 			RegisteredClaims: jwt.RegisteredClaims{
 				Subject:   "subj",
 				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
@@ -1741,24 +1706,30 @@ func TestRouter_AdminKeys_RequiresAdminRole(t *testing.T) {
 			Roles:    roles,
 		})
 	}
-	postKeys := func(auth string) *httptest.ResponseRecorder {
+	postKeys := func(bearer string) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(map[string]string{"name": "x", "algorithm": "Ed25519", "public_key": "x"})
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 			"/api/v1/admin/keys", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		if auth != "" {
-			req.Header.Set("Authorization", "Bearer "+auth)
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
 		}
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		return rec
 	}
 
-	// Tenant-scoped token: denied at the role gate before reaching the handler or DB.
-	// 403 with INSUFFICIENT_ROLE discriminates on cause (role), not merely "denied".
-	if rec := postKeys(signToken([]string{"tenant"})); rec.Code != http.StatusForbidden ||
+	// Tenant token self-asserting admin: denied at the role gate — a tenant-signed role confers no
+	// operator authority (the escalation this fix closes). 403 INSUFFICIENT_ROLE discriminates on
+	// cause, not merely "denied".
+	if rec := postKeys(tenantToken("admin")); rec.Code != http.StatusForbidden ||
 		!bytes.Contains(rec.Body.Bytes(), []byte("INSUFFICIENT_ROLE")) {
-		t.Fatalf("tenant POST /admin/keys = %d, want 403 INSUFFICIENT_ROLE; body: %s", rec.Code, rec.Body.String())
+		t.Fatalf("tenant self-asserted admin POST /admin/keys = %d, want 403 INSUFFICIENT_ROLE; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Plain tenant role: also denied.
+	if rec := postKeys(tenantToken("tenant")); rec.Code != http.StatusForbidden {
+		t.Fatalf("tenant POST /admin/keys = %d, want 403; body: %s", rec.Code, rec.Body.String())
 	}
 
 	// No credentials: unauthenticated (a different cause than role denial).
@@ -1766,10 +1737,10 @@ func TestRouter_AdminKeys_RequiresAdminRole(t *testing.T) {
 		t.Fatalf("no-token POST /admin/keys = %d, want 401; body: %s", rec.Code, rec.Body.String())
 	}
 
-	// Admin-role token: passes the gate and reaches the handler, which rejects the
+	// Operator admin token: passes the gate and reaches the handler, which rejects the
 	// deliberately-invalid key body with 400 — a discriminating "passed the gate" proof.
-	if rec := postKeys(signToken([]string{"admin"})); rec.Code != http.StatusBadRequest {
-		t.Fatalf("admin POST /admin/keys = %d, want 400 (passed the gate; handler rejected the invalid key); body: %s",
+	if rec := postKeys(signAdminJWT(t, adminPriv, adminKID, "admin")); rec.Code != http.StatusBadRequest {
+		t.Fatalf("operator POST /admin/keys = %d, want 400 (passed the gate; handler rejected the invalid key); body: %s",
 			rec.Code, rec.Body.String())
 	}
 }
