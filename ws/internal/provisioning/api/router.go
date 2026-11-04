@@ -362,10 +362,13 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			}
 		})
 
-		// Admin key management — requires admin JWT auth
+		// Admin key management — requires admin/system role (guarded in the group below).
 		if cfg.AdminKeyRepo != nil && cfg.AdminKeyRegistry != nil && cfg.EventBus != nil {
 			adminKeysHandler := NewAdminKeysHandler(cfg.AdminKeyRepo, cfg.AdminKeyRegistry, cfg.EventBus, cfg.Logger)
 			r.Route("/admin/keys", func(r chi.Router) {
+				// Admin/system role required: a registered key is trusted to mint
+				// admin JWTs, so a tenant token MUST NOT reach these handlers (§IX).
+				r.Use(RequireRole("admin", "system"))
 				r.Post("/", adminKeysHandler.Register)
 				r.Get("/", adminKeysHandler.List)
 				r.Delete("/{id}", adminKeysHandler.Revoke)

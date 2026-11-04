@@ -1686,6 +1686,94 @@ func TestRouter_RenameTenant_RequiresAdminRole(t *testing.T) {
 	}
 }
 
+// TestRouter_AdminKeys_RequiresAdminRole pins the authorization boundary on the
+// admin signing-key endpoints. POST /api/v1/admin/keys registers a public key that
+// AdminJWTMiddleware then trusts to mint admin JWTs, so a non-admin principal (a
+// tenant token) MUST be rejected at the role gate before reaching the handler —
+// otherwise any tenant could register its own key and escalate to full admin
+// across every tenant (§IX tenant isolation). The admin-key routes previously
+// mounted with no RequireRole, unlike every sibling admin route.
+func TestRouter_AdminKeys_RequiresAdminRole(t *testing.T) {
+	t.Parallel()
+
+	// Validator with a known key; sign every test token with that same key so the
+	// router validates them and the assertion turns purely on the role claim.
+	ecPEM, privateKey := generateTestECKey(t)
+	registry := auth.NewStaticKeyRegistry()
+	if err := registry.AddKey(&auth.KeyInfo{
+		KeyID:        "test-key-1",
+		TenantID:     "test-tenant",
+		Algorithm:    "ES256",
+		PublicKeyPEM: ecPEM,
+		IsActive:     true,
+	}); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	validator, err := auth.NewMultiTenantValidator(auth.MultiTenantValidatorConfig{
+		KeyRegistry:    registry,
+		TenantResolver: identityTenantResolver{},
+	})
+	if err != nil {
+		t.Fatalf("NewMultiTenantValidator: %v", err)
+	}
+
+	// Wire the admin-key deps so /admin/keys is mounted. The repository holds a nil
+	// pool, which the denied cases never reach (RequireRole rejects them first); the
+	// allowed case reaches the handler and is rejected at body validation (400) with
+	// the deliberately-invalid key below — proving it passed the gate, no DB needed.
+	router := mustNewRouter(t, api.RouterConfig{
+		Service:          newTestService(),
+		Logger:           zerolog.Nop(),
+		Validator:        validator,
+		AdminKeyRepo:     repository.NewAdminKeyRepository(nil),
+		AdminKeyRegistry: provauth.NewAdminKeyRegistry(),
+		EventBus:         eventbus.New(zerolog.Nop()),
+	})
+
+	signToken := func(roles []string) string {
+		return createTestToken(t, privateKey, &auth.Claims{
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject:   "subj",
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				IssuedAt:  jwt.NewNumericDate(time.Now()),
+			},
+			TenantID: "test-tenant",
+			Roles:    roles,
+		})
+	}
+	postKeys := func(auth string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"name": "x", "algorithm": "Ed25519", "public_key": "x"})
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+			"/api/v1/admin/keys", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if auth != "" {
+			req.Header.Set("Authorization", "Bearer "+auth)
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Tenant-scoped token: denied at the role gate before reaching the handler or DB.
+	// 403 with INSUFFICIENT_ROLE discriminates on cause (role), not merely "denied".
+	if rec := postKeys(signToken([]string{"tenant"})); rec.Code != http.StatusForbidden ||
+		!bytes.Contains(rec.Body.Bytes(), []byte("INSUFFICIENT_ROLE")) {
+		t.Fatalf("tenant POST /admin/keys = %d, want 403 INSUFFICIENT_ROLE; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// No credentials: unauthenticated (a different cause than role denial).
+	if rec := postKeys(""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no-token POST /admin/keys = %d, want 401; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Admin-role token: passes the gate and reaches the handler, which rejects the
+	// deliberately-invalid key body with 400 — a discriminating "passed the gate" proof.
+	if rec := postKeys(signToken([]string{"admin"})); rec.Code != http.StatusBadRequest {
+		t.Fatalf("admin POST /admin/keys = %d, want 400 (passed the gate; handler rejected the invalid key); body: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
 // TestIsReservedSlug_CoversAllRouteSegments verifies that all action-endpoint path
 // segments used in the router are in the reserved slug list, so no tenant can shadow them.
 func TestIsReservedSlug_CoversAllRouteSegments(t *testing.T) {
