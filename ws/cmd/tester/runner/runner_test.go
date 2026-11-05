@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
+
+	"github.com/sukko-dev/sukko/cmd/tester/metrics"
 )
 
 func newTestRunner() *Runner {
@@ -105,7 +107,14 @@ func TestRunner_Start_DefaultsFilled(t *testing.T) {
 	r.Wait()
 }
 
-func TestRunner_Start_StatusRunning(t *testing.T) {
+// TestRunner_Start_RegistersInitializedRun checks Start's deterministic contract: it returns a
+// registered run with its Collector initialized. It does NOT assert the live Status: the run
+// executes in a background goroutine that fails fast with no stack, so reading run.Status here
+// both races that goroutine (flake) and is an unsynchronized read concurrent with failRun's
+// locked write (data race under -race). The "a running run snapshots as running" behavior is
+// covered deterministically by TestTestRun_StatusSnapshot. Collector is set once before the
+// goroutine is launched and never reassigned, so reading it is safe.
+func TestRunner_Start_RegistersInitializedRun(t *testing.T) {
 	t.Parallel()
 
 	r := newTestRunner()
@@ -114,11 +123,15 @@ func TestRunner_Start_StatusRunning(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if run.Status != StatusRunning {
-		t.Errorf("Status = %q, want %q", run.Status, StatusRunning)
-	}
 	if run.Collector == nil {
 		t.Error("expected non-nil Collector")
+	}
+	got, err := r.Get("test-status")
+	if err != nil {
+		t.Fatalf("Get after Start: %v", err)
+	}
+	if got != run {
+		t.Error("Get returned a different run than Start")
 	}
 
 	_ = r.Stop("test-status")
@@ -146,25 +159,27 @@ func TestRunner_Get_AfterStart(t *testing.T) {
 	r.Wait()
 }
 
+// TestTestRun_StatusSnapshot exercises the StatusSnapshot method directly on constructed
+// TestRun values. It deliberately does NOT drive a live Runner: a real run executes in a
+// background goroutine that fails fast with no stack to reach, so observing a transient
+// "running" status through Start races that goroutine (the historical flake — "Status =
+// failed, want running"). The method's contract — return the current status and report under
+// the read lock — is fully testable without that race.
 func TestTestRun_StatusSnapshot(t *testing.T) {
 	t.Parallel()
 
-	r := newTestRunner()
-	run, err := r.Start("test-snap", TestConfig{Type: TestSmoke})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
+	// Running: no report yet.
+	running := &TestRun{ID: "snap-running", Status: StatusRunning}
+	if status, report := running.StatusSnapshot(); status != StatusRunning || report != nil {
+		t.Errorf("running snapshot = (%q, %v), want (%q, nil)", status, report, StatusRunning)
 	}
 
-	status, report := run.StatusSnapshot()
-	if status != StatusRunning {
-		t.Errorf("Status = %q, want %q", status, StatusRunning)
+	// Terminal: the final status and its report are returned.
+	report := &metrics.Report{}
+	done := &TestRun{ID: "snap-done", Status: StatusComplete, Report: report}
+	if status, got := done.StatusSnapshot(); status != StatusComplete || got != report {
+		t.Errorf("complete snapshot = (%q, %v), want (%q, the stored report)", status, got, StatusComplete)
 	}
-	if report != nil {
-		t.Error("expected nil report while running")
-	}
-
-	_ = r.Stop("test-snap")
-	r.Wait()
 }
 
 func TestTestType_Constants(t *testing.T) {
