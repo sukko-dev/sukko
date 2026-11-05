@@ -1252,7 +1252,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Edition gate — requires Pro
+          description: "Forbidden — either the edition gate (EDITION_LIMIT, requires Pro) or the authorization gate (INSUFFICIENT_ROLE — revocation is operator-only; a tenant JWT is rejected)"
           content:
             application/json:
               schema:

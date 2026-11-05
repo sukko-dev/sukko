@@ -755,7 +755,10 @@ Validates the token-revocation pipeline end-to-end against a live stack: a revok
 through the provisioning admin API (`POST /api/v1/tenants/{tenant}/tokens/revoke` — served
 ONLY by provisioning, not proxied by the gateway) propagates over the gateway↔provisioning
 revocation gRPC stream and force-disconnects live clients. Requires Pro edition and an admin
-keypair. Before any revoke, a **readiness gate** (`revocation-stream-ready`) polls the gateway
+keypair — token revocation is operator-only (ADR-0033, §IX), so the suite performs every revoke
+as a platform operator (admin JWT); a missing admin provider fails the suite loudly via the
+`revocation-operator-auth` check rather than skipping. Before any revoke, a **readiness gate**
+(`revocation-stream-ready`) polls the gateway
 metric `gateway_token_revocation_stream_state` (via `TESTER_GATEWAY_METRICS_URL`) until the
 stream is connected — the cold-start-ordering guard that stops a revoke being missed before the
 gateway has its snapshot.
