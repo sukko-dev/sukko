@@ -1320,9 +1320,11 @@ func TestHistoryWriter_SubscribeAll_MessagesArrive(t *testing.T) {
 		w.Run()
 	})
 
-	// Wait for the writer to subscribe.
-	time.Sleep(30 * time.Millisecond)
+	client := newTestValkeyClient(t, mr)
+	streamKey := history.HistoryStreamKeyPrefix + opts.env + ":subscribetest:BTC.trade"
 
+	// fanOut waits for the writer's SubscribeAll to register before delivering, so the message
+	// is not dropped on the WriterActive-before-subscribe window (no fixed subscribe sleep needed).
 	bus.fanOut(&broadcast.Message{
 		Subject:  "subscribetest.BTC.trade",
 		TenantID: "subscribetest",
@@ -1331,14 +1333,12 @@ func TestHistoryWriter_SubscribeAll_MessagesArrive(t *testing.T) {
 		Pos:      "0-1",
 	})
 
-	// Wait for relay + flushBatch.
-	time.Sleep(100 * time.Millisecond)
+	// Poll for the relay+flush to land instead of a fixed sleep (racy under CI load).
+	waitForStreamEntry(t, client, streamKey, 2*time.Second)
 	cancel()
 	wg.Wait()
 
 	// Verify the message was written to Valkey.
-	client := newTestValkeyClient(t, mr)
-	streamKey := history.HistoryStreamKeyPrefix + opts.env + ":subscribetest:BTC.trade"
 	entries, err := client.Do(context.Background(),
 		client.B().Xrevrange().Key(streamKey).End("+").Start("-").Count(10).Build(),
 	).AsXRange()
