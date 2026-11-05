@@ -235,7 +235,26 @@ func (b *mockBus) setConverged(v bool) {
 }
 
 // fanOut pushes a broadcast.Message directly to all subscribers (per-tenant and SubscribeAll).
+//
+// It first waits (bounded) for at least one relevant subscriber to register. The writer sets
+// WriterActive=1 inside tryAcquireLock, which runs BEFORE its SubscribeAll call, so a fanOut gated
+// on WriterActive==1 can race an empty subscriber set and be silently dropped by the non-blocking
+// sends below — the historical CI flake (TestHistoryWriter_* seeing fewer entries than written).
+// Waiting for the subscription closes that window for every caller. A genuine no-subscriber case
+// falls through after the deadline and still drops, preserving the bus's delivery semantics.
 func (b *mockBus) fanOut(msg *broadcast.Message) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b.mu.Lock()
+		_, hasTenant := b.tenantSubs[msg.TenantID]
+		ready := hasTenant || len(b.allSubs) > 0
+		b.mu.Unlock()
+		if ready || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+
 	b.mu.Lock()
 	if sub, ok := b.tenantSubs[msg.TenantID]; ok {
 		select {
