@@ -292,15 +292,24 @@ jobs:
                 --cache-from type=gha \
                 --cache-to type=gha,mode=max \
                 --tag "sukko-${svc}:verify-${arch}" ws
-              docker save "sukko-${svc}:verify-${arch}" -o /tmp/img.tar
+              # Inspect the flattened container filesystem (docker export), NOT a docker-save image
+              # tar. Since the runner's buildx started exporting OCI image format, save tars carry
+              # compressed layer blobs that grep cannot read — so grepping the save output began
+              # failing spuriously even though the key is embedded. docker export writes the rootfs
+              # uncompressed, so the embedded fingerprint is greppable regardless of image format
+              # (docker or OCI). docker create unpacks without running the binary, so it is safe for
+              # the cross-arch (arm64-on-amd64) image too.
+              cid="$(docker create "sukko-${svc}:verify-${arch}")"
+              docker export "${cid}" -o /tmp/fs.tar
+              docker rm "${cid}" >/dev/null
               while read -r FP _ || [ -n "$FP" ]; do
                 [ -z "$FP" ] && continue
-                if ! grep -qa "$FP" /tmp/img.tar; then
+                if ! grep -qa "$FP" /tmp/fs.tar; then
                   echo "::error::sukko-${svc} (${arch}) does not embed production fingerprint ${FP}"
                   exit 1
                 fi
               done < "$MANIFEST"
-              rm -f /tmp/img.tar
+              rm -f /tmp/fs.tar
             done
           done
 
