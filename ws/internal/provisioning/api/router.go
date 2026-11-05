@@ -275,9 +275,13 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					})
 				})
 
-				// Audit log — requires Enterprise
+				// Audit log — requires Enterprise; operator-only (ADR-0033, §IX). The trail
+				// records operator actor identity (admin key id + client IP) for actions on the
+				// tenant, so a tenant's own token must not read it. RequireFeature precedes
+				// RequireRole so a non-Enterprise operator gets EDITION_LIMIT, not INSUFFICIENT_ROLE.
 				r.Group(func(r chi.Router) {
 					r.Use(RequireFeature(cfg.EditionManager, license.AuditLogging))
+					r.Use(RequireRole("admin", "system"))
 					r.Get("/audit", h.GetAuditLog)
 				})
 

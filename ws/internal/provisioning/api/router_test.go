@@ -2411,6 +2411,7 @@ func TestRouter_TenantScopedManagement_RequiresOperator(t *testing.T) {
 		{"revoke api key", http.MethodDelete, "/api/v1/tenants/test-tenant/api-keys/some-id", ""},
 		{"update tenant", http.MethodPatch, "/api/v1/tenants/test-tenant", `{"name":"renamed"}`},
 		{"revoke token", http.MethodPost, "/api/v1/tenants/test-tenant/tokens/revoke", `{"sub":"user-123"}`},
+		{"read audit log", http.MethodGet, "/api/v1/tenants/test-tenant/audit", ""},
 	}
 	for _, g := range gated {
 		for _, role := range []string{"admin", "system", "user"} {
