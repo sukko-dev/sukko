@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Sukko Provisioning API
-  version: 1.4.0
+  version: 1.5.0
   description: |
     REST API for managing tenants, JWT signing keys, API keys, routing rules,
     channel rules, and quotas in the Sukko multi-tenant WebSocket platform.
@@ -1108,7 +1108,7 @@ paths:
     get:
       operationId: getAuditLog
       summary: Get audit log
-      description: Returns paginated audit trail for the tenant.
+      description: Returns the paginated audit trail for the tenant. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403; the trail records operator actor identity.
       tags: [Audit]
       security:
         - bearerAuth: []
@@ -1122,6 +1122,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PaginatedAuditEntries"
+        "403":
+          description: Forbidden — tenant JWT rejected; an operator (admin JWT) with admin or system role is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/tenants/{tenantSlug}/test-access:
     parameters:
