@@ -19,7 +19,16 @@ func testProvClient(t *testing.T, baseURL string) *ProvisioningClient {
 	if err != nil {
 		t.Fatalf("NewEphemeralAuthProvider: %v", err)
 	}
-	return NewProvisioningClient(baseURL, provider, zerolog.Nop())
+	c := NewProvisioningClient(baseURL, provider, zerolog.Nop())
+	// Give each test client a dedicated transport with keep-alives off. The production client
+	// uses http.DefaultTransport, whose connection pool is shared process-wide; under these
+	// t.Parallel() tests that pool is reused across many short-lived httptest servers, and when
+	// one server's Close() (via its cleanup) calls CloseIdleConnections on that shared transport,
+	// it breaks another test's in-flight request ("transport connection broken:
+	// CloseIdleConnections called" — a CI-load flake). A private, no-keep-alive transport holds no
+	// idle connections and shares nothing, so the tests are isolated.
+	c.httpClient = &http.Client{Timeout: provisioningTimeout, Transport: &http.Transport{DisableKeepAlives: true}}
+	return c
 }
 
 // requireAdminJWT validates that the request has a well-formed admin JWT.
