@@ -264,6 +264,33 @@ func validateProvisioningRouting(
 		checks = appendReset(ctx, checks, provClient, tenantA, logger)
 	}
 
+	// §IX within-tenant escalation guard (roadmap #23): key and API-key management is operator-only
+	// (ADR-0033) — a tenant token, here one self-asserting admin+system, must be rejected 403
+	// INSUFFICIENT_ROLE on these credential routes, against the real stack. Creating a signing key is
+	// the highest-risk route: a holder could mint arbitrary-subject tokens and bypass its own channel
+	// rules. Edition-independent (these groups carry no RequireFeature), so it runs on every edition
+	// like the routing gates above.
+	if keyMgmtToken, kmErr := setupA.Minter.MintWithClaims(auth.MintOptions{
+		Subject: "keymgmt-tenant-admin-" + uuid.NewString()[:8],
+		Roles:   []string{"admin", "system"},
+	}); kmErr != nil {
+		checks = append(checks, metrics.CheckResult{
+			Name: "keymgmt escalation guard", Status: metrics.CheckStatusFail,
+			Error: fmt.Sprintf("mint tenant-admin token: %v", kmErr),
+		})
+	} else {
+		checks = append(checks, provRoutingCheck("keymgmt escalation guard (create signing key)", func() error {
+			status, _, err := provClient.PostRawWithTokenBody(ctx,
+				"/api/v1/tenants/"+tenantA+"/keys", keyMgmtToken, "create signing key (tenant self-asserted admin)", []byte(`{}`))
+			return expectReject("create signing key (tenant self-asserted admin)", status, err, http.StatusForbidden, errCodeInsufficientRole)
+		}))
+		checks = append(checks, provRoutingCheck("keymgmt escalation guard (create api key)", func() error {
+			status, _, err := provClient.PostRawWithTokenBody(ctx,
+				"/api/v1/tenants/"+tenantA+"/api-keys", keyMgmtToken, "create api key (tenant self-asserted admin)", []byte(`{"name":"esc"}`))
+			return expectReject("create api key (tenant self-asserted admin)", status, err, http.StatusForbidden, errCodeInsufficientRole)
+		}))
+	}
+
 	// --- cross-tenant mismatch (RequireTenant fires before the edition gate → all editions) ---
 	checks = append(checks, checkCrossTenantMismatch(ctx, run, setupA, userTokenA, mintErr, logger))
 

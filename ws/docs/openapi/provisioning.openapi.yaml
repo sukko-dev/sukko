@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Sukko Provisioning API
-  version: 1.3.0
+  version: 1.4.0
   description: |
     REST API for managing tenants, JWT signing keys, API keys, routing rules,
     channel rules, and quotas in the Sukko multi-tenant WebSocket platform.
@@ -146,7 +146,7 @@ paths:
     patch:
       operationId: updateTenant
       summary: Update tenant
-      description: Partial update — only provided fields are changed.
+      description: Partial update — only provided fields are changed. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [Tenants]
       security:
         - bearerAuth: []
@@ -163,6 +163,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Tenant"
+        "403":
+          description: Forbidden — tenant JWT rejected; an operator (admin JWT) with admin or system role is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "400":
           description: "Validation error. Codes: INVALID_REQUEST, SLUG_NOT_PATCHABLE, NAME_INVALID, CONSUMER_TYPE_INVALID"
           content:
@@ -369,7 +375,7 @@ paths:
     post:
       operationId: createKey
       summary: Create JWT signing key
-      description: Registers a public key for JWT signature verification. The gateway uses this to validate JWTs from this tenant's clients.
+      description: Registers a public key for JWT signature verification. The gateway uses this to validate JWTs from this tenant's clients. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [JWT Keys]
       security:
         - bearerAuth: []
@@ -386,6 +392,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TenantKey"
+        "403":
+          description: Forbidden — tenant JWT rejected; an operator (admin JWT) with admin or system role is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "400":
           description: "Validation error. Codes: INVALID_REQUEST, KEY_INVALID"
           content:
@@ -408,6 +420,7 @@ paths:
     get:
       operationId: listKeys
       summary: List JWT signing keys
+      description: Returns a tenant's registered JWT signing keys. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [JWT Keys]
       security:
         - bearerAuth: []
@@ -421,6 +434,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PaginatedKeys"
+        "403":
+          description: Forbidden — tenant JWT rejected; an operator (admin JWT) with admin or system role is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/tenants/{tenantSlug}/keys/{keyID}:
     parameters:
@@ -430,7 +449,7 @@ paths:
     delete:
       operationId: revokeKey
       summary: Revoke JWT signing key
-      description: Revokes a key. JWTs signed with this key will be rejected.
+      description: Revokes a key. JWTs signed with this key will be rejected. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [JWT Keys]
       security:
         - bearerAuth: []
@@ -445,6 +464,12 @@ paths:
                   status:
                     type: string
                     const: revoked
+        "403":
+          description: Forbidden — tenant JWT rejected; an operator (admin JWT) with admin or system role is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Key not found
           content:
@@ -462,6 +487,7 @@ paths:
       description: |
         Creates an API key for WebSocket connections. The key is returned once on creation — store it securely.
         API keys grant public-channel-only access (no publish). Clients can escalate to full JWT access mid-connection.
+        Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [API Keys]
       security:
         - bearerAuth: []
@@ -478,6 +504,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/APIKey"
+        "403":
+          description: Forbidden — tenant JWT rejected; an operator (admin JWT) with admin or system role is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "400":
           description: Validation error
           content:
@@ -488,6 +520,7 @@ paths:
     get:
       operationId: listAPIKeys
       summary: List API keys
+      description: Returns a tenant's API keys. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [API Keys]
       security:
         - bearerAuth: []
@@ -501,6 +534,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PaginatedAPIKeys"
+        "403":
+          description: Forbidden — tenant JWT rejected; an operator (admin JWT) with admin or system role is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/tenants/{tenantSlug}/api-keys/{keyID}:
     parameters:
@@ -510,7 +549,7 @@ paths:
     delete:
       operationId: revokeAPIKey
       summary: Revoke API key
-      description: Revokes an API key. Existing WebSocket connections using this key are not disconnected but new connections will be rejected.
+      description: Revokes an API key. Existing WebSocket connections using this key are not disconnected but new connections will be rejected. Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
       tags: [API Keys]
       security:
         - bearerAuth: []
@@ -525,6 +564,12 @@ paths:
                   status:
                     type: string
                     const: revoked
+        "403":
+          description: Forbidden — tenant JWT rejected; an operator (admin JWT) with admin or system role is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: API key not found
           content:
@@ -1127,6 +1172,7 @@ paths:
         Revoke a specific JWT by `jti` (token ID) or all JWTs issued to a user by `sub` (subject).
         Revocation entries are retained for `PROVISIONING_TOKEN_REVOCATION_MAX_LIFETIME` (default 1h)
         before the background prune loop removes them.
+        Requires an operator (admin JWT, iss sukko-admin) with admin or system role — tenant JWTs are rejected with 403.
 
         **Edition**: Pro (Token Revocation feature gate)
 

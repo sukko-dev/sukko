@@ -253,6 +253,14 @@ func AuthMiddleware(validator *auth.MultiTenantValidator, logger zerolog.Logger)
 			// Add claims and actor to context using shared helpers
 			ctx := auth.WithClaims(r.Context(), claims)
 			ctx = context.WithValue(ctx, ActorContextKey, actor)
+			// Record the tenant user as the audit actor (§IX truthful actor). Without this,
+			// auth.GetActorType falls through to its "system" default and an audited action
+			// performed under a tenant JWT is misattributed to the platform rather than the
+			// tenant user. The bare client IP matches AdminJWTMiddleware (a host:port value
+			// breaks the INET audit column). ActorContextKey (above) and auth.WithActor are
+			// deliberately separate plumbing: the former feeds GetActorFromContext, the latter
+			// the audit log via auth.GetActor / auth.GetActorType.
+			ctx = auth.WithActor(ctx, actor, provisioning.ActorTypeUser, httputil.GetClientIP(r))
 
 			logger.Debug().
 				Str(logging.LogKeyTenantSlug, claims.TenantID).

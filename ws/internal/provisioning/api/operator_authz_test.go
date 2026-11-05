@@ -167,3 +167,49 @@ func TestRouter_SelfAssertedTenantRole_CannotEscalate(t *testing.T) {
 		}
 	}
 }
+
+// TestAuthMiddleware_SetsTenantActorForAudit pins the audit-actor truthfulness fix (§IX):
+// AuthMiddleware must record the authenticated tenant user as the audit actor. Before the
+// fix it never called auth.WithActor, so GetActorType fell through to the "system" default
+// and GetActor to "system" — any audited action under a tenant JWT was attributed to the
+// platform, not the tenant user who performed it. (The route-level RequireRole gates from
+// roadmap #23 now keep tenant tokens out of the audited management handlers; this is the
+// defense-in-depth backstop so attribution is truthful wherever a tenant token is audited.)
+func TestAuthMiddleware_SetsTenantActorForAudit(t *testing.T) {
+	t.Parallel()
+
+	validator, tenantKey := newTestValidator(t)
+	token := createTestToken(t, tenantKey, &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "user-123",
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+		TenantID: "test-tenant",
+		Roles:    []string{"user"},
+	})
+
+	var gotActor, gotType, gotIP string
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		gotActor = auth.GetActor(r.Context())
+		gotType = auth.GetActorType(r.Context())
+		gotIP = auth.GetClientIPFromContext(r.Context())
+	})
+	handler := api.AuthMiddleware(validator, zerolog.Nop())(next)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/tenants/test-tenant", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.RemoteAddr = "172.18.0.9:5555"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if gotType != provisioning.ActorTypeUser {
+		t.Errorf("actor type = %q, want %q (a tenant JWT action must audit as the tenant user, not the \"system\" default — §IX)", gotType, provisioning.ActorTypeUser)
+	}
+	if want := "test-tenant:user-123"; gotActor != want {
+		t.Errorf("actor = %q, want %q", gotActor, want)
+	}
+	if want := "172.18.0.9"; gotIP != want {
+		t.Errorf("actor client IP = %q, want %q (bare IP for the INET audit column)", gotIP, want)
+	}
+}

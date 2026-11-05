@@ -2338,3 +2338,105 @@ func TestCreateKey_DuplicateIsConflict(t *testing.T) {
 		t.Errorf("duplicate POST code = %q, want KEY_ALREADY_EXISTS; body: %s", code, rec.Body.String())
 	}
 }
+
+// TestRouter_TenantScopedManagement_RequiresOperator is the regression guard for the
+// within-tenant privilege-escalation gap (§IX, roadmap #23): key/API-key/lifecycle writes
+// under /tenants/{slug} were gated by RequireTenant only, so a tenant's OWN end-user token
+// could register a signing key (then mint arbitrary-sub tokens and bypass its channel rules),
+// revoke keys (self-DoS), or relabel the tenant. The provisioning API is an operator control
+// plane (ADR-0033): these are operator-only. A tenant token — even one self-asserting
+// admin/system — must be rejected (§IX); an operator must pass the gate.
+//
+// test-access and GET /tenants/{slug} are deliberately NOT gated (read-only tenant
+// self-service that mirrors the already-tenant-open GET /channel-rules); the open cases below
+// guard against over-gating them.
+func TestRouter_TenantScopedManagement_RequiresOperator(t *testing.T) {
+	t.Parallel()
+
+	tenantValidator, tenantKey := newTestValidator(t)
+	tenantStore := testutil.NewMockTenantStore()
+	routingStore := testutil.NewMockRoutingRulesStore()
+	// A channel-rules store so test-access reaches a real 200 (without one, GetChannelRules
+	// returns ErrChannelRulesNotConfigured → 500, which would let the "open" control below pass
+	// vacuously on a 500 rather than prove tenant reachability).
+	svc := newTestServiceWithStores(tenantStore, routingStore, testutil.NewMockChannelRulesStore())
+	_ = tenantStore.Create(context.Background(), testutil.NewTestTenant("test-tenant"))
+
+	// RevocationHandler so /tokens/revoke is mounted and actually reaches RequireRole (a nil
+	// handler would leave the route unregistered → 404, masking the gate).
+	store := revocation.New(zerolog.Nop())
+	t.Cleanup(store.Close)
+	bus := eventbus.New(zerolog.Nop())
+	revHandler := api.NewRevocationHandler(store, bus, time.Hour, 30, 5, zerolog.Nop())
+
+	router, addAuth := mustNewRouterWithAuth(t, api.RouterConfig{
+		Service:           svc,
+		Logger:            zerolog.Nop(),
+		Validator:         tenantValidator,
+		EditionManager:    license.NewTestManager(license.Enterprise),
+		RevocationHandler: revHandler,
+	})
+
+	tenantToken := func(roles ...string) string {
+		return createTestToken(t, tenantKey, &auth.Claims{
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject:   "user-123",
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				IssuedAt:  jwt.NewNumericDate(time.Now()),
+			},
+			TenantID: "test-tenant",
+			Roles:    roles,
+		})
+	}
+
+	send := func(method, path, body, bearer string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewReader([]byte(body)))
+		if bearer == "operator" {
+			addAuth(req)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	gated := []struct{ name, method, path, body string }{
+		{"create signing key", http.MethodPost, "/api/v1/tenants/test-tenant/keys", `{}`},
+		{"list signing keys", http.MethodGet, "/api/v1/tenants/test-tenant/keys", ""},
+		{"revoke signing key", http.MethodDelete, "/api/v1/tenants/test-tenant/keys/some-kid", ""},
+		{"create api key", http.MethodPost, "/api/v1/tenants/test-tenant/api-keys", `{}`},
+		{"list api keys", http.MethodGet, "/api/v1/tenants/test-tenant/api-keys", ""},
+		{"revoke api key", http.MethodDelete, "/api/v1/tenants/test-tenant/api-keys/some-id", ""},
+		{"update tenant", http.MethodPatch, "/api/v1/tenants/test-tenant", `{"name":"renamed"}`},
+		{"revoke token", http.MethodPost, "/api/v1/tenants/test-tenant/tokens/revoke", `{"sub":"user-123"}`},
+	}
+	for _, g := range gated {
+		for _, role := range []string{"admin", "system", "user"} {
+			rec := send(g.method, g.path, g.body, tenantToken(role))
+			// Assert the CODE, not just 403: a bare status could green on a different 403
+			// cause (e.g. TENANT_MISMATCH) if the gate were ever reordered.
+			if rec.Code != http.StatusForbidden || errorCodeOf(t, rec) != "INSUFFICIENT_ROLE" {
+				t.Errorf("%s — tenant %q token: status = %d code = %q, want 403 INSUFFICIENT_ROLE (operator-only; a self-asserted role confers no control-plane authority — §IX, ADR-0033)", g.name, role, rec.Code, errorCodeOf(t, rec))
+			}
+		}
+		// Operator passes the authz gate (handler outcome — 2xx/400/404/409 — is irrelevant;
+		// only 401/403 means the gate rejected it).
+		if rec := send(g.method, g.path, g.body, "operator"); rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+			t.Errorf("%s — operator: status = %d, want the request to pass the authz gate (not 401/403)", g.name, rec.Code)
+		}
+	}
+
+	// Carve-outs: reads that stay tenant-accessible must return 200 for a tenant user token —
+	// asserting 200 (not merely "not 403") so the control cannot pass vacuously on a 500.
+	open := []struct{ name, method, path, body string }{
+		{"test-access (tenant self-service)", http.MethodPost, "/api/v1/tenants/test-tenant/test-access", `{"groups":["g1"]}`},
+		{"get own tenant", http.MethodGet, "/api/v1/tenants/test-tenant", ""},
+	}
+	for _, o := range open {
+		if rec := send(o.method, o.path, o.body, tenantToken("user")); rec.Code != http.StatusOK {
+			t.Errorf("%s — tenant user token: status = %d, want 200 (tenant-accessible, must not be gated by RequireRole)", o.name, rec.Code)
+		}
+	}
+}

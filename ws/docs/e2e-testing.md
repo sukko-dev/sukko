@@ -399,7 +399,7 @@ load/soak/stress are scale tests.
 | 7 | `ratelimit` | Community | no | Per-connection WS publish rate-limit enforcement. Gated into `community-direct` (§2.8) |
 | 8 | `sse` | **Pro** | no | SSE transport validation (SSE stays Pro-gated) |
 | 9 | `rest-publish` | Community | no | REST publish delivery (`/api/v1/publish` is open on all editions, ADR-0009; the SSE receive leg skips below Pro — SSE transport stays Pro-gated) |
-| 10 | `provisioning` | Community | **yes** | Provisioning API CRUD + e2e-unique routing-rules coverage (topic gate, role/tenant isolation incl. the self-asserted-role escalation guard — a tenant token self-signing admin/system is rejected 403, §IX/ADR-0033 — error-code mapping, pagination, normalization) + provisioned-**topics** API coverage (create/list/delete, reserved/invalid/duplicate/not-found/referenced-by-rule, role gate, pagination, quota wall) + rename & test-access coverage (all-editions). Gated into `community-direct`/`pro-kafka`/`pro-direct` (§2.11) |
+| 10 | `provisioning` | Community | **yes** | Provisioning API CRUD + e2e-unique routing-rules coverage (topic gate, role/tenant isolation incl. the self-asserted-role escalation guards — a tenant token self-signing admin/system is rejected 403 on routing writes AND on key/API-key management (keys, api-keys, PATCH tenant, tokens/revoke are operator-only), §IX/ADR-0033 — error-code mapping, pagination, normalization) + provisioned-**topics** API coverage (create/list/delete, reserved/invalid/duplicate/not-found/referenced-by-rule, role gate, pagination, quota wall) + rename & test-access coverage (all-editions). Gated into `community-direct`/`pro-kafka`/`pro-direct` (§2.11) |
 | 11 | `tenant-isolation` | Community | **yes** | Cross-tenant isolation (delivery isolation + active cross-tenant subscribe rejection, §2.12) |
 | 12 | `token-revocation` | **Pro** | **yes** | Token revocation force-disconnect (jti/sub WS + SSE), revoke-endpoint validation, cross-tenant rejection. Gated into `pro-kafka`/`pro-direct` (§2.13) |
 | 13 | `edition-limits` | Community | no | Edition boundary limits |
@@ -634,6 +634,13 @@ mismatch`, `routing delete idempotent`, `routing get pagination`, `routing get l
 HTTP status **and** error `code`, and pair every negative with a verified allowed (2xx) case.
 `routing cross-tenant mismatch` provisions a second tenant B (eagerly cleaned up) and drives an
 A-scoped `user`-role token against B → 403 `TENANT_MISMATCH`.
+
+The suite also carries two **key-management escalation guards** (ADR-0033, §IX): `keymgmt
+escalation guard (create signing key)` and `keymgmt escalation guard (create api key)` drive a
+tenant token self-asserting `admin`+`system` against `POST /keys` and `POST /api-keys` → 403
+`INSUFFICIENT_ROLE`. Key, API-key, `PATCH /tenants/{slug}`, and `tokens/revoke` management is
+operator-only (an admin JWT, `iss: sukko-admin`); a tenant's own token cannot manage its
+credentials. These run on every edition (the groups carry no feature gate).
 
 **Edition reachability**: routing rules are ungated on every edition (`ChannelTopicRouting`,
 ADR-0014), so the whole routing battery RUNS on **Community** exactly as on Pro — there is no
