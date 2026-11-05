@@ -10,7 +10,7 @@ that happen to share digits mean nothing to each other.
 | Train | Examples | Line today |
 | --- | --- | --- |
 | **Platform** (ws-gateway, ws-server, provisioning, push, webhook-worker images + Helm charts) | `v1.0.10` | `1.x` |
-| **Wire contracts** (gateway OpenAPI, provisioning OpenAPI, client AsyncAPI) | OpenAPI `1.2.0`, AsyncAPI `1.4.3` | `1.x`, each independent |
+| **Wire contracts** (gateway OpenAPI, provisioning OpenAPI, client AsyncAPI) | provisioning OpenAPI `1.3.0`, gateway OpenAPI `1.1.0`, AsyncAPI `1.4.3` | `1.x`, each independent |
 | **CLI and SDKs** | CLI `v1.3.0`, `@sukko/sdk` `0.1.x`, sdk-go/sdk-py `v0.1.x` | per package |
 
 ## The wire contracts are the compatibility authority
