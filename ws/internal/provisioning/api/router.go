@@ -199,12 +199,14 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				// Tenant isolation - users can only access their own tenant
 				r.Use(RequireTenant(cfg.Service.GetTenantBySlug, cfg.ProvisioningConfig.SlugRenameTopicHoldPeriod))
 
+				// Reading a tenant's own record stays tenant-accessible; mutating it
+				// (name/consumer_type/metadata) is operator-only (ADR-0033, §IX).
 				r.Get("/", h.GetTenant)
-				r.Patch("/", h.UpdateTenant)
 
 				// Admin-only operations
 				r.Group(func(r chi.Router) {
 					r.Use(RequireRole("admin", "system"))
+					r.Patch("/", h.UpdateTenant)
 					r.Delete("/", h.DeprovisionTenant)
 					r.Post("/rename", h.RenameTenant)
 				})
@@ -217,15 +219,23 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					r.Post("/reactivate", h.ReactivateTenant)
 				})
 
-				// Key management (JWT signing keys)
+				// Key management (JWT signing keys) — operator-only, including reads
+				// (ADR-0033, §IX). Unlike routing-rules/topics/channel-rules, where GET is
+				// open to the tenant, the signing-key and API-key inventory is control-plane
+				// credential material a tenant must not enumerate or mutate; the whole group
+				// requires an operator role, not just the writes. A registered signing key
+				// lets its holder mint arbitrary-subject tokens, so a tenant able to create
+				// one could bypass its own channel rules.
 				r.Route("/keys", func(r chi.Router) {
+					r.Use(RequireRole("admin", "system"))
 					r.Post("/", h.CreateKey)
 					r.Get("/", h.ListKeys)
 					r.Delete("/{keyID}", h.RevokeKey)
 				})
 
-				// API key management
+				// API key management — operator-only, including reads (see /keys above).
 				r.Route("/api-keys", func(r chi.Router) {
+					r.Use(RequireRole("admin", "system"))
 					r.Post("/", h.CreateAPIKey)
 					r.Get("/", h.ListAPIKeys)
 					r.Delete("/{keyID}", h.RevokeAPIKey)
@@ -286,7 +296,11 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				// Token revocation — requires Pro
 				if cfg.RevocationHandler != nil {
 					r.Route("/tokens", func(r chi.Router) {
+						// RequireFeature precedes RequireRole so a Community operator gets
+						// EDITION_LIMIT, not INSUFFICIENT_ROLE. Revocation is operator-only
+						// (ADR-0033, §IX): a tenant must not revoke its own tokens.
 						r.Use(RequireFeature(cfg.EditionManager, license.TokenRevocation))
+						r.Use(RequireRole("admin", "system"))
 						r.Post("/revoke", cfg.RevocationHandler.HandleRevoke)
 					})
 				}

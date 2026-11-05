@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/prometheus/common/expfmt"
+
+	"github.com/sukko-dev/sukko/cmd/tester/auth"
 )
 
 // metricsHTTPClient is a dedicated client for Prometheus scrapes with a bounded timeout.
@@ -52,14 +54,22 @@ const (
 // provisioning admin API — the gateway does not proxy it; the validate suite passes the provisioning
 // base URL (correct). soak/stress still pass the gateway URL, so their revokes hit an unregistered
 // gateway route (404); that pre-existing mis-targeting is tracked in #199.
-func doRevokeOnce(ctx context.Context, client *http.Client, baseURL, token, tenantID string, body []byte) (int, time.Duration, error) {
+// signer, when non-nil, signs the request as a platform operator (admin JWT); otherwise the bearer
+// token string is used. Token revocation is operator-only (ADR-0033, §IX), so the validate suite
+// passes an operator signer for every legitimate revoke and a bearer tenant token only for the
+// cross-tenant denial witness.
+func doRevokeOnce(ctx context.Context, client *http.Client, baseURL, token, tenantID string, body []byte, signer auth.Provider) (int, time.Duration, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		httpURL(baseURL)+"/api/v1/tenants/"+tenantID+"/tokens/revoke",
 		bytes.NewReader(body))
 	if err != nil {
 		return 0, 0, fmt.Errorf("revokeToken: new request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
+	if signer != nil {
+		signer.SignRequest(httpReq)
+	} else {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -89,7 +99,7 @@ func revokeTokenWithClient(ctx context.Context, client *http.Client, baseURL, to
 	if err != nil {
 		return 0, fmt.Errorf("revokeToken: marshal: %w", err)
 	}
-	status, _, err := doRevokeOnce(ctx, client, baseURL, token, tenantID, body)
+	status, _, err := doRevokeOnce(ctx, client, baseURL, token, tenantID, body, nil)
 	return status, err
 }
 
@@ -104,7 +114,33 @@ func revokeToken(ctx context.Context, baseURL, token, tenantID string, req revok
 	}
 	client := &http.Client{Timeout: editionHTTPTimeout}
 	for attempt := 0; ; attempt++ {
-		status, retryAfter, doErr := doRevokeOnce(ctx, client, baseURL, token, tenantID, body)
+		status, retryAfter, doErr := doRevokeOnce(ctx, client, baseURL, token, tenantID, body, nil)
+		if doErr != nil {
+			return 0, doErr
+		}
+		if status != http.StatusTooManyRequests || attempt >= maxRevokeRateLimitRetries {
+			return status, nil
+		}
+		select {
+		case <-time.After(retryAfter):
+		case <-ctx.Done():
+			return status, fmt.Errorf("revokeToken: %w", ctx.Err())
+		}
+	}
+}
+
+// revokeTokenAsOperator is revokeToken signed as a platform operator (admin JWT) via signer, for the
+// legitimate revokes in the validate suite. Token revocation is operator-only (ADR-0033, §IX): a
+// tenant JWT is rejected 403 INSUFFICIENT_ROLE, so every positive and 400-validation revoke must be
+// signed by the operator, exactly as the CLI's admin client does.
+func revokeTokenAsOperator(ctx context.Context, baseURL string, signer auth.Provider, tenantID string, req revokeRequest) (int, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return 0, fmt.Errorf("revokeToken: marshal: %w", err)
+	}
+	client := &http.Client{Timeout: editionHTTPTimeout}
+	for attempt := 0; ; attempt++ {
+		status, retryAfter, doErr := doRevokeOnce(ctx, client, baseURL, "", tenantID, body, signer)
 		if doErr != nil {
 			return 0, doErr
 		}
