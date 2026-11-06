@@ -12,7 +12,7 @@ replicaCount: 2
 
 image:
   repository: sukko-gateway
-  tag: latest
+  tag: ""
   pullPolicy: IfNotPresent
 
 # Deployment identity — drives logging, metrics namespacing.

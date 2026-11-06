@@ -11,7 +11,7 @@ replicaCount: 1
 
 image:
   repository: sukko-server
-  tag: latest
+  tag: ""
   pullPolicy: IfNotPresent
 
 # Deployment identity — drives Kafka topic namespace, consumer group naming.

@@ -25,7 +25,7 @@ replicaCount: 1
 
 image:
   repository: sukko-push
-  tag: latest
+  tag: ""
   pullPolicy: IfNotPresent
 
 # Deployment identity — drives logging, metrics namespacing.
